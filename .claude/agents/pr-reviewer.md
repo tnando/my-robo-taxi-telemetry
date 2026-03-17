@@ -169,7 +169,12 @@ Post a single review comment with:
 [Any domain-specific observations based on the agent labels]
 ```
 
-Then use `gh pr review` to submit the formal review:
-- `gh pr review --approve --body "..."` for APPROVE
-- `gh pr review --request-changes --body "..."` for REQUEST_CHANGES
-- `gh pr review --comment --body "..."` for COMMENT
+**Important:** You MUST end your review comment with a machine-readable verdict tag on its own line. This is used by CI to submit the formal GitHub review. Use exactly one of:
+
+```
+<!-- VERDICT: APPROVE -->
+<!-- VERDICT: REQUEST_CHANGES -->
+<!-- VERDICT: COMMENT -->
+```
+
+Do NOT attempt to run `gh pr review` yourself — the CI pipeline handles that.
