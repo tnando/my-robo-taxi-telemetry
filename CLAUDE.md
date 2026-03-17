@@ -206,9 +206,53 @@ A mock Tesla vehicle that sends fake protobuf telemetry to the server. For testi
 go run ./cmd/simulator --server wss://localhost:443 --vehicles 5 --scenario highway-drive
 ```
 
+## Branching Strategy (Enforced)
+
+When picking up a GitHub issue, ALWAYS create a feature branch from the latest `main`:
+
+```bash
+git checkout main && git pull origin main && git checkout -b <issue-number>-<short-kebab-description>
+```
+
+Branch name format: `<issue-number>-<short-kebab-description>` derived from the issue title.
+
+Examples:
+- Issue #2 "Implement in-process event bus" → `2-event-bus`
+- Issue #9 "Telemetry receiver: mTLS WebSocket server" → `9-telemetry-receiver`
+- Issue #17 "Security audit" → `17-security-audit`
+
 ## Commit Strategy
 
-Same as MyRoboTaxi — imperative mood, one logical unit per commit. Pre-commit:
+### Commit Message Format
+
+Every commit message MUST include the issue number and use imperative mood:
+
+```
+#<issue> <Imperative verb> <what changed>
+```
+
+Examples:
+- `#2 Add Bus interface and channel-based implementation`
+- `#2 Add backpressure handling with drop-oldest policy`
+- `#2 Add comprehensive tests for concurrent pub/sub`
+- `#9 Implement mTLS WebSocket server for Tesla vehicles`
+- `#9 Add protobuf decoding with field validation`
+
+### Commit Cadence
+
+Commit in reasonable chunks throughout development — NOT one giant commit at the end. A good commit represents one logical unit:
+
+1. **Interface/type definitions** — commit after defining the types for a module
+2. **Core implementation** — commit the main logic (one commit per major function/method is fine)
+3. **Tests** — commit tests alongside or immediately after the code they test
+4. **Wiring/integration** — commit when connecting a module to the event bus or other components
+5. **Configuration** — commit config changes separately from logic changes
+
+A typical issue should have **3-8 commits**, not 1 and not 20.
+
+### Pre-Commit Checks
+
+Run before every commit:
 1. `go vet ./...`
 2. `golangci-lint run`
 3. `go test ./...`
