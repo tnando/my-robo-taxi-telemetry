@@ -1,0 +1,226 @@
+# Robo-Taxi Telemetry — Project Rules
+
+## Project Overview
+
+A Go service that receives real-time vehicle telemetry from Tesla's Fleet Telemetry system and broadcasts it to connected clients via WebSocket. This is the real-time backend for the MyRoboTaxi web app.
+
+### System Context
+
+```
+Tesla Vehicle ──mTLS/WSS──► Telemetry Server ──WSS──► Browser (MyRoboTaxi Next.js app)
+                                    │
+                                    ├──► PostgreSQL (Supabase — shared with Next.js app)
+                                    └──► Prometheus metrics
+```
+
+- **Upstream:** Tesla vehicles push protobuf telemetry over mTLS WebSocket
+- **Downstream:** Browser clients connect via authenticated WebSocket
+- **Persistence:** Shared Supabase PostgreSQL database (same as MyRoboTaxi Next.js app)
+- **Partner app:** `my-robo-taxi` Next.js app at `../my-robo-taxi/`
+
+## Architecture Rules (Enforced)
+
+### Project Structure
+
+```
+cmd/
+  telemetry-server/       → Binary entrypoint only. No business logic.
+  testbench/              → TUI dashboard for live telemetry inspection (dev tool)
+  simulator/              → Mock Tesla vehicle that sends fake telemetry (dev tool)
+internal/
+  telemetry/              → Tesla Fleet Telemetry receiver (mTLS, protobuf decode)
+  events/                 → Event bus, domain event types, dispatcher
+  drives/                 → Drive detection state machine
+  ws/                     → WebSocket server for browser clients
+  store/                  → Database persistence (pgx, repository pattern)
+  auth/                   → Client authentication, token validation
+  simulator/              → Mock vehicle telemetry generator (shared with cmd/simulator)
+  testutil/               → Test helpers, fixtures, shared test infrastructure
+pkg/
+  sdk/                    → Public SDK interfaces (abstract, pluggable for web/mobile)
+configs/                  → Configuration files (JSON, YAML)
+deployments/              → Docker, Kubernetes manifests, Helm charts
+scripts/                  → Cert generation, deployment helpers
+tests/
+  unit/                   → Unit tests (mirroring internal/ structure)
+  integration/            → Integration tests (real DB, real WebSocket)
+  load/                   → Load/stress tests
+docs/                     → Architecture, data flow, deployment guides
+```
+
+### The Dependency Rule
+
+Dependencies flow inward. Outer layers depend on inner layers, never the reverse.
+
+```
+cmd/ → internal/* → pkg/sdk (interfaces only)
+```
+
+- `internal/telemetry/` receives raw Tesla data, emits domain events
+- `internal/events/` defines the event bus — all modules publish/subscribe through it
+- `internal/drives/` subscribes to telemetry events, manages drive state machine
+- `internal/ws/` subscribes to telemetry events, pushes to browser clients
+- `internal/store/` subscribes to events, persists to PostgreSQL
+- `internal/auth/` is a dependency of `internal/ws/`, never the reverse
+- `pkg/sdk/` contains ONLY interfaces and types — no implementation
+
+### Go Conventions
+
+- **Go 1.23+** — use standard library `log/slog` for structured logging
+- **No frameworks.** Standard library `net/http`, `nhooyr.io/websocket`, `pgx` for Postgres
+- **Interfaces at consumer site.** Define interfaces where they're used, not where they're implemented
+- **Accept interfaces, return structs.** Functions accept interface parameters, return concrete types
+- **Error wrapping.** Use `fmt.Errorf("context: %w", err)` — never swallow errors
+- **Context propagation.** Every function that does I/O takes `context.Context` as first parameter
+- **Table-driven tests.** All test files use table-driven pattern with `t.Run` subtests
+- **No globals.** All dependencies injected via constructor. No `init()` functions except for flag parsing in `main`
+- **Struct embedding for composition, not inheritance**
+- **Channel-based concurrency.** Prefer channels over mutexes where possible. Use `errgroup` for managed goroutines
+
+### File Rules
+
+- **Max 300 lines per file** (excluding tests). Decompose if exceeded
+- **One type per file** for major domain types
+- **Test files adjacent** to source: `foo.go` → `foo_test.go`
+- **No `_test` package suffix** for unit tests (test internal behavior). Use `_test` suffix only for integration tests that test the public API
+- **Named returns only when they improve readability** (e.g., multiple return values of same type)
+
+### Error Handling
+
+- Define domain error types in each package: `var ErrVehicleNotFound = errors.New("vehicle not found")`
+- Wrap with context at every level: `fmt.Errorf("store.GetVehicle(%s): %w", id, err)`
+- Never log AND return an error — do one or the other
+- Use `errors.Is()` and `errors.As()` for error checking, never string comparison
+
+### Configuration
+
+- Use a single `Config` struct loaded from environment variables + optional JSON file
+- Environment variables for secrets (TLS certs, DB password, auth keys)
+- JSON config file for operational settings (intervals, thresholds, field mappings)
+- Validate all config at startup — fail fast on invalid config
+
+### Observability
+
+- **Structured logging:** `log/slog` with JSON handler in production, text handler in development
+- **Metrics:** Prometheus via `prometheus/client_golang` — every major operation has a counter/histogram
+- **Health checks:** `/healthz` (liveness) and `/readyz` (readiness, checks DB + telemetry connection)
+- **Tracing:** OpenTelemetry spans on every inbound/outbound request (defer to Phase 2 if needed)
+
+### Security (Non-Negotiable)
+
+- **mTLS termination** at the service level for Tesla vehicle connections
+- **All client WebSocket connections authenticated** via JWT or session token
+- **No Tesla credentials in logs** — redact VINs in production logs (show last 4 only)
+- **Input validation on all protobuf fields** — malformed data must not crash the server
+- **Rate limiting** on client WebSocket connections
+- **TLS for all external connections** (DB, client WS)
+- **Secrets via environment variables only** — never in config files or code
+
+### Database
+
+- **Same Supabase PostgreSQL** as MyRoboTaxi Next.js app
+- **pgx driver** (not database/sql) for connection pooling and PostgreSQL-specific features
+- **Repository pattern:** one repository struct per domain aggregate (VehicleRepo, DriveRepo)
+- **Migrations:** `golang-migrate/migrate` — numbered SQL files in `internal/store/migrations/`
+- **Never modify tables owned by the Next.js app's Prisma schema.** Only read from them or add new tables
+
+### Testing
+
+- **Unit tests:** Every package, table-driven, mock external dependencies via interfaces
+- **Integration tests:** Real PostgreSQL (testcontainers-go), real WebSocket connections
+- **Load tests:** k6 or custom Go benchmarks for WebSocket throughput
+- **Test coverage target:** 80%+ on `internal/` packages
+- **No test pollution:** Each test creates its own data, cleans up after itself
+
+## GitHub Issues and Agent Routing
+
+Every GitHub issue is labeled with the **agent** that should implement it. When picking up an issue, Claude MUST use the specified agent(s) for implementation.
+
+### Agent Labels
+
+Issues carry one or more `agent:<name>` labels that map directly to `.claude/agents/<name>.md`:
+
+| Label | Agent File | When to Use |
+|-------|-----------|-------------|
+| `agent:architect` | `architect.md` | System design, interface definitions, module boundaries |
+| `agent:go-engineer` | `go-engineer.md` | Go implementation, code writing, refactoring |
+| `agent:tesla-telemetry` | `tesla-telemetry.md` | Tesla protocol, protobuf, mTLS, cert management |
+| `agent:event-system` | `event-system.md` | Event bus, pub/sub, domain events, concurrency |
+| `agent:websocket-sdk` | `websocket-sdk.md` | Client WebSocket server, SDK interfaces |
+| `agent:security` | `security.md` | Security review, threat modeling, auth, validation |
+| `agent:testing` | `testing.md` | Test writing, test infrastructure, coverage |
+| `agent:infra` | `infra.md` | Docker, CI/CD, deployment, monitoring |
+| `agent:frontend-integration` | `frontend-integration.md` | MyRoboTaxi frontend compatibility |
+
+### Workflow
+
+1. Read the issue title, body, labels, and milestone
+2. Identify `agent:*` labels — these are your implementation agents
+3. If multiple agents are labeled, use the **architect** first to plan, then delegate to specialists
+4. Reference the milestone for phase context and priority
+5. Follow the branching strategy below
+
+### Milestones
+
+| Milestone | Phase | Focus |
+|-----------|-------|-------|
+| `Phase 1: Foundation` | Weeks 1-2 | Project scaffolding, event bus, config, DB layer, CI/CD |
+| `Phase 2: Tesla Integration` | Weeks 2-3 | mTLS, protobuf, telemetry receiver, Fleet API |
+| `Phase 3: Real-Time Processing` | Weeks 3-4 | Drive detection, geocoding, persistence, batch writes |
+| `Phase 4: Client WebSocket` | Weeks 4-5 | Auth, broadcast, SDK interfaces, frontend integration |
+| `Phase 5: Hardening` | Weeks 5-6 | Load tests, security audit, monitoring, deployment |
+| `Phase 6: Test Bench` | Ongoing | TUI dashboard, simulator, developer tooling |
+
+## Dev Tools (cmd/testbench, cmd/simulator)
+
+### Test Bench (`cmd/testbench/`)
+
+A terminal UI (TUI) app built with `charmbracelet/bubbletea` for inspecting live telemetry from your real Tesla during development.
+
+**Features:**
+- Connect to the telemetry server as a WebSocket client
+- Display real-time vehicle data: speed, location, charge, heading, gear
+- Show event bus activity: telemetry events, drive events, connectivity
+- Drive detection status: idle/driving, current drive stats, route points
+- Raw telemetry inspector: see every protobuf field as it arrives
+- Connection health: latency, message rate, drops
+
+**Usage:**
+```bash
+go run ./cmd/testbench --server ws://localhost:8080 --token <auth-token>
+```
+
+### Simulator (`cmd/simulator/`)
+
+A mock Tesla vehicle that sends fake protobuf telemetry to the server. For testing the full pipeline without a real car.
+
+**Features:**
+- Simulate one or many vehicles with configurable VINs
+- Replay recorded drive routes (from JSON files)
+- Generate random drives with realistic speed/location patterns
+- Simulate edge cases: sleep/wake, connectivity drops, rapid gear changes
+- Configurable telemetry interval and field selection
+
+**Usage:**
+```bash
+go run ./cmd/simulator --server wss://localhost:443 --vehicles 5 --scenario highway-drive
+```
+
+## Commit Strategy
+
+Same as MyRoboTaxi — imperative mood, one logical unit per commit. Pre-commit:
+1. `go vet ./...`
+2. `golangci-lint run`
+3. `go test ./...`
+4. `go build ./cmd/...`
+
+## What NOT to Do
+
+- Do NOT import from `my-robo-taxi` — communicate only via shared database and documented contracts
+- Do NOT use gorilla/websocket (unmaintained) — use `nhooyr.io/websocket`
+- Do NOT use ORMs — use raw SQL with pgx
+- Do NOT store telemetry credentials in config files
+- Do NOT log full VINs in production
+- Do NOT use `panic()` except in truly unrecoverable situations (main initialization)
+- Do NOT use `any` / `interface{}` when a concrete type or narrower interface works
+- Do NOT create God structs — if a struct has more than 7 fields, consider decomposition
