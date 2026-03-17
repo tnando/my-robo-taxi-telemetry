@@ -65,7 +65,6 @@ jobs:
           github_token: ${{ secrets.GH_PAT }}
           use_sticky_comment: true
           track_progress: true
-          show_full_output: true
           claude_args: >-
             --agent pr-reviewer
             --max-turns 15
