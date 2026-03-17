@@ -89,7 +89,7 @@ jobs:
 
       - name: Submit review verdict
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.BOT_PAT }}
         run: |
           PR_NUM="${{ github.event.pull_request.number }}"
 
