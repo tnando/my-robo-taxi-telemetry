@@ -9,10 +9,10 @@ on:
     types: [created]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   issues: write
-  id-token: write  # Required for GitHub OIDC token exchange (posting comments)
+  id-token: write
 
 concurrency:
   # One review at a time per PR to avoid duplicate comments
@@ -32,12 +32,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Full history for accurate diff
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
 
       - name: Collect PR context
         id: context
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           PR_NUM="${{ github.event.pull_request.number }}"
 
@@ -60,7 +61,9 @@ jobs:
       - name: Run Claude review
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          use_sticky_comment: true
           track_progress: true
           show_full_output: true
           claude_args: >-
@@ -98,9 +101,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
 
       - uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
           claude_args: >-
             --max-turns 10
