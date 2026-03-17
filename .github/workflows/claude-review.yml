@@ -87,9 +87,10 @@ jobs:
 
             Focus on real issues, not style nits. If the code is clean and well-tested, approve it.
 
-      - name: Submit review verdict
+      - name: Extract review verdict
+        id: verdict
         env:
-          GH_TOKEN: ${{ secrets.BOT_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           PR_NUM="${{ github.event.pull_request.number }}"
 
@@ -105,7 +106,17 @@ jobs:
             VERDICT="COMMENT"
           fi
 
-          echo "Verdict: $VERDICT"
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Extracted verdict: $VERDICT"
+
+      - name: Submit review verdict
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PAT }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          VERDICT="${{ steps.verdict.outputs.verdict }}"
+
+          echo "Submitting review: $VERDICT"
 
           case "$VERDICT" in
             APPROVE)
