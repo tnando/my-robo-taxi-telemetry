@@ -66,7 +66,7 @@ func (r *VehicleRepo) UpdateTelemetry(ctx context.Context, vin string, update Ve
 	}
 
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("VehicleRepo.UpdateTelemetry(%s): %w", vin, ErrVehicleNotFound)
+		return fmt.Errorf("VehicleRepo.UpdateTelemetry(%s): %w", redactVIN(vin), ErrVehicleNotFound)
 	}
 	return nil
 }
@@ -82,7 +82,7 @@ func (r *VehicleRepo) UpdateStatus(ctx context.Context, vin string, status Vehic
 	}
 
 	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("VehicleRepo.UpdateStatus(%s): %w", vin, ErrVehicleNotFound)
+		return fmt.Errorf("VehicleRepo.UpdateStatus(%s): %w", redactVIN(vin), ErrVehicleNotFound)
 	}
 	return nil
 }
