@@ -35,9 +35,12 @@ func NewEvent(payload EventPayload) Event {
 }
 
 // generateID produces a random hex-encoded identifier suitable for event IDs.
-// It uses crypto/rand for uniqueness without requiring external dependencies.
+// It uses crypto/rand for uniqueness. If crypto/rand fails (should never happen
+// on modern OS), it falls back to a timestamp-based ID.
 func generateID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x%x", time.Now().UnixNano(), time.Now().UnixMicro())
+	}
 	return fmt.Sprintf("%x", b)
 }

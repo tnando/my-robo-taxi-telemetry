@@ -26,18 +26,6 @@ type ChannelBus struct {
 	wg     sync.WaitGroup // tracks subscriber goroutines
 }
 
-type topicEntry struct {
-	mu          sync.RWMutex
-	subscribers map[string]*subscriber
-}
-
-type subscriber struct {
-	id      string
-	ch      chan Event
-	handler Handler
-	done    chan struct{} // closed to signal the goroutine to stop
-}
-
 var _ Bus = (*ChannelBus)(nil)
 
 // NewChannelBus creates a ChannelBus. Zero-value fields in cfg are replaced
@@ -58,7 +46,8 @@ func NewChannelBus(cfg BusConfig, metrics BusMetrics, logger *slog.Logger) *Chan
 }
 
 // Publish sends an event to all subscribers of its topic. It never blocks
-// on slow subscribers. Returns ErrBusClosed after shutdown.
+// on slow subscribers. Returns ErrBusClosed after shutdown. The context
+// can cancel a publish mid-fan-out.
 func (b *ChannelBus) Publish(ctx context.Context, event Event) error {
 	if b.closed.Load() {
 		return ErrBusClosed
@@ -68,7 +57,7 @@ func (b *ChannelBus) Publish(ctx context.Context, event Event) error {
 	topic := event.Topic
 	b.metrics.IncPublished(topic)
 
-	te := b.getTopicEntry(topic)
+	te := getTopicEntry(b.topics, &b.mu, topic)
 	if te == nil {
 		b.metrics.ObservePublishDuration(topic, time.Since(start).Seconds())
 		return nil
@@ -82,38 +71,17 @@ func (b *ChannelBus) Publish(ctx context.Context, event Event) error {
 	te.mu.RUnlock()
 
 	for _, s := range subs {
-		b.sendToSubscriber(s, event)
+		select {
+		case <-ctx.Done():
+			b.metrics.ObservePublishDuration(topic, time.Since(start).Seconds())
+			return fmt.Errorf("publish(%s): %w", topic, ctx.Err())
+		default:
+		}
+		sendToSubscriber(s, event, b.metrics, b.logger)
 	}
 
 	b.metrics.ObservePublishDuration(topic, time.Since(start).Seconds())
 	return nil
-}
-
-// sendToSubscriber performs a non-blocking send. If the buffer is full, it
-// evicts the oldest event (drop-oldest backpressure) before retrying.
-func (b *ChannelBus) sendToSubscriber(s *subscriber, event Event) {
-	select {
-	case s.ch <- event:
-		return
-	default:
-	}
-	// Buffer full — drop oldest.
-	select {
-	case <-s.ch:
-		b.metrics.IncDropped(event.Topic)
-		b.logger.Warn("dropped oldest event for slow subscriber",
-			slog.String("subscriber_id", s.id),
-			slog.String("topic", string(event.Topic)),
-			slog.String("event_id", event.ID),
-		)
-	default:
-		// drained concurrently
-	}
-	select {
-	case s.ch <- event:
-	default:
-		b.metrics.IncDropped(event.Topic)
-	}
 }
 
 // Subscribe registers a handler for a topic. The handler runs in a
@@ -130,7 +98,7 @@ func (b *ChannelBus) Subscribe(topic Topic, handler Handler) (Subscription, erro
 		done:    make(chan struct{}),
 	}
 
-	te := b.getOrCreateTopicEntry(topic)
+	te := getOrCreateTopicEntry(b.topics, &b.mu, topic)
 	te.mu.Lock()
 	te.subscribers[sub.id] = sub
 	count := len(te.subscribers)
@@ -144,49 +112,14 @@ func (b *ChannelBus) Subscribe(topic Topic, handler Handler) (Subscription, erro
 	)
 
 	b.wg.Add(1)
-	go b.deliverLoop(sub, topic)
+	go deliverLoop(sub, topic, b.metrics, &b.wg)
 
 	return Subscription{ID: sub.id, Topic: topic}, nil
 }
 
-// deliverLoop reads events from the subscriber's channel and calls the
-// handler until the done channel is closed, then drains remaining events.
-func (b *ChannelBus) deliverLoop(s *subscriber, topic Topic) {
-	defer b.wg.Done()
-	for {
-		select {
-		case <-s.done:
-			b.drainSubscriber(s, topic)
-			return
-		case event, ok := <-s.ch:
-			if !ok {
-				return
-			}
-			s.handler(event)
-			b.metrics.IncDelivered(topic)
-		}
-	}
-}
-
-// drainSubscriber delivers remaining buffered events after the stop signal.
-func (b *ChannelBus) drainSubscriber(s *subscriber, topic Topic) {
-	for {
-		select {
-		case event, ok := <-s.ch:
-			if !ok {
-				return
-			}
-			s.handler(event)
-			b.metrics.IncDelivered(topic)
-		default:
-			return
-		}
-	}
-}
-
 // Unsubscribe removes a subscription and stops its delivery goroutine.
 func (b *ChannelBus) Unsubscribe(sub Subscription) error {
-	te := b.getTopicEntry(sub.Topic)
+	te := getTopicEntry(b.topics, &b.mu, sub.Topic)
 	if te == nil {
 		return fmt.Errorf("unsubscribe(%s): %w", sub.ID, ErrSubscriptionNotFound)
 	}
@@ -252,28 +185,4 @@ func (b *ChannelBus) Close(ctx context.Context) error {
 		b.logger.Warn("event bus drain timed out, some events may have been lost")
 	}
 	return nil
-}
-
-func (b *ChannelBus) getTopicEntry(topic Topic) *topicEntry {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return b.topics[topic]
-}
-
-func (b *ChannelBus) getOrCreateTopicEntry(topic Topic) *topicEntry {
-	b.mu.RLock()
-	te, ok := b.topics[topic]
-	b.mu.RUnlock()
-	if ok {
-		return te
-	}
-
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if te, ok = b.topics[topic]; ok {
-		return te
-	}
-	te = &topicEntry{subscribers: make(map[string]*subscriber)}
-	b.topics[topic] = te
-	return te
 }
