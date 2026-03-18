@@ -81,7 +81,7 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 	vin, err := extractVIN(req)
 	if err != nil {
 		r.logger.Warn("rejected connection: no valid client certificate",
-			slog.String("error", err.Error()),
+			slog.Any("error", err),
 			slog.String("remote_addr", req.RemoteAddr),
 		)
 		http.Error(w, "client certificate required", http.StatusUnauthorized)
@@ -101,9 +101,13 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// If this VIN already has a connection, close the old one.
+	// Decrement count here since the old cleanupConnection won't
+	// (CompareAndDelete will fail because we already removed the entry).
 	if old, loaded := r.connections.LoadAndDelete(vin); loaded {
-		vc := old.(*vehicleConn)
-		vc.cancel()
+		oldVC := old.(*vehicleConn)
+		oldVC.cancel()
+		r.connCount.Add(-1)
+		r.rateLimiter.remove(vin)
 		r.logger.Info("replaced existing connection",
 			slog.String("vin", redacted),
 		)
@@ -116,7 +120,7 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		r.logger.Error("websocket accept failed",
 			slog.String("vin", redacted),
-			slog.String("error", err.Error()),
+			slog.Any("error", err),
 		)
 		return
 	}
@@ -159,7 +163,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			if !isNormalClose(err) {
 				r.logger.Warn("read error",
 					slog.String("vin", redacted),
-					slog.String("error", err.Error()),
+					slog.Any("error", err),
 				)
 			}
 			return
@@ -180,7 +184,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 			r.metrics.IncDecodeErrors(redacted)
 			r.logger.Warn("decode failed",
 				slog.String("vin", redacted),
-				slog.String("error", err.Error()),
+				slog.Any("error", err),
 			)
 			continue
 		}
@@ -204,7 +208,7 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 		if err := r.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
 			r.logger.Error("publish telemetry event failed",
 				slog.String("vin", redacted),
-				slog.String("error", err.Error()),
+				slog.Any("error", err),
 			)
 			return
 		}
@@ -217,9 +221,12 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 // from the map, publishes a disconnect event, and releases rate-limiter state.
 func (r *Receiver) cleanupConnection(vc *vehicleConn) {
 	vc.cancel()
-	r.connections.Delete(vc.vin)
-	r.connCount.Add(-1)
-	r.metrics.SetConnectedVehicles(int(r.connCount.Load()))
+	// Only remove from the map if this is still the active connection for
+	// this VIN. A reconnecting vehicle may have already replaced the entry.
+	if r.connections.CompareAndDelete(vc.vin, vc) {
+		r.connCount.Add(-1)
+		r.metrics.SetConnectedVehicles(int(r.connCount.Load()))
+	}
 	r.rateLimiter.remove(vc.vin)
 
 	redacted := redactVIN(vc.vin)
@@ -246,7 +253,7 @@ func (r *Receiver) publishConnectivity(ctx context.Context, vin string, status e
 		r.logger.Error("publish connectivity event failed",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("status", connectivityStatusString(status)),
-			slog.String("error", err.Error()),
+			slog.Any("error", err),
 		)
 	}
 }
