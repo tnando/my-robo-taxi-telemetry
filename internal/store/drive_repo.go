@@ -14,11 +14,11 @@ import (
 // DriveRepo manages drive records in the Prisma-owned "Drive" table.
 type DriveRepo struct {
 	pool    *pgxpool.Pool
-	metrics StoreMetrics
+	metrics Metrics
 }
 
 // NewDriveRepo creates a DriveRepo backed by the given connection pool.
-func NewDriveRepo(pool *pgxpool.Pool, metrics StoreMetrics) *DriveRepo {
+func NewDriveRepo(pool *pgxpool.Pool, metrics Metrics) *DriveRepo {
 	return &DriveRepo{pool: pool, metrics: metrics}
 }
 

@@ -61,14 +61,6 @@ const queryDriveByID = `SELECT "id", "vehicleId", "date", "startTime", "endTime"
 FROM "Drive"
 WHERE "id" = $1`
 
-// telemetryColumn maps a VehicleUpdate field to its quoted SQL column name.
-// Only these hardcoded column names are ever used in the dynamic UPDATE
-// builder -- no user input is accepted as a column name.
-type telemetryColumn struct {
-	name string
-	arg  any
-}
-
 // buildTelemetryUpdate constructs a dynamic UPDATE statement for
 // VehicleUpdate, including only columns whose values are non-nil.
 // Returns the query string, the argument slice, and whether any fields

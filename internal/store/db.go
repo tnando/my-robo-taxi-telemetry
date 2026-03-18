@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -17,22 +18,22 @@ import (
 type DB struct {
 	pool    *pgxpool.Pool
 	logger  *slog.Logger
-	metrics StoreMetrics
+	metrics Metrics
 }
 
 // NewDB connects to PostgreSQL, validates the connection, and returns a DB.
 // It fails fast if the database is unreachable at startup.
-func NewDB(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger, metrics StoreMetrics) (*DB, error) {
+func NewDB(ctx context.Context, cfg config.DatabaseConfig, logger *slog.Logger, metrics Metrics) (*DB, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("store.NewDB: parse config: %w", err)
 	}
 
-	if cfg.MaxConns > 0 {
-		poolCfg.MaxConns = int32(cfg.MaxConns)
+	if cfg.MaxConns > 0 && cfg.MaxConns <= math.MaxInt32 {
+		poolCfg.MaxConns = int32(cfg.MaxConns) // #nosec G115 -- bounds checked above
 	}
-	if cfg.MinConns > 0 {
-		poolCfg.MinConns = int32(cfg.MinConns)
+	if cfg.MinConns > 0 && cfg.MinConns <= math.MaxInt32 {
+		poolCfg.MinConns = int32(cfg.MinConns) // #nosec G115 -- bounds checked above
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
@@ -77,7 +78,7 @@ func (db *DB) Pool() *pgxpool.Pool {
 }
 
 // CollectPoolStats reads the current pool statistics and reports them
-// via the StoreMetrics interface. Call this periodically from a ticker.
+// via the Metrics interface. Call this periodically from a ticker.
 func (db *DB) CollectPoolStats() {
 	stat := db.pool.Stat()
 	db.metrics.SetPoolStats(stat.AcquiredConns(), stat.IdleConns(), stat.TotalConns())

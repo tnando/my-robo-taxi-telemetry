@@ -15,11 +15,11 @@ import (
 // the Next.js app's responsibility.
 type VehicleRepo struct {
 	pool    *pgxpool.Pool
-	metrics StoreMetrics
+	metrics Metrics
 }
 
 // NewVehicleRepo creates a VehicleRepo backed by the given connection pool.
-func NewVehicleRepo(pool *pgxpool.Pool, metrics StoreMetrics) *VehicleRepo {
+func NewVehicleRepo(pool *pgxpool.Pool, metrics Metrics) *VehicleRepo {
 	return &VehicleRepo{pool: pool, metrics: metrics}
 }
 
@@ -104,7 +104,7 @@ func (r *VehicleRepo) scanVehicle(ctx context.Context, query string, arg any) (V
 		return Vehicle{}, ErrVehicleNotFound
 	}
 	if err != nil {
-		return Vehicle{}, err
+		return Vehicle{}, fmt.Errorf("scan vehicle: %w", err)
 	}
 
 	v.Status = VehicleStatus(status)

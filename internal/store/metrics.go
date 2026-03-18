@@ -1,8 +1,8 @@
 package store
 
-// StoreMetrics collects database operation metrics. Implementations must
+// Metrics collects database operation metrics. Implementations must
 // be safe for concurrent use by multiple goroutines.
-type StoreMetrics interface {
+type Metrics interface {
 	// ObserveQueryDuration records the time taken for a database query.
 	// Operation names follow the pattern "entity.method", e.g.,
 	// "vehicle.get_by_vin", "drive.create".
