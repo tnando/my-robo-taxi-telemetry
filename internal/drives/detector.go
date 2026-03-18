@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/config"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -31,6 +32,10 @@ type Detector struct {
 	// reads vastly outnumber writes (every telemetry tick is a read;
 	// new vehicle connections are rare writes).
 	states sync.Map // map[string]*vehicleState
+
+	// activeCount tracks the number of vehicles currently driving.
+	// Updated atomically on drive start/end to avoid iterating all states.
+	activeCount atomic.Int32
 
 	// sub is the telemetry subscription used by Stop to unsubscribe.
 	sub events.Subscription

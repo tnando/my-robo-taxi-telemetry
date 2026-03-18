@@ -60,7 +60,8 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 		)
 		d.metrics.IncMicroDriveDiscarded()
 		resetToIdle(state)
-		d.updateActiveVehicleGauge()
+		d.activeCount.Add(-1)
+		d.metrics.SetActiveVehicles(int(d.activeCount.Load()))
 		return
 	}
 
@@ -78,7 +79,8 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 	driveID := drive.id
 	endedAt := drive.lastTimestamp
 	resetToIdle(state)
-	d.updateActiveVehicleGauge()
+	d.activeCount.Add(-1)
+	d.metrics.SetActiveVehicles(int(d.activeCount.Load()))
 
 	// Publish DriveEndedEvent.
 	evt := events.NewEvent(events.DriveEndedEvent{
@@ -108,23 +110,6 @@ func (d *Detector) publishDriveUpdated(vin, driveID string, rp events.RoutePoint
 			slog.String("error", err.Error()),
 		)
 	}
-}
-
-// updateActiveVehicleGauge counts vehicles currently in StatusDriving and
-// updates the metrics gauge.
-func (d *Detector) updateActiveVehicleGauge() {
-	var count int
-	d.states.Range(func(_, value any) bool {
-		vs := value.(*vehicleState)
-		// Note: we do NOT lock here because this is a best-effort gauge
-		// read and the caller already holds the current vehicle's lock.
-		// Reading status is safe on its own (single-word read).
-		if vs.status == StatusDriving {
-			count++
-		}
-		return true
-	})
-	d.metrics.SetActiveVehicles(count)
 }
 
 // generateDriveID produces a random hex identifier for a new drive.

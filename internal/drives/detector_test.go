@@ -114,6 +114,7 @@ func subscribeTopic(t *testing.T, bus events.Bus, topic events.Topic) <-chan eve
 	if err != nil {
 		t.Fatalf("failed to subscribe to %s: %v", topic, err)
 	}
+	// Subscriptions are cleaned up when bus.Close() is called in the test teardown.
 	return ch
 }
 
@@ -238,8 +239,7 @@ func TestDetector_DebounceCancellation(t *testing.T) {
 	// Shift to P -- starts debounce.
 	publishTelemetry(t, bus, telemetryEvent("VIN003", now.Add(time.Second), driveFields("P", 0, 33.09, -96.82)))
 
-	// Wait a bit (less than debounce), then shift back to D -- cancels debounce.
-	time.Sleep(50 * time.Millisecond)
+	// Shift back to D immediately -- cancels debounce before it fires.
 	publishTelemetry(t, bus, telemetryEvent("VIN003", now.Add(2*time.Second), driveFields("D", 25.0, 33.10, -96.83)))
 
 	// The debounce period passes -- drive should NOT have ended.

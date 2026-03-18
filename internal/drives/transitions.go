@@ -142,7 +142,8 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 	state.drive = drive
 
 	d.metrics.IncDriveStarted()
-	d.updateActiveVehicleGauge()
+	d.activeCount.Add(1)
+	d.metrics.SetActiveVehicles(int(d.activeCount.Load()))
 
 	d.logger.Info("drive started",
 		slog.String("vin", redactVIN(vin)),
