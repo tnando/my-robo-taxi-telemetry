@@ -226,8 +226,8 @@ func (r *Receiver) cleanupConnection(vc *vehicleConn) {
 	if r.connections.CompareAndDelete(vc.vin, vc) {
 		r.connCount.Add(-1)
 		r.metrics.SetConnectedVehicles(int(r.connCount.Load()))
+		r.rateLimiter.remove(vc.vin)
 	}
-	r.rateLimiter.remove(vc.vin)
 
 	redacted := redactVIN(vc.vin)
 	r.logger.Info("vehicle disconnected",
@@ -252,7 +252,7 @@ func (r *Receiver) publishConnectivity(ctx context.Context, vin string, status e
 	if err := r.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
 		r.logger.Error("publish connectivity event failed",
 			slog.String("vin", redactVIN(vin)),
-			slog.String("status", connectivityStatusString(status)),
+			slog.String("status", status.String()),
 			slog.Any("error", err),
 		)
 	}

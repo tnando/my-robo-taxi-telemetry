@@ -1,6 +1,10 @@
 package telemetry
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"errors"
+
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 // ReceiverMetrics collects telemetry receiver operational metrics.
 // Implementations must be safe for concurrent use.
@@ -89,13 +93,23 @@ func NewPrometheusReceiverMetrics(reg prometheus.Registerer) *PrometheusReceiver
 		}),
 	}
 
-	reg.MustRegister(
+	collectors := []prometheus.Collector{
 		m.messagesReceived,
 		m.decodeErrors,
 		m.rateLimited,
 		m.connectedVehicles,
 		m.messageLatency,
-	)
+	}
+	for _, c := range collectors {
+		if err := reg.Register(c); err != nil {
+			// If already registered (e.g., in tests), use the existing collector.
+			var are prometheus.AlreadyRegisteredError
+			if errors.As(err, &are) {
+				continue
+			}
+			panic(err) // unexpected registration error
+		}
+	}
 	return m
 }
 

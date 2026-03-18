@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-
-	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 )
 
 // vehicleConn tracks the state of a single vehicle WebSocket connection.
@@ -30,19 +28,6 @@ func isNormalClose(err error) bool {
 			closeErr.Code == websocket.StatusGoingAway
 	}
 	return false
-}
-
-// connectivityStatusString returns a human-readable string for a
-// ConnectivityStatus value.
-func connectivityStatusString(s events.ConnectivityStatus) string {
-	switch s {
-	case events.StatusConnected:
-		return "connected"
-	case events.StatusDisconnected:
-		return "disconnected"
-	default:
-		return "unknown"
-	}
 }
 
 // deadlineFromCtx extracts the deadline from ctx, defaulting to 10 seconds
