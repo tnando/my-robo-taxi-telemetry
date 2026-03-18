@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,10 +19,9 @@ import (
 type CertMonitor struct {
 	expiryGauge   *prometheus.GaugeVec
 	daysGauge     *prometheus.GaugeVec
-	certPaths     map[string]string // label → file path
+	certPaths     map[string]string // label → file path (immutable after construction)
 	checkInterval time.Duration
 	logger        *slog.Logger
-	mu            sync.RWMutex
 }
 
 // CertMonitorConfig holds configuration for the certificate monitor.
@@ -85,11 +83,7 @@ func (m *CertMonitor) Run(ctx context.Context) {
 
 // checkAll reads all configured certificate files and updates metrics.
 func (m *CertMonitor) checkAll() {
-	m.mu.RLock()
-	paths := m.certPaths
-	m.mu.RUnlock()
-
-	for label, path := range paths {
+	for label, path := range m.certPaths {
 		expiry, err := readCertExpiry(path)
 		if err != nil {
 			m.logger.Warn("failed to read certificate expiry",

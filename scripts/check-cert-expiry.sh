@@ -102,8 +102,11 @@ check_cert() {
         EXIT_CODE=2
     fi
 
-    # Store result for JSON output.
-    RESULTS+=("{\"file\":\"$cert_file\",\"label\":\"$label\",\"subject\":\"$subject\",\"expires\":\"$not_after_str\",\"days_remaining\":$days_remaining,\"status\":\"$status\"}")
+    # Store result for JSON output (use jq to safely escape values).
+    RESULTS+=("$(jq -n --arg file "$cert_file" --arg label "$label" \
+        --arg subject "$subject" --arg expires "$not_after_str" \
+        --argjson days "$days_remaining" --arg status "$status" \
+        '{file:$file, label:$label, subject:$subject, expires:$expires, days_remaining:$days, status:$status}')")
 
     # Human-readable output.
     if [[ "$JSON_OUTPUT" != "true" ]]; then

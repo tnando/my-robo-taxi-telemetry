@@ -34,6 +34,11 @@ FORCE=false
 CLIENT_ONLY=false
 DOMAIN=""
 
+# ─── Temp file cleanup ─────────────────────────────────────────────────
+TEMP_FILES=()
+cleanup() { rm -f "${TEMP_FILES[@]}"; }
+trap cleanup EXIT
+
 # ─── Helpers ───────────────────────────────────────────────────────────
 
 usage() {
@@ -203,7 +208,7 @@ generate_server_cert() {
     # Create a temporary config for SAN support.
     local tmp_conf
     tmp_conf="$(mktemp)"
-    trap "rm -f '$tmp_conf'" EXIT
+    TEMP_FILES+=("$tmp_conf")
 
     cat > "$tmp_conf" <<EOF
 [req]
@@ -250,7 +255,7 @@ generate_client_cert() {
     # Self-sign a client cert with a test VIN in the CN.
     local tmp_conf
     tmp_conf="$(mktemp)"
-    trap "rm -f '$tmp_conf'" EXIT
+    TEMP_FILES+=("$tmp_conf")
 
     cat > "$tmp_conf" <<EOF
 [req]
