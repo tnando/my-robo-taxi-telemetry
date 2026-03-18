@@ -127,7 +127,7 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 
 	conn.SetReadLimit(maxMessageSize)
 
-	connCtx, connCancel := context.WithCancel(req.Context()) //nolint:gosec // cancel stored in vehicleConn, called in cleanupConnection
+	connCtx, connCancel := context.WithCancel(req.Context()) //nolint:gosec // #nosec G118 -- cancel stored in vehicleConn.cancel, called in cleanupConnection
 	vc := &vehicleConn{
 		vin:       vin,
 		conn:      conn,
