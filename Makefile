@@ -11,7 +11,7 @@ LDFLAGS     := -s -w \
                -X main.commit=$(COMMIT) \
                -X main.date=$(DATE)
 
-.PHONY: build test lint vet run clean help
+.PHONY: build test lint vet run clean proto help
 
 ## build: Compile the telemetry-server binary
 build:
@@ -33,6 +33,10 @@ vet:
 ## run: Build and run the server
 run: build
 	$(BIN_DIR)/$(BINARY)
+
+## proto: Generate Go types from Tesla protobuf definitions
+proto:
+	./scripts/generate-proto.sh
 
 ## clean: Remove build artifacts
 clean:
