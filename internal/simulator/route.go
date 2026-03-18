@@ -14,12 +14,6 @@ const (
 	radiansToDegrees = 180.0 / math.Pi
 )
 
-// Waypoint is a geographic coordinate on a simulated route.
-type Waypoint struct {
-	Latitude  float64
-	Longitude float64
-}
-
 // advancePosition computes the new lat/lng after traveling at the given speed
 // (mph) and heading (degrees, 0=north) for the given interval (seconds).
 // Uses the spherical-Earth approximation, which is accurate enough for

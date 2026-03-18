@@ -47,7 +47,9 @@ func (v *Vehicle) Run(ctx context.Context, serverURL string, tlsConfig *tls.Conf
 		return fmt.Errorf("vehicle.Run(vin=%s): %w", v.vin, err)
 	}
 
-	_ = conn.Close(websocket.StatusNormalClosure, "scenario complete")
+	if err := conn.Close(websocket.StatusNormalClosure, "scenario complete"); err != nil {
+		v.logger.Warn("close error", slog.Any("error", err))
+	}
 	v.logger.Info("scenario complete")
 	return nil
 }
@@ -63,7 +65,7 @@ func (v *Vehicle) dial(ctx context.Context, serverURL string, tlsConfig *tls.Con
 	if resp != nil {
 		v.logger.Debug("dial response", slog.Int("status", resp.StatusCode))
 		if resp.Body != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close() // #nosec G104 -- best-effort cleanup of HTTP response body
 		}
 	}
 	if err != nil {
