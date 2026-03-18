@@ -2,7 +2,6 @@ package telemetry
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -47,14 +46,6 @@ type Receiver struct {
 
 	connections sync.Map // VIN -> *vehicleConn
 	connCount   atomic.Int32
-}
-
-// vehicleConn tracks the state of a single vehicle WebSocket connection.
-type vehicleConn struct {
-	vin       string
-	conn      *websocket.Conn
-	connected time.Time
-	cancel    context.CancelFunc
 }
 
 // NewReceiver creates a Receiver. The bus is used to publish telemetry
@@ -296,40 +287,4 @@ func (r *Receiver) Shutdown(ctx context.Context) {
 // ConnectedVehicles returns the number of currently connected vehicles.
 func (r *Receiver) ConnectedVehicles() int {
 	return int(r.connCount.Load())
-}
-
-// isNormalClose reports whether the error represents a normal WebSocket
-// closure (client disconnecting cleanly or context cancelled).
-func isNormalClose(err error) bool {
-	if errors.Is(err, context.Canceled) {
-		return true
-	}
-	var closeErr websocket.CloseError
-	if errors.As(err, &closeErr) {
-		return closeErr.Code == websocket.StatusNormalClosure ||
-			closeErr.Code == websocket.StatusGoingAway
-	}
-	return false
-}
-
-// connectivityStatusString returns a human-readable string for a
-// ConnectivityStatus value.
-func connectivityStatusString(s events.ConnectivityStatus) string {
-	switch s {
-	case events.StatusConnected:
-		return "connected"
-	case events.StatusDisconnected:
-		return "disconnected"
-	default:
-		return "unknown"
-	}
-}
-
-// deadlineFromCtx extracts the deadline from ctx, defaulting to 10 seconds
-// from now if none is set.
-func deadlineFromCtx(ctx context.Context) time.Time {
-	if d, ok := ctx.Deadline(); ok {
-		return d
-	}
-	return time.Now().Add(10 * time.Second)
 }
