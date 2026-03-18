@@ -97,7 +97,7 @@ func TestChannelBus_PublishSubscribe(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			bus := testBus(16)
-			defer bus.Close(context.Background())
+			t.Cleanup(func() { bus.Close(context.Background()) })
 
 			received := make(chan Event, 1)
 			_, err := bus.Subscribe(tt.topic, func(e Event) {
@@ -129,7 +129,7 @@ func TestChannelBus_PublishSubscribe(t *testing.T) {
 
 func TestChannelBus_FanOut(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	const numSubscribers = 5
 	var received [numSubscribers]chan Event
@@ -163,7 +163,7 @@ func TestChannelBus_FanOut(t *testing.T) {
 
 func TestChannelBus_TopicIsolation(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	telemetryReceived := make(chan Event, 1)
 	driveReceived := make(chan Event, 1)
@@ -207,7 +207,7 @@ func TestChannelBus_TopicIsolation(t *testing.T) {
 
 func TestChannelBus_Unsubscribe(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	var count atomic.Int64
 
@@ -240,15 +240,13 @@ func TestChannelBus_Unsubscribe(t *testing.T) {
 		t.Fatalf("unsubscribe: %v", err)
 	}
 
-	// Give the goroutine time to stop.
-	time.Sleep(50 * time.Millisecond)
-
 	// Publish another event — should NOT be delivered.
 	event2 := NewEvent(testPayload{Value: "after-unsub"})
 	if err := bus.Publish(context.Background(), event2); err != nil {
 		t.Fatalf("publish after unsub: %v", err)
 	}
 
+	// Brief wait to confirm no delivery (negative assertion — no channel to poll).
 	time.Sleep(100 * time.Millisecond)
 
 	if got := count.Load(); got != 1 {
@@ -258,7 +256,7 @@ func TestChannelBus_Unsubscribe(t *testing.T) {
 
 func TestChannelBus_UnsubscribeNotFound(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	err := bus.Unsubscribe(Subscription{ID: "nonexistent", Topic: TopicVehicleTelemetry})
 	if err == nil {
@@ -269,15 +267,20 @@ func TestChannelBus_UnsubscribeNotFound(t *testing.T) {
 func TestChannelBus_Backpressure_DropOldest(t *testing.T) {
 	const bufSize = 4
 	bus := testBus(bufSize)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	// Use a channel that blocks the handler to simulate a slow subscriber.
 	// The handler will not consume events until we signal it.
 	gate := make(chan struct{})
+	ready := make(chan struct{}, 1)
 	var deliveredEvents []Event
 	var mu sync.Mutex
 
 	_, err := bus.Subscribe(TopicVehicleTelemetry, func(e Event) {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
 		<-gate // block until test signals
 		mu.Lock()
 		deliveredEvents = append(deliveredEvents, e)
@@ -287,23 +290,26 @@ func TestChannelBus_Backpressure_DropOldest(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// Give subscriber goroutine time to start and block on gate.
-	time.Sleep(50 * time.Millisecond)
-
-	// Publish more events than the buffer can hold.
-	// The first event will be consumed by the goroutine (blocking on gate).
-	// Events 2..bufSize+1 will fill the buffer.
-	// Event bufSize+2 will trigger drop-oldest.
+	// Publish the first event and wait for the handler to pick it up.
 	totalEvents := bufSize + 3
 	events := make([]Event, totalEvents)
-	for i := range totalEvents {
+	events[0] = NewEvent(testPayload{Value: string(rune('A'))})
+	if err := bus.Publish(context.Background(), events[0]); err != nil {
+		t.Fatalf("publish[0]: %v", err)
+	}
+
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handler to pick up first event")
+	}
+
+	// Now the goroutine is blocked on gate. Remaining events fill the buffer
+	// and trigger drop-oldest.
+	for i := 1; i < totalEvents; i++ {
 		events[i] = NewEvent(testPayload{Value: string(rune('A' + i))})
 		if err := bus.Publish(context.Background(), events[i]); err != nil {
 			t.Fatalf("publish[%d]: %v", i, err)
-		}
-		// Small delay so the first event is picked up by the goroutine.
-		if i == 0 {
-			time.Sleep(20 * time.Millisecond)
 		}
 	}
 
@@ -357,7 +363,7 @@ func TestChannelBus_SlowSubscriberDoesNotBlockFast(t *testing.T) {
 	// still complete without blocking — proving slow subs don't block
 	// fast ones.
 	bus := testBus(256)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	// Slow subscriber: blocks forever until test cleanup.
 	slowGate := make(chan struct{})
@@ -483,7 +489,7 @@ func TestChannelBus_GracefulShutdownDrains(t *testing.T) {
 
 func TestChannelBus_ConcurrentPublishSubscribe(t *testing.T) {
 	bus := testBus(256)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	var totalDelivered atomic.Int64
 
@@ -544,7 +550,7 @@ func TestChannelBus_ConcurrentPublishSubscribe(t *testing.T) {
 
 func TestChannelBus_EventOrdering(t *testing.T) {
 	bus := testBus(256)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	const n = 100
 	received := make(chan Event, n)
@@ -582,7 +588,7 @@ func TestChannelBus_EventOrdering(t *testing.T) {
 
 func TestChannelBus_PublishToTopicWithNoSubscribers(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	// Publishing to a topic with no subscribers should not error.
 	event := NewEvent(testPayload{Value: "no-subscribers"})
@@ -593,7 +599,7 @@ func TestChannelBus_PublishToTopicWithNoSubscribers(t *testing.T) {
 
 func TestChannelBus_MultipleTopics(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	telemetry := make(chan Event, 1)
 	drive := make(chan Event, 1)
@@ -689,7 +695,7 @@ func TestDefaultBusConfig(t *testing.T) {
 
 func TestNewChannelBus_DefaultsZeroConfig(t *testing.T) {
 	bus := NewChannelBus(BusConfig{}, NoopBusMetrics{}, testLogger())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	if bus.cfg.BufferSize != 256 {
 		t.Errorf("BufferSize: got %d, want 256", bus.cfg.BufferSize)
@@ -704,30 +710,41 @@ func TestChannelBus_MetricsCalledOnDrop(t *testing.T) {
 	metrics := &countingMetrics{}
 	cfg := BusConfig{BufferSize: bufSize, DrainTimeout: 2 * time.Second}
 	bus := NewChannelBus(cfg, metrics, testLogger())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	// Subscribe with a handler that blocks forever.
 	gate := make(chan struct{})
 	defer close(gate)
+	ready := make(chan struct{}, 1)
 
 	_, err := bus.Subscribe(TopicVehicleTelemetry, func(e Event) {
+		select {
+		case ready <- struct{}{}:
+		default:
+		}
 		<-gate
 	})
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// Let goroutine pick up first event and block.
-	time.Sleep(20 * time.Millisecond)
+	// Publish the first event and wait for the handler to pick it up.
+	firstEvent := NewEvent(testPayload{Value: "A"})
+	if err := bus.Publish(context.Background(), firstEvent); err != nil {
+		t.Fatalf("publish[0]: %v", err)
+	}
 
-	// Fill the buffer and overflow.
-	for i := range bufSize + 3 {
+	select {
+	case <-ready:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for handler to pick up first event")
+	}
+
+	// Now the goroutine is blocked on gate. Fill the buffer and overflow.
+	for i := 1; i < bufSize+3; i++ {
 		event := NewEvent(testPayload{Value: string(rune('A' + i))})
 		if err := bus.Publish(context.Background(), event); err != nil {
 			t.Fatalf("publish[%d]: %v", i, err)
-		}
-		if i == 0 {
-			time.Sleep(20 * time.Millisecond) // let goroutine consume first event
 		}
 	}
 
@@ -740,7 +757,7 @@ func TestChannelBus_MetricsCalledOnDrop(t *testing.T) {
 
 func TestChannelBus_UnsubscribeTopicNeverSubscribed(t *testing.T) {
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	// Unsubscribe from a topic that has never had any subscribers. This
 	// exercises the nil topicEntry path in Unsubscribe (line 190-191).
@@ -757,7 +774,7 @@ func TestChannelBus_MetricsPublishAndDelivery(t *testing.T) {
 	metrics := &countingMetrics{}
 	cfg := BusConfig{BufferSize: 16, DrainTimeout: 2 * time.Second}
 	bus := NewChannelBus(cfg, metrics, testLogger())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	var delivered atomic.Int64
 	_, err := bus.Subscribe(TopicVehicleTelemetry, func(e Event) {
@@ -801,7 +818,7 @@ func TestChannelBus_MetricsSubscriberCount(t *testing.T) {
 	metrics := &countingMetrics{}
 	cfg := BusConfig{BufferSize: 16, DrainTimeout: 2 * time.Second}
 	bus := NewChannelBus(cfg, metrics, testLogger())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	sub1, err := bus.Subscribe(TopicVehicleTelemetry, func(e Event) {})
 	if err != nil {
@@ -878,7 +895,7 @@ func TestChannelBus_CloseWithDrainTimeout(t *testing.T) {
 func TestChannelBus_NewChannelBus_NegativeConfig(t *testing.T) {
 	// Negative values in config should be replaced with defaults.
 	bus := NewChannelBus(BusConfig{BufferSize: -1, DrainTimeout: -1}, NoopBusMetrics{}, testLogger())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	if bus.cfg.BufferSize != 256 {
 		t.Errorf("BufferSize: got %d, want 256 (default)", bus.cfg.BufferSize)
@@ -892,7 +909,7 @@ func TestChannelBus_ConcurrentSubscribeUnsubscribe(t *testing.T) {
 	// Stress test that concurrent subscribe/unsubscribe operations are
 	// race-free. The race detector will catch issues here.
 	bus := testBus(16)
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { bus.Close(context.Background()) })
 
 	const goroutines = 20
 	const opsPerGoroutine = 50
@@ -1051,7 +1068,7 @@ func ptr[T any](v T) *T { return &v }
 
 func BenchmarkPublish_10Subscribers(b *testing.B) {
 	bus := testBus(1024)
-	defer bus.Close(context.Background())
+	b.Cleanup(func() { bus.Close(context.Background()) })
 
 	for range 10 {
 		_, err := bus.Subscribe(TopicVehicleTelemetry, func(e Event) {
@@ -1076,7 +1093,7 @@ func BenchmarkPublish_10Subscribers(b *testing.B) {
 
 func BenchmarkPublish_NoSubscribers(b *testing.B) {
 	bus := testBus(256)
-	defer bus.Close(context.Background())
+	b.Cleanup(func() { bus.Close(context.Background()) })
 
 	event := NewEvent(testPayload{Value: "bench"})
 
