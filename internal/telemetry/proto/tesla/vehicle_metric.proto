@@ -1,0 +1,22 @@
+// Vendored from github.com/teslamotors/fleet-telemetry/protos/vehicle_metric.proto
+// Source: https://github.com/teslamotors/fleet-telemetry
+
+syntax = "proto3";
+
+package telemetry.vehicle_metrics;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla";
+
+message VehicleMetrics {
+  repeated Metric metrics = 1;
+  google.protobuf.Timestamp created_at = 2;
+  string vin = 3;
+}
+
+message Metric {
+  string name = 1;
+  map<string, string> tags = 2;
+  double value = 3;
+}

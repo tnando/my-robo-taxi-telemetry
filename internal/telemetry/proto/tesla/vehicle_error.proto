@@ -1,0 +1,23 @@
+// Vendored from github.com/teslamotors/fleet-telemetry/protos/vehicle_error.proto
+// Source: https://github.com/teslamotors/fleet-telemetry
+
+syntax = "proto3";
+
+package telemetry.vehicle_error;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/tnando/my-robo-taxi-telemetry/internal/telemetry/proto/tesla";
+
+message VehicleErrors {
+  repeated VehicleError errors = 1;
+  google.protobuf.Timestamp created_at = 2;
+  string vin = 3;
+}
+
+message VehicleError {
+  google.protobuf.Timestamp created_at = 1;
+  string name = 2;
+  map<string, string> tags = 3;
+  string body = 4;
+}
