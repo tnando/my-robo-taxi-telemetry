@@ -110,7 +110,7 @@ jobs:
           retention-days: 7
 
   security:
-    name: Security Scan
+    name: Security
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

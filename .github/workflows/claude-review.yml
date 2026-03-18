@@ -16,7 +16,7 @@ permissions:
 
 concurrency:
   # One review at a time per PR to avoid duplicate comments
-  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: claude-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: true
 
 jobs:
@@ -83,9 +83,52 @@ jobs:
             2. Read CLAUDE.md for project rules
             3. If there is a linked issue, run `gh issue view ${{ steps.context.outputs.issue_num }}` to understand requirements
             4. Apply BOTH general Go review AND domain-specific review based on the agent labels listed above
-            5. Post your review using `gh pr review` with the appropriate verdict (--approve, --request-changes, or --comment)
+            5. End your review with a verdict tag (see pr-reviewer agent instructions)
 
             Focus on real issues, not style nits. If the code is clean and well-tested, approve it.
+
+      - name: Extract review verdict
+        id: verdict
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+
+          # Find Claude's review comment and extract the verdict.
+          # Try HTML tag first, fall back to plain-text "Verdict: APPROVE" pattern.
+          LAST_COMMENT=$(gh api "repos/${{ github.repository }}/issues/${PR_NUM}/comments" \
+            --jq 'last | .body')
+          VERDICT=$(echo "$LAST_COMMENT" | grep -oP '(?<=<!-- VERDICT: )\w+(?= -->)' || \
+                    echo "$LAST_COMMENT" | grep -oP '(?<=\*\*Verdict: )(APPROVE|REQUEST_CHANGES|COMMENT)' || echo "")
+
+          if [ -z "$VERDICT" ]; then
+            echo "::warning::No verdict tag found in Claude's review comment, defaulting to COMMENT"
+            VERDICT="COMMENT"
+          fi
+
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          echo "Extracted verdict: $VERDICT"
+
+      - name: Submit review verdict
+        env:
+          GH_TOKEN: ${{ secrets.BOT_PAT }}
+        run: |
+          PR_NUM="${{ github.event.pull_request.number }}"
+          VERDICT="${{ steps.verdict.outputs.verdict }}"
+
+          echo "Submitting review: $VERDICT"
+
+          case "$VERDICT" in
+            APPROVE)
+              gh pr review "$PR_NUM" --approve --body "Claude AI review: **Approved** — all checks passed."
+              ;;
+            REQUEST_CHANGES)
+              gh pr review "$PR_NUM" --request-changes --body "Claude AI review: **Changes requested** — see review comment above for details."
+              ;;
+            *)
+              gh pr review "$PR_NUM" --comment --body "Claude AI review: **Comment** — see review comment above for details."
+              ;;
+          esac
 
   # ─── Interactive @claude Responses ──────────────────────────────────
   # Responds to @claude mentions in PR comments for follow-up questions.
