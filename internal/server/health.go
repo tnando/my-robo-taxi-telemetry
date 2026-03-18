@@ -39,7 +39,7 @@ func handleReadyz(checker ReadinessChecker, logger *slog.Logger) http.HandlerFun
 			logger.Warn("readiness check failed", slog.String("error", err.Error()))
 			writeJSON(w, http.StatusServiceUnavailable, healthResponse{
 				Status: "not ready",
-				Error:  err.Error(),
+				Error:  "dependency check failed",
 			})
 			return
 		}
@@ -53,8 +53,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		// Response already partially written; log but don't attempt recovery.
-		slog.Default().Error("failed to write JSON response", slog.String("error", err.Error()))
-	}
+	// Encoding a small struct to an open writer should never fail in
+	// practice. If it does, the response is already partially written so
+	// we cannot recover — just drop the error silently.
+	_ = json.NewEncoder(w).Encode(v)
 }

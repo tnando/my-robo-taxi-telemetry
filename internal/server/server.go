@@ -1,7 +1,7 @@
 // Package server manages the HTTP listeners for the telemetry service.
 // It binds three ports: Tesla (mTLS for vehicle connections), Client
 // (WebSocket for browsers), and Metrics (Prometheus + health checks).
-// All three are started and stopped together via Start/Shutdown.
+// All three are started and stopped together via Start.
 package server
 
 import (
@@ -27,7 +27,7 @@ const (
 
 // Server manages the three HTTP listeners (Tesla, Client, Metrics) and
 // their lifecycle. Create one with New, call Start to begin serving, and
-// Shutdown to stop gracefully.
+// cancel the context passed to Start to stop gracefully.
 type Server struct {
 	tesla   *http.Server
 	client  *http.Server
@@ -90,39 +90,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("server.Start: %w", err)
 	}
 	return nil
-}
-
-// Shutdown gracefully stops all three servers. It uses its own timeout
-// context so that shutdown proceeds even if the caller's context is
-// already cancelled.
-func (s *Server) Shutdown(ctx context.Context) error {
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
-	defer cancel()
-
-	// If the caller provided a tighter deadline, respect it.
-	if deadline, ok := ctx.Deadline(); ok {
-		if deadline.Before(time.Now().Add(shutdownTimeout)) {
-			shutdownCtx = ctx
-		}
-	}
-
-	var errs []error
-	for _, pair := range []struct {
-		name string
-		srv  *http.Server
-	}{
-		{"tesla", s.tesla},
-		{"client", s.client},
-		{"metrics", s.metrics},
-	} {
-		if err := pair.srv.Shutdown(shutdownCtx); err != nil {
-			errs = append(errs, fmt.Errorf("server.Shutdown(%s): %w", pair.name, err))
-		} else {
-			s.logger.Info("server stopped", slog.String("name", pair.name))
-		}
-	}
-
-	return errors.Join(errs...)
 }
 
 // serve starts an HTTP server and shuts it down when ctx is cancelled.
