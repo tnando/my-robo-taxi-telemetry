@@ -50,11 +50,20 @@ func TestRateLimiter_RefillsOverTime(t *testing.T) {
 		t.Error("should be blocked after exhausting tokens")
 	}
 
-	// Wait for refill.
-	time.Sleep(600 * time.Millisecond)
-
-	if !rl.allow("VIN1") {
-		t.Error("should be allowed after refill period")
+	// Poll until refill occurs (token bucket refills based on elapsed time).
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(50 * time.Millisecond)
+	defer tick.Stop()
+	refilled := false
+	for !refilled {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for rate limiter refill")
+		case <-tick.C:
+			if rl.allow("VIN1") {
+				refilled = true
+			}
+		}
 	}
 }
 

@@ -185,7 +185,7 @@ func newTestEnv(t *testing.T, cfg ReceiverConfig) *testEnv {
 
 	bus := &collectingBus{}
 	logger := receiverTestLogger()
-	recv := NewReceiver(bus, logger, NoopReceiverMetrics{}, cfg)
+	recv := NewReceiver(NewDecoder(), bus, logger, NoopReceiverMetrics{}, cfg)
 
 	caCert, caKey := testCA(t)
 	serverCert := testServerCert(t, caCert, caKey)
@@ -289,6 +289,26 @@ func waitForEvents(t *testing.T, bus *collectingBus, topic events.Topic, n int) 
 	}
 }
 
+// pollConnectedVehicles polls until the receiver reports the expected count.
+func pollConnectedVehicles(t *testing.T, recv *Receiver, want int) int {
+	t.Helper()
+	deadline := time.After(waitTimeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		got := recv.ConnectedVehicles()
+		if got == want {
+			return got
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timeout waiting for connected vehicles = %d, got %d", want, got)
+			return got
+		case <-tick.C:
+		}
+	}
+}
+
 // closeConn closes a websocket connection, ignoring errors (for t.Cleanup).
 func closeConn(conn *websocket.Conn) {
 	_ = conn.CloseNow()
@@ -376,7 +396,7 @@ func TestReceiver_DisconnectPublishesEvent(t *testing.T) {
 func TestReceiver_RejectsNoCert(t *testing.T) {
 	bus := &collectingBus{}
 	logger := receiverTestLogger()
-	recv := NewReceiver(bus, logger, NoopReceiverMetrics{}, ReceiverConfig{})
+	recv := NewReceiver(NewDecoder(), bus, logger, NoopReceiverMetrics{}, ReceiverConfig{})
 
 	// Use a plain HTTP server (no mTLS) to simulate missing cert.
 	srv := httptest.NewServer(recv.Handler())
@@ -500,8 +520,8 @@ func TestReceiver_RateLimiting(t *testing.T) {
 		}
 	}
 
-	// Wait a moment for processing.
-	time.Sleep(200 * time.Millisecond)
+	// Poll until at least one telemetry event is published (confirms processing started).
+	waitForEvents(t, te.bus, events.TopicVehicleTelemetry, 1)
 
 	// Some messages should have been published, but not all.
 	telEvts := te.bus.eventsByTopic(events.TopicVehicleTelemetry)
@@ -587,16 +607,14 @@ func TestReceiver_ReplacesExistingConnection(t *testing.T) {
 	conn2 := te.dialWithVIN(ctx, t, testVIN)
 	t.Cleanup(func() { closeConn(conn2) })
 
-	// Give the server time to process the replacement.
-	time.Sleep(200 * time.Millisecond)
+	// Wait for the second connectivity event (replacement connect).
+	waitForEvents(t, te.bus, events.TopicConnectivity, 2)
 
 	// The old connection should eventually fail on read.
 	_ = conn1.CloseNow()
 
-	// There should still be exactly 1 connected vehicle.
-	// Wait briefly for state to settle.
-	time.Sleep(100 * time.Millisecond)
-	count := te.receiver.ConnectedVehicles()
+	// Poll until connected count settles to 1.
+	count := pollConnectedVehicles(t, te.receiver, 1)
 	if count != 1 {
 		t.Errorf("connected vehicles = %d, want 1 after replacement", count)
 	}

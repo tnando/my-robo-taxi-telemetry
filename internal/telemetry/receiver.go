@@ -48,17 +48,16 @@ type Receiver struct {
 	connCount   atomic.Int32
 }
 
-// NewReceiver creates a Receiver. The bus is used to publish telemetry
-// and connectivity events. The decoder converts raw protobuf into domain
-// events.
-func NewReceiver(bus events.Bus, logger *slog.Logger, metrics ReceiverMetrics, cfg ReceiverConfig) *Receiver {
+// NewReceiver creates a Receiver. The decoder converts raw protobuf into
+// domain events; pass NewDecoder() for production use.
+func NewReceiver(decoder *Decoder, bus events.Bus, logger *slog.Logger, metrics ReceiverMetrics, cfg ReceiverConfig) *Receiver {
 	maxPerSec := cfg.MaxMessagesPerSec
 	if maxPerSec == 0 {
 		maxPerSec = defaultMaxMessagesPerSec
 	}
 
 	return &Receiver{
-		decoder:     NewDecoder(),
+		decoder:     decoder,
 		bus:         bus,
 		logger:      logger,
 		metrics:     metrics,
@@ -127,7 +126,8 @@ func (r *Receiver) handleUpgrade(w http.ResponseWriter, req *http.Request) {
 
 	conn.SetReadLimit(maxMessageSize)
 
-	connCtx, connCancel := context.WithCancel(req.Context()) //nolint:gosec // #nosec G118 -- cancel stored in vehicleConn.cancel, called in cleanupConnection
+	connCtx, connCancel := context.WithCancel(req.Context())
+	defer connCancel() // also called via cleanupConnection; cancel is idempotent
 	vc := &vehicleConn{
 		vin:       vin,
 		conn:      conn,
