@@ -68,7 +68,7 @@ type fileAuthConfig struct {
 
 // loadFile reads and decodes the JSON configuration from disk.
 func loadFile(path string) (*fileConfig, error) {
-	f, err := os.Open(path) //nolint:gosec // path is caller-controlled startup config
+	f, err := os.Open(path) // #nosec G304 -- path is caller-controlled startup config, not user input
 	if err != nil {
 		return nil, fmt.Errorf("config.Load: open %q: %w: %w", path, ErrConfigLoad, err)
 	}
