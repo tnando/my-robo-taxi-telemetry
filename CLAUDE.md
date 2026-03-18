@@ -300,6 +300,10 @@ Run before every commit:
 3. `go test ./...`
 4. `go build ./cmd/...`
 
+### Pre-PR Lint Gate (ENFORCED)
+
+Every agent MUST run `golangci-lint run ./...` and fix all warnings before opening a PR. CI will reject PRs that fail lint. This applies to ALL agents — implementation, testing, infra, etc. No exceptions. If a lint rule seems wrong, suppress it with a targeted `//nolint:rulename // reason` comment, never globally disable the rule.
+
 ## What NOT to Do
 
 - Do NOT import from `my-robo-taxi` — communicate only via shared database and documented contracts
