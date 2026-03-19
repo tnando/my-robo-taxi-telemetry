@@ -81,7 +81,7 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 		h.metrics.IncAuthFailures()
 		h.logger.Warn("authentication failed",
 			slog.Any("error", err),
-			slog.String("remote_addr", r.RemoteAddr),
+			slog.String("remote_addr", clientIP),
 		)
 		errCode := errCodeAuthFailed
 		if errors.Is(err, ErrAuthTimeout) {
