@@ -35,7 +35,7 @@ func MarshalPayload(vin string, state ScenarioState) ([]byte, error) {
 
 // buildData converts scenario state fields into Tesla Datum entries.
 func buildData(state ScenarioState) []*tpb.Datum {
-	return []*tpb.Datum{
+	data := []*tpb.Datum{
 		stringDatum(tpb.Field_VehicleSpeed, state.Speed),
 		locationDatum(state.Latitude, state.Longitude),
 		stringDatum(tpb.Field_GpsHeading, state.Heading),
@@ -46,6 +46,13 @@ func buildData(state ScenarioState) []*tpb.Datum {
 		stringDatum(tpb.Field_OutsideTemp, float64(state.ExteriorTemp)),
 		stringDatum(tpb.Field_Odometer, state.OdometerMiles),
 	}
+
+	// Include MinutesToArrival only when a nav route is active (ETA > 0).
+	if state.ETA > 0 {
+		data = append(data, stringDatum(tpb.Field_MinutesToArrival, state.ETA))
+	}
+
+	return data
 }
 
 // stringDatum creates a Datum with a string-encoded numeric value.

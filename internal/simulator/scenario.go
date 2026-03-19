@@ -28,4 +28,5 @@ type ScenarioState struct {
 	InteriorTemp   int     // celsius
 	ExteriorTemp   int     // celsius
 	OdometerMiles  float64
+	ETA            float64 // minutes to arrival (0 = no nav active)
 }

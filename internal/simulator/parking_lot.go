@@ -61,6 +61,8 @@ func (p *parkingLot) Next() ScenarioState {
 		p.state.Heading, p.state.Speed, 1.0,
 	)
 
+	p.state.ETA = etaMinutes(p.tick, p.total, 1.0)
+
 	return p.state
 }
 
