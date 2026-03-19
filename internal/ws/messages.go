@@ -9,6 +9,9 @@ import "encoding/json"
 const (
 	msgTypeAuth          = "auth"
 	msgTypeVehicleUpdate = "vehicle_update"
+	msgTypeDriveStarted  = "drive_started"
+	msgTypeDriveEnded    = "drive_ended"
+	msgTypeConnectivity  = "connectivity"
 	msgTypeHeartbeat     = "heartbeat"
 	msgTypeError         = "error"
 )
@@ -38,6 +41,40 @@ type authPayload struct {
 type errorPayload struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+}
+
+// driveStartedPayload is the server-to-client payload sent when the drive
+// detector identifies a new drive.
+type driveStartedPayload struct {
+	VehicleID     string        `json:"vehicleId"`
+	DriveID       string        `json:"driveId"`
+	StartLocation startLocation `json:"startLocation"`
+	Timestamp     string        `json:"timestamp"`
+}
+
+type startLocation struct {
+	Latitude  float64 `json:"latitude"`
+	Longitude float64 `json:"longitude"`
+}
+
+// driveEndedPayload is the server-to-client payload sent when a drive
+// completes. Contains summary statistics for the trip.
+type driveEndedPayload struct {
+	VehicleID string  `json:"vehicleId"`
+	DriveID   string  `json:"driveId"`
+	Distance  float64 `json:"distance"`
+	Duration  string  `json:"duration"`
+	AvgSpeed  float64 `json:"avgSpeed"`
+	MaxSpeed  float64 `json:"maxSpeed"`
+	Timestamp string  `json:"timestamp"`
+}
+
+// connectivityPayload is the server-to-client payload sent when a vehicle
+// connects or disconnects from the telemetry server.
+type connectivityPayload struct {
+	VehicleID string `json:"vehicleId"`
+	Online    bool   `json:"online"`
+	Timestamp string `json:"timestamp"`
 }
 
 // Error code constants returned to clients.
