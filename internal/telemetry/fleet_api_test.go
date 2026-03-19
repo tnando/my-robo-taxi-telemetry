@@ -541,20 +541,21 @@ func TestRetryPolicy_ExponentialBackoff(t *testing.T) {
 	policy := defaultRetryPolicy()
 
 	tests := []struct {
-		attempt   int
-		wantDelay time.Duration
+		attempt int
+		wantMin time.Duration // base * 2^attempt * 0.75
+		wantMax time.Duration // base * 2^attempt * 1.25
 	}{
-		{0, 1 * time.Second},  // 1s * 2^0
-		{1, 2 * time.Second},  // 1s * 2^1
-		{2, 4 * time.Second},  // 1s * 2^2
-		{3, 8 * time.Second},  // 1s * 2^3
-		{4, 16 * time.Second}, // 1s * 2^4
+		{0, 750 * time.Millisecond, 1250 * time.Millisecond},
+		{1, 1500 * time.Millisecond, 2500 * time.Millisecond},
+		{2, 3 * time.Second, 5 * time.Second},
+		{3, 6 * time.Second, 10 * time.Second},
+		{4, 12 * time.Second, 20 * time.Second},
 	}
 
 	for _, tt := range tests {
 		delay := retryDelay(nil, tt.attempt, policy)
-		if delay != tt.wantDelay {
-			t.Errorf("attempt %d: delay = %v, want %v", tt.attempt, delay, tt.wantDelay)
+		if delay < tt.wantMin || delay > tt.wantMax {
+			t.Errorf("attempt %d: delay = %v, want [%v, %v]", tt.attempt, delay, tt.wantMin, tt.wantMax)
 		}
 	}
 }
@@ -567,10 +568,10 @@ func TestRetryPolicy_MaxDelayCap(t *testing.T) {
 		MaxDelay:  10 * time.Second,
 	}
 
-	// Attempt 5 would be 32s without cap.
+	// Attempt 5 would be 32s without cap. With jitter, max is 10s * 1.25 = 12.5s.
 	delay := retryDelay(nil, 5, policy)
-	if delay != 10*time.Second {
-		t.Errorf("delay = %v, want 10s (capped)", delay)
+	if delay < 7500*time.Millisecond || delay > 12500*time.Millisecond {
+		t.Errorf("delay = %v, want [7.5s, 12.5s] (capped at 10s ± 25%% jitter)", delay)
 	}
 }
 

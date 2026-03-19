@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"math/rand/v2" //nolint:gosec // jitter for backoff, not security
 	"net/http"
 	"strconv"
 	"time"
@@ -51,12 +52,14 @@ func retryDelay(resp *http.Response, attempt int, policy retryPolicy) time.Durat
 		}
 	}
 
-	// Exponential backoff: baseDelay * 2^attempt, capped at maxDelay.
+	// Exponential backoff with ±25% jitter to prevent thundering herd.
 	delay := time.Duration(float64(policy.BaseDelay) * math.Pow(2, float64(attempt)))
 	if delay > policy.MaxDelay {
 		delay = policy.MaxDelay
 	}
-	return delay
+	// Apply jitter: multiply by [0.75, 1.25).
+	jitter := 0.75 + rand.Float64()*0.5 // #nosec G404 -- backoff jitter
+	return time.Duration(float64(delay) * jitter)
 }
 
 // sleepWithContext blocks for the given duration, returning early if

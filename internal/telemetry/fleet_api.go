@@ -74,6 +74,9 @@ func (c *FleetAPIClient) PushTelemetryConfig(
 	token string,
 	req FleetConfigRequest,
 ) (*FleetConfigResponse, error) {
+	if token == "" {
+		return nil, fmt.Errorf("PushTelemetryConfig: auth token is required")
+	}
 	if len(req.VINs) == 0 {
 		return nil, fmt.Errorf("PushTelemetryConfig: no VINs provided")
 	}
@@ -89,7 +92,7 @@ func (c *FleetAPIClient) PushTelemetryConfig(
 	url := c.baseURL + "/api/1/vehicles/" + req.VINs[0] + "/fleet_telemetry_config"
 
 	c.logger.Debug("pushing telemetry config",
-		slog.String("url", url),
+		slog.String("vin", redactVIN(req.VINs[0])),
 		slog.Int("vin_count", len(req.VINs)),
 	)
 
@@ -119,6 +122,9 @@ func (c *FleetAPIClient) GetTelemetryErrors(
 	token string,
 	vin string,
 ) (*FleetErrorsResponse, error) {
+	if token == "" {
+		return nil, fmt.Errorf("GetTelemetryErrors: auth token is required")
+	}
 	if vin == "" {
 		return nil, fmt.Errorf("GetTelemetryErrors: empty VIN")
 	}
@@ -163,7 +169,6 @@ func (c *FleetAPIClient) doWithRetry(
 			c.logger.Debug("retrying fleet API request",
 				slog.Int("attempt", attempt),
 				slog.String("method", method),
-				slog.String("url", url),
 			)
 		}
 
