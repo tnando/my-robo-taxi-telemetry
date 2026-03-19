@@ -41,10 +41,10 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	}
 
 	subscriptions := []topicHandler{
-		{events.TopicVehicleTelemetry, b.makeHandler(ctx, b.handleTelemetry)},
-		{events.TopicDriveStarted, b.makeHandler(ctx, b.handleDriveStarted)},
-		{events.TopicDriveEnded, b.makeHandler(ctx, b.handleDriveEnded)},
-		{events.TopicConnectivity, b.makeHandler(ctx, b.handleConnectivity)},
+		{events.TopicVehicleTelemetry, b.makeHandler(b.handleTelemetry)},
+		{events.TopicDriveStarted, b.makeHandler(b.handleDriveStarted)},
+		{events.TopicDriveEnded, b.makeHandler(b.handleDriveEnded)},
+		{events.TopicConnectivity, b.makeHandler(b.handleConnectivity)},
 	}
 
 	for _, th := range subscriptions {
@@ -76,9 +76,12 @@ func (b *Broadcaster) Stop() error {
 type eventHandler func(ctx context.Context, event events.Event)
 
 // makeHandler wraps a context-aware event handler into the events.Handler
-// signature expected by the bus.
-func (b *Broadcaster) makeHandler(ctx context.Context, fn eventHandler) events.Handler {
+// signature expected by the bus. Each invocation gets a fresh 30s context
+// so handlers are not affected by the parent context's lifetime.
+func (b *Broadcaster) makeHandler(fn eventHandler) events.Handler {
 	return func(event events.Event) {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 		fn(ctx, event)
 	}
 }
@@ -147,8 +150,10 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 	msg, err := marshalWSMessage(msgTypeDriveStarted, driveStartedPayload{
 		VehicleID: vehicleID,
 		DriveID:   payload.DriveID,
-		Latitude:  payload.Location.Latitude,
-		Longitude: payload.Location.Longitude,
+		StartLocation: startLocation{
+			Latitude:  payload.Location.Latitude,
+			Longitude: payload.Location.Longitude,
+		},
 		Timestamp: payload.StartedAt.Format(time.RFC3339),
 	})
 	if err != nil {
@@ -224,7 +229,7 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 
 	msg, err := marshalWSMessage(msgTypeConnectivity, connectivityPayload{
 		VehicleID: vehicleID,
-		Status:    payload.Status.String(),
+		Online:    payload.Status == events.StatusConnected,
 		Timestamp: payload.Timestamp.Format(time.RFC3339),
 	})
 	if err != nil {

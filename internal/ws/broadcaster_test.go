@@ -48,25 +48,21 @@ func ptrBool(v bool) *bool          { return &v }
 
 func TestBroadcaster_HandleTelemetry(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{
 		"5YJ3E1EA1NF000001": "vehicle-id-1",
 	})
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		if err := b.Stop(); err != nil {
-			t.Errorf("Stop: %v", err)
-		}
-	}()
+	t.Cleanup(func() { _ = b.Stop() })
 
 	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
 	event := events.NewEvent(events.VehicleTelemetryEvent{
@@ -113,25 +109,21 @@ func TestBroadcaster_HandleTelemetry(t *testing.T) {
 
 func TestBroadcaster_HandleDriveStarted(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{
 		"5YJ3E1EA1NF000001": "vehicle-id-1",
 	})
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		if err := b.Stop(); err != nil {
-			t.Errorf("Stop: %v", err)
-		}
-	}()
+	t.Cleanup(func() { _ = b.Stop() })
 
 	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
 	event := events.NewEvent(events.DriveStartedEvent{
@@ -157,25 +149,21 @@ func TestBroadcaster_HandleDriveStarted(t *testing.T) {
 
 func TestBroadcaster_HandleDriveEnded(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{
 		"5YJ3E1EA1NF000001": "vehicle-id-1",
 	})
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		if err := b.Stop(); err != nil {
-			t.Errorf("Stop: %v", err)
-		}
-	}()
+	t.Cleanup(func() { _ = b.Stop() })
 
 	now := time.Date(2026, 3, 18, 12, 30, 0, 0, time.UTC)
 	event := events.NewEvent(events.DriveEndedEvent{
@@ -203,25 +191,21 @@ func TestBroadcaster_HandleDriveEnded(t *testing.T) {
 
 func TestBroadcaster_HandleConnectivity(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{
 		"5YJ3E1EA1NF000001": "vehicle-id-1",
 	})
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		if err := b.Stop(); err != nil {
-			t.Errorf("Stop: %v", err)
-		}
-	}()
+	t.Cleanup(func() { _ = b.Stop() })
 
 	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
 	event := events.NewEvent(events.ConnectivityEvent{
@@ -243,24 +227,20 @@ func TestBroadcaster_HandleConnectivity(t *testing.T) {
 
 func TestBroadcaster_VINResolutionFailure_SkipsEvent(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{})
 	resolver.err = errors.New("database unavailable")
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
 	if err := b.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer func() {
-		if err := b.Stop(); err != nil {
-			t.Errorf("Stop: %v", err)
-		}
-	}()
+	t.Cleanup(func() { _ = b.Stop() })
 
 	event := events.NewEvent(events.VehicleTelemetryEvent{
 		VIN:       "UNKNOWN_VIN",
@@ -292,14 +272,14 @@ func TestBroadcaster_VINResolutionFailure_SkipsEvent(t *testing.T) {
 
 func TestBroadcaster_Stop_Unsubscribes(t *testing.T) {
 	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
-	defer bus.Close(context.Background())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
 
 	resolver := newStubVINResolver(map[string]string{
 		"5YJ3E1EA1NF000001": "vehicle-id-1",
 	})
 
 	hub := NewHub(slog.Default(), NoopHubMetrics{})
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	b := NewBroadcaster(hub, bus, resolver, slog.Default())
 	ctx := context.Background()
@@ -546,8 +526,10 @@ func TestMarshalWSMessage(t *testing.T) {
 			payload: driveStartedPayload{
 				VehicleID: "v-1",
 				DriveID:   "d-1",
-				Latitude:  37.7749,
-				Longitude: -122.4194,
+				StartLocation: startLocation{
+					Latitude:  37.7749,
+					Longitude: -122.4194,
+				},
 				Timestamp: "2026-03-18T12:00:00Z",
 			},
 		},
@@ -569,7 +551,7 @@ func TestMarshalWSMessage(t *testing.T) {
 			msgType: msgTypeConnectivity,
 			payload: connectivityPayload{
 				VehicleID: "v-1",
-				Status:    "connected",
+				Online:    true,
 				Timestamp: "2026-03-18T12:00:00Z",
 			},
 		},
@@ -640,8 +622,10 @@ func TestMarshalWSMessage_DriveStarted_Payload(t *testing.T) {
 	raw, err := marshalWSMessage(msgTypeDriveStarted, driveStartedPayload{
 		VehicleID: "v-1",
 		DriveID:   "drive-abc",
-		Latitude:  37.7749,
-		Longitude: -122.4194,
+		StartLocation: startLocation{
+			Latitude:  37.7749,
+			Longitude: -122.4194,
+		},
 		Timestamp: "2026-03-18T12:00:00Z",
 	})
 	if err != nil {
@@ -664,11 +648,11 @@ func TestMarshalWSMessage_DriveStarted_Payload(t *testing.T) {
 	if payload.DriveID != "drive-abc" {
 		t.Fatalf("expected driveId=drive-abc, got %q", payload.DriveID)
 	}
-	if payload.Latitude != 37.7749 {
-		t.Fatalf("expected latitude=37.7749, got %v", payload.Latitude)
+	if payload.StartLocation.Latitude != 37.7749 {
+		t.Fatalf("expected latitude=37.7749, got %v", payload.StartLocation.Latitude)
 	}
-	if payload.Longitude != -122.4194 {
-		t.Fatalf("expected longitude=-122.4194, got %v", payload.Longitude)
+	if payload.StartLocation.Longitude != -122.4194 {
+		t.Fatalf("expected longitude=-122.4194, got %v", payload.StartLocation.Longitude)
 	}
 }
 
@@ -713,17 +697,17 @@ func TestMarshalWSMessage_DriveEnded_Payload(t *testing.T) {
 func TestMarshalWSMessage_Connectivity_Payload(t *testing.T) {
 	tests := []struct {
 		name   string
-		status string
+		online bool
 	}{
-		{"connected", "connected"},
-		{"disconnected", "disconnected"},
+		{"connected", true},
+		{"disconnected", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			raw, err := marshalWSMessage(msgTypeConnectivity, connectivityPayload{
 				VehicleID: "v-1",
-				Status:    tt.status,
+				Online:    tt.online,
 				Timestamp: "2026-03-18T12:00:00Z",
 			})
 			if err != nil {
@@ -740,8 +724,8 @@ func TestMarshalWSMessage_Connectivity_Payload(t *testing.T) {
 				t.Fatalf("unmarshal payload: %v", err)
 			}
 
-			if payload.Status != tt.status {
-				t.Fatalf("expected status=%q, got %q", tt.status, payload.Status)
+			if payload.Online != tt.online {
+				t.Fatalf("expected online=%v, got %v", tt.online, payload.Online)
 			}
 		})
 	}

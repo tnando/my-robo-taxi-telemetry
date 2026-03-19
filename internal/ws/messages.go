@@ -46,11 +46,15 @@ type errorPayload struct {
 // driveStartedPayload is the server-to-client payload sent when the drive
 // detector identifies a new drive.
 type driveStartedPayload struct {
-	VehicleID string  `json:"vehicleId"`
-	DriveID   string  `json:"driveId"`
+	VehicleID     string        `json:"vehicleId"`
+	DriveID       string        `json:"driveId"`
+	StartLocation startLocation `json:"startLocation"`
+	Timestamp     string        `json:"timestamp"`
+}
+
+type startLocation struct {
 	Latitude  float64 `json:"latitude"`
 	Longitude float64 `json:"longitude"`
-	Timestamp string  `json:"timestamp"`
 }
 
 // driveEndedPayload is the server-to-client payload sent when a drive
@@ -69,7 +73,7 @@ type driveEndedPayload struct {
 // connects or disconnects from the telemetry server.
 type connectivityPayload struct {
 	VehicleID string `json:"vehicleId"`
-	Status    string `json:"status"`
+	Online    bool   `json:"online"`
 	Timestamp string `json:"timestamp"`
 }
 
