@@ -80,6 +80,19 @@ func publishTelemetry(t *testing.T, bus events.Bus, te events.VehicleTelemetryEv
 	}
 }
 
+// publishConnectivity publishes a ConnectivityEvent through the bus.
+func publishConnectivity(t *testing.T, bus events.Bus, vin string, status events.ConnectivityStatus) {
+	t.Helper()
+	evt := events.NewEvent(events.ConnectivityEvent{
+		VIN:       vin,
+		Status:    status,
+		Timestamp: time.Now(),
+	})
+	if err := bus.Publish(context.Background(), evt); err != nil {
+		t.Fatalf("failed to publish connectivity event: %v", err)
+	}
+}
+
 // eventWaitTimeout is the default timeout for waiting for events in tests.
 const eventWaitTimeout = 2 * time.Second
 
@@ -580,6 +593,121 @@ func TestDetector_StatsAccuracy(t *testing.T) {
 	if stats.StartLocation.Latitude != 33.0 {
 		t.Errorf("StartLocation.Lat: got %f, want 33.0", stats.StartLocation.Latitude)
 	}
+}
+
+func TestDetector_DisconnectEndsDrive(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	cfg := testConfig()
+	cfg.EndDebounce = 200 * time.Millisecond
+	cfg.MinDuration = 0
+	cfg.MinDistanceMiles = 0
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	now := time.Now()
+
+	// Start driving.
+	publishTelemetry(t, bus, telemetryEvent("VIN_DC", now, driveFields("D", 30.0, 33.09, -96.82)))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	// Accumulate a route point.
+	publishTelemetry(t, bus, telemetryEvent("VIN_DC", now.Add(time.Second), driveFields("D", 50.0, 33.10, -96.83)))
+
+	// Vehicle disconnects without shifting to P.
+	publishConnectivity(t, bus, "VIN_DC", events.StatusDisconnected)
+
+	// Drive should end immediately (no debounce wait).
+	evt, ok := waitForEvent(endedCh)
+	if !ok {
+		t.Fatal("timed out waiting for DriveEndedEvent after disconnect")
+	}
+
+	payload, ok := evt.Payload.(events.DriveEndedEvent)
+	if !ok {
+		t.Fatalf("expected DriveEndedEvent, got %T", evt.Payload)
+	}
+	if payload.VIN != "VIN_DC" {
+		t.Errorf("VIN: got %q, want %q", payload.VIN, "VIN_DC")
+	}
+}
+
+func TestDetector_DisconnectWhileIdle_NoEffect(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	// Send telemetry while idle (gear=P), then disconnect.
+	publishTelemetry(t, bus, telemetryEvent("VIN_IDLE_DC", time.Now(), gearField("P")))
+	publishConnectivity(t, bus, "VIN_IDLE_DC", events.StatusDisconnected)
+
+	expectNoEvent(t, endedCh, 200*time.Millisecond, "disconnect while idle should not end drive")
+}
+
+func TestDetector_ConnectedEvent_NoEffect(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	cfg := testConfig()
+	cfg.MinDuration = 0
+	cfg.MinDistanceMiles = 0
+
+	d := NewDetector(bus, cfg, testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	startedCh := subscribeTopic(t, bus, events.TopicDriveStarted)
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	now := time.Now()
+
+	// Start driving.
+	publishTelemetry(t, bus, telemetryEvent("VIN_CONN", now, driveFields("D", 30.0, 33.09, -96.82)))
+	if _, ok := waitForEvent(startedCh); !ok {
+		t.Fatal("timed out waiting for DriveStartedEvent")
+	}
+
+	// Connected event should NOT end the drive.
+	publishConnectivity(t, bus, "VIN_CONN", events.StatusConnected)
+
+	expectNoEvent(t, endedCh, 200*time.Millisecond, "connected event should not end drive")
+}
+
+func TestDetector_DisconnectUnknownVIN_NoEffect(t *testing.T) {
+	bus := testBus()
+	defer bus.Close(context.Background())
+
+	d := NewDetector(bus, testConfig(), testLogger(), NoopDetectorMetrics{})
+	if err := d.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	endedCh := subscribeTopic(t, bus, events.TopicDriveEnded)
+
+	// Disconnect for a VIN we have never seen.
+	publishConnectivity(t, bus, "VIN_UNKNOWN", events.StatusDisconnected)
+
+	expectNoEvent(t, endedCh, 200*time.Millisecond, "disconnect for unknown VIN should have no effect")
 }
 
 func TestDetector_StartStop(t *testing.T) {

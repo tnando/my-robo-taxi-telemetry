@@ -156,6 +156,95 @@ func TestParkingLot_HasRapidGearChanges(t *testing.T) {
 	}
 }
 
+func TestEtaMinutes(t *testing.T) {
+	tests := []struct {
+		name        string
+		tick        int
+		total       int
+		intervalSec float64
+		want        float64
+	}{
+		{name: "start of 1800-tick scenario", tick: 0, total: 1800, intervalSec: 1.0, want: 30.0},
+		{name: "halfway through", tick: 900, total: 1800, intervalSec: 1.0, want: 15.0},
+		{name: "at the end", tick: 1800, total: 1800, intervalSec: 1.0, want: 0},
+		{name: "past the end", tick: 2000, total: 1800, intervalSec: 1.0, want: 0},
+		{name: "2s interval", tick: 0, total: 900, intervalSec: 2.0, want: 30.0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := etaMinutes(tt.tick, tt.total, tt.intervalSec)
+			if got != tt.want {
+				t.Errorf("etaMinutes(%d, %d, %f) = %f, want %f",
+					tt.tick, tt.total, tt.intervalSec, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHighwayDrive_ETACountdown(t *testing.T) {
+	s := newHighwayDrive()
+
+	first := s.Next()
+	if first.ETA <= 0 {
+		t.Fatalf("first tick ETA = %f, want > 0", first.ETA)
+	}
+
+	// Highway drive is 1800 ticks at 1s interval = 30 minutes.
+	if first.ETA < 29 || first.ETA > 30 {
+		t.Errorf("first ETA = %f, want ~30 minutes", first.ETA)
+	}
+
+	var last ScenarioState
+	for !s.Done() {
+		last = s.Next()
+	}
+
+	if first.ETA <= last.ETA {
+		t.Errorf("ETA did not decrease: first=%f, last=%f", first.ETA, last.ETA)
+	}
+	// Last tick computes ETA for remaining=1, so it is close to but not exactly 0.
+	if last.ETA > 0.1 {
+		t.Errorf("final ETA = %f, want < 0.1 (nearly done)", last.ETA)
+	}
+}
+
+func TestCityDrive_ETACountdown(t *testing.T) {
+	s := newCityDrive()
+
+	first := s.Next()
+	if first.ETA <= 0 {
+		t.Fatalf("first tick ETA = %f, want > 0", first.ETA)
+	}
+
+	var last ScenarioState
+	for !s.Done() {
+		last = s.Next()
+	}
+
+	if last.ETA > 0.1 {
+		t.Errorf("final ETA = %f, want < 0.1 (nearly done)", last.ETA)
+	}
+}
+
+func TestParkingLot_ETACountdown(t *testing.T) {
+	s := newParkingLot()
+
+	first := s.Next()
+	if first.ETA <= 0 {
+		t.Fatalf("first tick ETA = %f, want > 0", first.ETA)
+	}
+
+	var last ScenarioState
+	for !s.Done() {
+		last = s.Next()
+	}
+
+	if last.ETA > 0.1 {
+		t.Errorf("final ETA = %f, want < 0.1 (nearly done)", last.ETA)
+	}
+}
+
 func TestScenarioNames(t *testing.T) {
 	names := ScenarioNames()
 	if len(names) != 3 {
