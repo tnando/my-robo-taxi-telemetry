@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,6 +20,15 @@ type HandlerConfig struct {
 
 	// WriteTimeout is the per-message write deadline. Default: 10s.
 	WriteTimeout time.Duration
+
+	// OriginPatterns restricts which origins may connect. Supports glob
+	// patterns (e.g., "https://*.myrobotaxi.app"). Empty means reject
+	// all cross-origin requests (browser default-same-origin only).
+	OriginPatterns []string
+
+	// MaxConnectionsPerIP limits concurrent WebSocket connections from
+	// a single IP address. Zero means no limit.
+	MaxConnectionsPerIP int
 }
 
 // Handler returns an http.Handler that upgrades HTTP connections to
@@ -37,7 +47,24 @@ func (h *Hub) Handler(auth Authenticator, cfg HandlerConfig) http.Handler {
 // handleUpgrade performs the WebSocket upgrade, runs the auth handshake,
 // and starts the read/write pumps.
 func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authenticator, cfg HandlerConfig) {
-	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	// Per-IP connection limit.
+	if cfg.MaxConnectionsPerIP > 0 {
+		ip := r.RemoteAddr
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			ip = fwd
+		}
+		if h.ipConnectionCount(ip) >= cfg.MaxConnectionsPerIP {
+			h.logger.Warn("connection rate limited",
+				slog.String("remote_addr", ip),
+			)
+			http.Error(w, "too many connections", http.StatusTooManyRequests)
+			return
+		}
+	}
+
+	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+		OriginPatterns: cfg.OriginPatterns,
+	})
 	if err != nil {
 		h.logger.Error("websocket accept failed",
 			slog.Any("error", err),
@@ -47,6 +74,7 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 	}
 
 	client := newClient(conn, h, h.logger)
+	client.remoteAddr = r.RemoteAddr
 
 	// Authenticate: the client must send an auth message within the timeout.
 	if err := h.authenticateClient(r.Context(), client, auth, cfg); err != nil {
@@ -55,6 +83,13 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 			slog.Any("error", err),
 			slog.String("remote_addr", r.RemoteAddr),
 		)
+		errCode := errCodeAuthFailed
+		if errors.Is(err, ErrAuthTimeout) {
+			errCode = errCodeAuthTimeout
+		}
+		errCtx, errCancel := context.WithTimeout(context.Background(), cfg.WriteTimeout)
+		_ = sendError(errCtx, conn, errCode, err.Error(), cfg.WriteTimeout)
+		errCancel()
 		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
 		return
 	}
@@ -84,7 +119,10 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	_, data, err := client.conn.Read(authCtx)
 	if err != nil {
-		return fmt.Errorf("hub.authenticateClient: read auth message: %w", ErrAuthTimeout)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("hub.authenticateClient: %w", ErrAuthTimeout)
+		}
+		return fmt.Errorf("hub.authenticateClient: read auth message: %w", err)
 	}
 
 	var msg wsMessage

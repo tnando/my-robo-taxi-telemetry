@@ -25,6 +25,7 @@ type Client struct {
 	conn       *websocket.Conn
 	userID     string
 	vehicleIDs []string // vehicles this user is authorized to see
+	remoteAddr string
 	send       chan []byte
 	hub        *Hub
 	logger     *slog.Logger

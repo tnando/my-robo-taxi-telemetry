@@ -118,3 +118,16 @@ func (h *Hub) ClientCount() int {
 	defer h.mu.RUnlock()
 	return len(h.clients)
 }
+
+// ipConnectionCount returns the number of active connections from the given IP.
+func (h *Hub) ipConnectionCount(ip string) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	count := 0
+	for client := range h.clients {
+		if client.remoteAddr == ip {
+			count++
+		}
+	}
+	return count
+}

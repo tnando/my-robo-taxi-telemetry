@@ -35,6 +35,25 @@ func (a *testAuth) GetUserVehicles(_ context.Context, _ string) ([]string, error
 	return a.vehicleIDs, nil
 }
 
+// waitForClients polls until the hub reaches the desired client count or
+// times out. This replaces brittle time.Sleep calls in tests.
+func waitForClients(t *testing.T, hub *Hub, want int) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(5 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if hub.ClientCount() == want {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("timed out waiting for %d clients, got %d", want, hub.ClientCount())
+		case <-tick.C:
+		}
+	}
+}
+
 // newTestServer creates an httptest.Server serving the Hub's WebSocket
 // handler with the given auth.
 func newTestServer(t *testing.T, hub *Hub, auth Authenticator) *httptest.Server {
@@ -130,17 +149,16 @@ func newTestHub(t *testing.T) *Hub {
 
 func TestHub_AuthFlow(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "user-1", vehicleIDs: []string{"v-1", "v-2"}}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	conn := dialAndAuth(t, srv.URL, "valid-token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	// Give the server a moment to register the client.
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 1)
 
 	if got := hub.ClientCount(); got != 1 {
 		t.Fatalf("expected 1 client, got %d", got)
@@ -149,11 +167,11 @@ func TestHub_AuthFlow(t *testing.T) {
 
 func TestHub_AuthFailure_InvalidToken(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{err: ErrInvalidToken}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	conn := dialAndAuth(t, srv.URL, "bad-token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -175,7 +193,7 @@ func TestHub_AuthFailure_InvalidToken(t *testing.T) {
 
 func TestHub_AuthTimeout(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}}
 	handler := hub.Handler(auth, HandlerConfig{
@@ -183,7 +201,7 @@ func TestHub_AuthTimeout(t *testing.T) {
 		WriteTimeout: 2 * time.Second,
 	})
 	srv := httptest.NewServer(handler)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	// Connect but do NOT send auth.
 	conn := dialOnly(t, srv.URL)
@@ -201,23 +219,23 @@ func TestHub_AuthTimeout(t *testing.T) {
 
 func TestHub_Broadcast_AuthorizedOnly(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	// Client 1 sees vehicle v-1.
 	auth1 := &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}}
 	srv1 := newTestServer(t, hub, auth1)
-	defer srv1.Close()
+	t.Cleanup(srv1.Close)
 	conn1 := dialAndAuth(t, srv1.URL, "token-1")
 	defer conn1.Close(websocket.StatusNormalClosure, "")
 
 	// Client 2 sees vehicle v-2.
 	auth2 := &testAuth{userID: "user-2", vehicleIDs: []string{"v-2"}}
 	srv2 := newTestServer(t, hub, auth2)
-	defer srv2.Close()
+	t.Cleanup(srv2.Close)
 	conn2 := dialAndAuth(t, srv2.URL, "token-2")
 	defer conn2.Close(websocket.StatusNormalClosure, "")
 
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 2)
 
 	// Broadcast for v-1 only.
 	updateMsg := mustMarshalTest(t, wsMessage{
@@ -247,16 +265,16 @@ func TestHub_Broadcast_AuthorizedOnly(t *testing.T) {
 
 func TestHub_Heartbeat(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	conn := dialAndAuth(t, srv.URL, "token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 1)
 
 	// Start heartbeat with a short interval for testing.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -272,16 +290,16 @@ func TestHub_Heartbeat(t *testing.T) {
 
 func TestHub_SlowClient_DropOldest(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "slow-user", vehicleIDs: []string{"v-1"}}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	conn := dialAndAuth(t, srv.URL, "token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 1)
 
 	// Fill the send buffer beyond capacity without reading.
 	for i := range sendBufSize + 10 {
@@ -305,11 +323,11 @@ func TestHub_SlowClient_DropOldest(t *testing.T) {
 
 func TestHub_MultipleClients_IndependentBuffers(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "user-shared", vehicleIDs: []string{"v-shared"}}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	const numClients = 3
 	conns := make([]*websocket.Conn, numClients)
@@ -318,7 +336,7 @@ func TestHub_MultipleClients_IndependentBuffers(t *testing.T) {
 		defer conns[i].Close(websocket.StatusNormalClosure, "")
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, numClients)
 
 	if got := hub.ClientCount(); got != numClients {
 		t.Fatalf("expected %d clients, got %d", numClients, got)
@@ -355,12 +373,12 @@ func TestHub_Stop_ClosesAllClients(t *testing.T) {
 
 	auth := &testAuth{userID: "user-1", vehicleIDs: []string{"v-1"}}
 	srv := newTestServer(t, hub, auth)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	conn := dialAndAuth(t, srv.URL, "token")
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
-	time.Sleep(50 * time.Millisecond)
+	waitForClients(t, hub, 1)
 
 	if got := hub.ClientCount(); got != 1 {
 		t.Fatalf("expected 1 client, got %d", got)
@@ -375,7 +393,7 @@ func TestHub_Stop_ClosesAllClients(t *testing.T) {
 
 func TestHub_Handler_NonWSRequest(t *testing.T) {
 	hub := newTestHub(t)
-	defer hub.Stop()
+	t.Cleanup(hub.Stop)
 
 	auth := &testAuth{userID: "user-1"}
 	handler := hub.Handler(auth, HandlerConfig{})
