@@ -111,10 +111,13 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 		return
 	}
 
-	// Inject lastUpdated so the frontend can display the latest update time.
+	// Inject lastUpdated into fields so it merges into the frontend Vehicle
+	// object. The envelope's Timestamp serves a different purpose (message
+	// ordering) — lastUpdated is what the UI displays.
 	fields["lastUpdated"] = payload.CreatedAt.Format(time.RFC3339)
 
-	// Derive vehicle status from gear and speed for the frontend UI.
+	// Derive vehicle status from gear and speed. This is a synthetic field
+	// (not from Tesla telemetry) — it drives the frontend's driving/parked UI.
 	fields["status"] = deriveVehicleStatus(fields)
 
 	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
