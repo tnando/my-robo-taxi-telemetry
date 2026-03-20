@@ -115,6 +115,55 @@ func TestBuildPayload_AllGears(t *testing.T) {
 	}
 }
 
+func TestBuildPayload_ETAIncluded(t *testing.T) {
+	state := scenarioDefaults()
+	state.GearPosition = "D"
+	state.Speed = 65
+	state.ETA = 15.5
+
+	payload := BuildPayload("5YJ3SIM00001", state)
+
+	// With ETA > 0, data should have 10 items (9 base + MinutesToArrival).
+	if len(payload.GetData()) != 10 {
+		t.Fatalf("data length = %d, want 10 (9 base + ETA)", len(payload.GetData()))
+	}
+
+	fieldMap := make(map[tpb.Field]*tpb.Value)
+	for _, d := range payload.GetData() {
+		fieldMap[d.GetKey()] = d.GetValue()
+	}
+
+	etaVal := fieldMap[tpb.Field_MinutesToArrival]
+	if etaVal == nil {
+		t.Fatal("MinutesToArrival datum missing")
+	}
+	sv, ok := etaVal.Value.(*tpb.Value_StringValue)
+	if !ok {
+		t.Fatalf("MinutesToArrival type = %T, want StringValue", etaVal.Value)
+	}
+	if sv.StringValue != "15.50" {
+		t.Errorf("MinutesToArrival = %q, want %q", sv.StringValue, "15.50")
+	}
+}
+
+func TestBuildPayload_ETAOmittedWhenZero(t *testing.T) {
+	state := scenarioDefaults()
+	state.ETA = 0
+
+	payload := BuildPayload("5YJ3SIM00001", state)
+
+	// With ETA=0, should only have the 9 base data items.
+	if len(payload.GetData()) != 9 {
+		t.Fatalf("data length = %d, want 9 (no ETA field)", len(payload.GetData()))
+	}
+
+	for _, d := range payload.GetData() {
+		if d.GetKey() == tpb.Field_MinutesToArrival {
+			t.Error("MinutesToArrival should not be present when ETA=0")
+		}
+	}
+}
+
 func TestMarshalPayload_RoundTrip(t *testing.T) {
 	state := scenarioDefaults()
 	state.Speed = 42.0

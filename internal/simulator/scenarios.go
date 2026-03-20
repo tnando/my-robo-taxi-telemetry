@@ -73,9 +73,12 @@ func (h *highwayDrive) Next() ScenarioState {
 	h.updateSpeed()
 	h.updatePosition()
 	h.drainCharge()
+	h.state.ETA = etaMinutes(h.tick, h.total, h.interval())
 
 	return h.state
 }
+
+func (h *highwayDrive) interval() float64 { return 1.0 }
 
 func (h *highwayDrive) updateGear() {
 	switch {
@@ -169,6 +172,7 @@ func (c *cityDrive) Next() ScenarioState {
 	c.applySegment()
 	c.updateCityPosition()
 	c.drainCityCharge()
+	c.state.ETA = etaMinutes(c.tick, c.total, 1.0)
 
 	return c.state
 }
@@ -230,6 +234,16 @@ func clampSpeed(v, lo, hi float64) float64 {
 		return hi
 	}
 	return v
+}
+
+// etaMinutes computes the estimated time of arrival in minutes based on
+// remaining ticks and the interval in seconds per tick.
+func etaMinutes(tick, total int, intervalSec float64) float64 {
+	remaining := total - tick
+	if remaining <= 0 {
+		return 0
+	}
+	return float64(remaining) * intervalSec / 60.0
 }
 
 // jitter returns a random value in [-spread/2, +spread/2]. Used throughout
