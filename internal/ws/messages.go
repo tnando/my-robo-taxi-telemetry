@@ -3,7 +3,10 @@
 // telemetry updates to authorized users.
 package ws
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Message type constants matching the frontend protocol.
 const (
@@ -82,3 +85,20 @@ const (
 	errCodeAuthFailed  = "auth_failed"
 	errCodeAuthTimeout = "auth_timeout"
 )
+
+// marshalWSMessage creates a JSON-encoded WebSocket message envelope.
+func marshalWSMessage(msgType string, payload any) ([]byte, error) {
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshalWSMessage(%s): marshal payload: %w", msgType, err)
+	}
+
+	msg, err := json.Marshal(wsMessage{
+		Type:    msgType,
+		Payload: payloadBytes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshalWSMessage(%s): marshal envelope: %w", msgType, err)
+	}
+	return msg, nil
+}

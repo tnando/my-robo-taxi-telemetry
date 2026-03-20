@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
@@ -19,6 +18,7 @@ type Broadcaster struct {
 	resolver VINResolver
 	logger   *slog.Logger
 	subs     []events.Subscription
+	routes   *routeTracker
 }
 
 // NewBroadcaster creates a Broadcaster ready to start. Call Start to begin
@@ -29,6 +29,7 @@ func NewBroadcaster(hub *Hub, bus events.Bus, resolver VINResolver, logger *slog
 		bus:      bus,
 		resolver: resolver,
 		logger:   logger,
+		routes:   newRouteTracker(),
 	}
 }
 
@@ -118,7 +119,12 @@ func (b *Broadcaster) handleTelemetry(ctx context.Context, event events.Event) {
 
 	// Derive vehicle status from gear and speed. This is a synthetic field
 	// (not from Tesla telemetry) — it drives the frontend's driving/parked UI.
-	fields["status"] = deriveVehicleStatus(fields)
+	status := deriveVehicleStatus(fields)
+	fields["status"] = status
+
+	// Accumulate route coordinates while driving so the frontend can render
+	// a live polyline. When the vehicle parks, clear the accumulated route.
+	b.applyRouteState(vehicleID, status, fields)
 
 	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
 		VehicleID: vehicleID,
@@ -196,6 +202,8 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 		return
 	}
 
+	b.routes.clear(vehicleID)
+
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
 		VehicleID: vehicleID,
 		DriveID:   payload.DriveID,
@@ -236,6 +244,10 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 		return
 	}
 
+	if payload.Status == events.StatusDisconnected {
+		b.routes.clear(vehicleID)
+	}
+
 	msg, err := marshalWSMessage(msgTypeConnectivity, connectivityPayload{
 		VehicleID: vehicleID,
 		Online:    payload.Status == events.StatusConnected,
@@ -252,6 +264,23 @@ func (b *Broadcaster) handleConnectivity(ctx context.Context, event events.Event
 	b.hub.Broadcast(vehicleID, msg)
 }
 
+// applyRouteState appends the current position to the route tracker when the
+// vehicle is driving and injects the accumulated coordinates into fields. When
+// the vehicle is parked (drive ended), the route is cleared.
+func (b *Broadcaster) applyRouteState(vehicleID, status string, fields map[string]any) {
+	if status == "driving" {
+		lng, lngOK := fields["longitude"].(float64)
+		lat, latOK := fields["latitude"].(float64)
+		if lngOK && latOK {
+			fields["routeCoordinates"] = b.routes.append(vehicleID, lng, lat)
+		}
+		return
+	}
+
+	// Vehicle is not driving — clear any accumulated route.
+	b.routes.clear(vehicleID)
+}
+
 // unsubscribeAll removes all active subscriptions from the bus.
 func (b *Broadcaster) unsubscribeAll() {
 	for _, sub := range b.subs {
@@ -263,21 +292,4 @@ func (b *Broadcaster) unsubscribeAll() {
 		}
 	}
 	b.subs = nil
-}
-
-// marshalWSMessage creates a JSON-encoded WebSocket message envelope.
-func marshalWSMessage(msgType string, payload any) ([]byte, error) {
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
-		return nil, fmt.Errorf("marshalWSMessage(%s): marshal payload: %w", msgType, err)
-	}
-
-	msg, err := json.Marshal(wsMessage{
-		Type:    msgType,
-		Payload: payloadBytes,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshalWSMessage(%s): marshal envelope: %w", msgType, err)
-	}
-	return msg, nil
 }

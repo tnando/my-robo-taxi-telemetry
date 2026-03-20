@@ -832,6 +832,241 @@ func assertInt(t *testing.T, m map[string]any, key string, want int) {
 	}
 }
 
+func TestApplyRouteState_DrivingWithLocation(t *testing.T) {
+	b := NewBroadcaster(nil, nil, nil, slog.Default())
+
+	fields := map[string]any{
+		"longitude": -122.4194,
+		"latitude":  37.7749,
+	}
+	b.applyRouteState("v-1", "driving", fields)
+
+	coords, ok := fields["routeCoordinates"].([][]float64)
+	if !ok {
+		t.Fatalf("expected routeCoordinates to be [][]float64, got %T", fields["routeCoordinates"])
+	}
+	if len(coords) != 1 {
+		t.Fatalf("expected 1 coordinate, got %d", len(coords))
+	}
+	if coords[0][0] != -122.4194 || coords[0][1] != 37.7749 {
+		t.Fatalf("expected [-122.4194, 37.7749], got %v", coords[0])
+	}
+}
+
+func TestApplyRouteState_DrivingWithoutLocation(t *testing.T) {
+	b := NewBroadcaster(nil, nil, nil, slog.Default())
+
+	fields := map[string]any{
+		"speed": 65,
+	}
+	b.applyRouteState("v-1", "driving", fields)
+
+	if _, ok := fields["routeCoordinates"]; ok {
+		t.Fatal("routeCoordinates should not be set when lat/lng are missing")
+	}
+}
+
+func TestApplyRouteState_DrivingAccumulatesRoute(t *testing.T) {
+	b := NewBroadcaster(nil, nil, nil, slog.Default())
+
+	points := [][2]float64{
+		{-122.4194, 37.7749},
+		{-122.4180, 37.7760},
+		{-122.4170, 37.7770},
+	}
+
+	for i, pt := range points {
+		fields := map[string]any{
+			"longitude": pt[0],
+			"latitude":  pt[1],
+		}
+		b.applyRouteState("v-1", "driving", fields)
+
+		coords, ok := fields["routeCoordinates"].([][]float64)
+		if !ok {
+			t.Fatalf("iteration %d: expected [][]float64, got %T", i, fields["routeCoordinates"])
+		}
+		if len(coords) != i+1 {
+			t.Fatalf("iteration %d: expected %d coordinates, got %d", i, i+1, len(coords))
+		}
+	}
+}
+
+func TestApplyRouteState_ParkedClearsRoute(t *testing.T) {
+	b := NewBroadcaster(nil, nil, nil, slog.Default())
+
+	// Build up a route.
+	fields := map[string]any{"longitude": -122.4194, "latitude": 37.7749}
+	b.applyRouteState("v-1", "driving", fields)
+	fields = map[string]any{"longitude": -122.4180, "latitude": 37.7760}
+	b.applyRouteState("v-1", "driving", fields)
+
+	// Vehicle parks.
+	parkedFields := map[string]any{"speed": 0}
+	b.applyRouteState("v-1", "parked", parkedFields)
+
+	if _, ok := parkedFields["routeCoordinates"]; ok {
+		t.Fatal("routeCoordinates should not be in parked fields")
+	}
+
+	// Verify route state was cleared.
+	if coords := b.routes.get("v-1"); coords != nil {
+		t.Fatalf("route should be cleared after parking, got %d coordinates", len(coords))
+	}
+}
+
+func TestApplyRouteState_IsolatesVehicles(t *testing.T) {
+	b := NewBroadcaster(nil, nil, nil, slog.Default())
+
+	f1 := map[string]any{"longitude": -122.4194, "latitude": 37.7749}
+	b.applyRouteState("v-1", "driving", f1)
+
+	f2 := map[string]any{"longitude": -73.9857, "latitude": 40.7484}
+	b.applyRouteState("v-2", "driving", f2)
+
+	coords1, _ := f1["routeCoordinates"].([][]float64)
+	coords2, _ := f2["routeCoordinates"].([][]float64)
+
+	if len(coords1) != 1 || len(coords2) != 1 {
+		t.Fatalf("expected 1 coordinate each, got v-1=%d v-2=%d", len(coords1), len(coords2))
+	}
+	if coords1[0][0] != -122.4194 {
+		t.Fatalf("v-1 lng: expected -122.4194, got %v", coords1[0][0])
+	}
+	if coords2[0][0] != -73.9857 {
+		t.Fatalf("v-2 lng: expected -73.9857, got %v", coords2[0][0])
+	}
+}
+
+func TestBroadcaster_DriveEndedClearsRoute(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	// Pre-populate route state as if the vehicle was driving.
+	b.routes.append("vehicle-id-1", -122.4194, 37.7749)
+	b.routes.append("vehicle-id-1", -122.4180, 37.7760)
+
+	// Publish drive_ended event.
+	now := time.Date(2026, 3, 18, 12, 30, 0, 0, time.UTC)
+	event := events.NewEvent(events.DriveEndedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive-abc",
+		Stats: events.DriveStats{
+			Distance: 15.3,
+			Duration: 25 * time.Minute,
+			AvgSpeed: 36.7,
+			MaxSpeed: 65.0,
+		},
+		EndedAt: now,
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		return b.routes.get("vehicle-id-1") == nil
+	})
+}
+
+func TestBroadcaster_DisconnectClearsRoute(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	// Pre-populate route state.
+	b.routes.append("vehicle-id-1", -122.4194, 37.7749)
+
+	// Publish disconnect event.
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.ConnectivityEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		Status:    events.StatusDisconnected,
+		Timestamp: now,
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	waitForCondition(t, func() bool {
+		return b.routes.get("vehicle-id-1") == nil
+	})
+}
+
+func TestBroadcaster_ConnectDoesNotClearRoute(t *testing.T) {
+	bus := events.NewChannelBus(events.DefaultBusConfig(), events.NoopBusMetrics{}, slog.Default())
+	t.Cleanup(func() { _ = bus.Close(context.Background()) })
+
+	resolver := newStubVINResolver(map[string]string{
+		"5YJ3E1EA1NF000001": "vehicle-id-1",
+	})
+
+	hub := NewHub(slog.Default(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	b := NewBroadcaster(hub, bus, resolver, slog.Default())
+	ctx := context.Background()
+	if err := b.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop() })
+
+	// Pre-populate route state.
+	b.routes.append("vehicle-id-1", -122.4194, 37.7749)
+
+	// Publish connect event (not disconnect).
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	event := events.NewEvent(events.ConnectivityEvent{
+		VIN:       "5YJ3E1EA1NF000001",
+		Status:    events.StatusConnected,
+		Timestamp: now,
+	})
+
+	if err := bus.Publish(ctx, event); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	// Wait for the event to be processed.
+	waitForCondition(t, func() bool {
+		resolver.mu.RLock()
+		defer resolver.mu.RUnlock()
+		return len(resolver.callLog) > 0
+	})
+
+	// Route should still be present.
+	if coords := b.routes.get("vehicle-id-1"); len(coords) != 1 {
+		t.Fatalf("expected route to be preserved on connect, got %d coordinates", len(coords))
+	}
+}
+
 // waitForCondition polls until fn returns true or times out.
 func waitForCondition(t *testing.T, fn func() bool) {
 	t.Helper()
