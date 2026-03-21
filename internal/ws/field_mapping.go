@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"log/slog"
 	"math"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
@@ -17,6 +18,7 @@ var internalToClientField = map[string]string{
 	"insideTemp":             "interiorTemp",
 	"outsideTemp":            "exteriorTemp",
 	"minutesToArrival":       "etaMinutes",
+	"milesToArrival":         "tripDistanceRemaining",
 	"fsdMilesSinceReset":     "fsdMilesToday",
 	// These fields map 1:1 and are listed for explicitness:
 	// speed, heading, estimatedRange, location (handled separately)
@@ -35,28 +37,68 @@ var integerFields = map[string]struct{}{
 	"odometerMiles":  {},
 }
 
+// locationFieldSplit maps internal location field names to the pair of
+// client field names they should be split into (latitude, longitude).
+var locationFieldSplit = map[string][2]string{
+	"location":            {"latitude", "longitude"},
+	"destinationLocation": {"destinationLatitude", "destinationLongitude"},
+	"originLocation":      {"originLatitude", "originLongitude"},
+}
+
 // mapFieldsForClient converts a map of internal TelemetryValue fields into
 // plain key-value pairs suitable for JSON serialization to browser clients.
-// Pointer-wrapped values are unwrapped, LocationVal is split into separate
-// "latitude" and "longitude" fields, and field names are translated to
-// match the frontend Vehicle model.
+// Pointer-wrapped values are unwrapped, LocationVal fields are split into
+// separate latitude/longitude pairs, routeLine is decoded into coordinates,
+// and field names are translated to match the frontend Vehicle model.
 func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any {
 	out := make(map[string]any, len(fields))
 	for name, val := range fields {
-		if name == "location" {
-			if val.LocationVal != nil {
-				out["latitude"] = val.LocationVal.Latitude
-				out["longitude"] = val.LocationVal.Longitude
+		switch {
+		case locationFieldSplit[name] != [2]string{}:
+			splitLocationField(out, name, val)
+		case name == "routeLine":
+			decodeRouteLineField(out, val)
+		default:
+			clientName := translateFieldName(name)
+			if v := unwrapValue(val); v != nil {
+				out[clientName] = roundIfInteger(clientName, v)
 			}
-			continue
-		}
-
-		clientName := translateFieldName(name)
-		if v := unwrapValue(val); v != nil {
-			out[clientName] = roundIfInteger(clientName, v)
 		}
 	}
 	return out
+}
+
+// splitLocationField adds a LocationVal as separate latitude/longitude keys
+// to the output map. If the LocationVal is nil, no keys are added.
+func splitLocationField(out map[string]any, name string, val events.TelemetryValue) {
+	if val.LocationVal == nil {
+		return
+	}
+	latLng := locationFieldSplit[name]
+	out[latLng[0]] = val.LocationVal.Latitude
+	out[latLng[1]] = val.LocationVal.Longitude
+}
+
+// decodeRouteLineField decodes a Google Encoded Polyline string and adds
+// the resulting coordinates as "routeCoordinates" in [lng, lat] (Mapbox)
+// format. Empty or nil strings are silently skipped.
+func decodeRouteLineField(out map[string]any, val events.TelemetryValue) {
+	if val.StringVal == nil || *val.StringVal == "" {
+		return
+	}
+	coords, err := DecodePolyline(*val.StringVal)
+	if err != nil {
+		slog.Warn("mapFieldsForClient: failed to decode routeLine",
+			slog.Any("error", err),
+		)
+		return
+	}
+	// Convert from [lat, lng] (Google) to [lng, lat] (Mapbox/GeoJSON).
+	mapboxCoords := make([][]float64, len(coords))
+	for i, c := range coords {
+		mapboxCoords[i] = []float64{c[1], c[0]}
+	}
+	out["routeCoordinates"] = mapboxCoords
 }
 
 // roundIfInteger rounds float64 values to integers for fields the frontend
