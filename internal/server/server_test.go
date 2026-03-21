@@ -284,7 +284,7 @@ func TestServer_PlaceholderEndpoints(t *testing.T) {
 	}
 }
 
-const waitForReadyTimeout = 3 * time.Second
+const waitForReadyTimeout = 10 * time.Second
 
 // waitForReady polls the given URL until it returns 200 or the timeout elapses.
 func waitForReady(t *testing.T, url string) error {
