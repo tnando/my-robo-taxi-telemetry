@@ -14,8 +14,17 @@ RUN go mod download
 
 # Copy the full source tree and build a static binary.
 COPY . .
+
+# Build-time version info (optional — pass via --build-arg).
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
 RUN CGO_ENABLED=0 GOOS=linux go build \
-        -ldflags="-s -w" \
+        -ldflags="-s -w \
+          -X main.version=${VERSION} \
+          -X main.commit=${COMMIT} \
+          -X main.date=${BUILD_DATE}" \
         -o /telemetry-server \
         ./cmd/telemetry-server
 
