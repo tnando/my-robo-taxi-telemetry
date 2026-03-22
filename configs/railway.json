@@ -1,4 +1,5 @@
 {
+  "_comment": "Railway deployment config. Differs from default.json: empty TLS paths (Railway handles TLS) and smaller pool sizes. Keep in sync with default.json for non-TLS fields.",
   "server": {
     "tesla_port": 443,
     "client_port": 8080,
