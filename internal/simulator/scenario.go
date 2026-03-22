@@ -29,4 +29,12 @@ type ScenarioState struct {
 	ExteriorTemp   int     // celsius
 	OdometerMiles  float64
 	ETA            float64 // minutes to arrival (0 = no nav active)
+
+	// Navigation fields — populated when driving a pre-baked route.
+	TripDistanceMiles    float64 // total route distance
+	TripDistanceRemain   float64 // miles remaining to destination
+	RouteLine            string  // Google encoded polyline of the full route
+	DestinationName      string  // name of the destination
+	DestinationLat       float64 // destination latitude
+	DestinationLng       float64 // destination longitude
 }
