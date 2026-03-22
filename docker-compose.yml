@@ -54,7 +54,7 @@ services:
 
   # Prometheus scrapes /metrics on port 9090.
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.3.0
     ports:
       - "9091:9090"  # host 9091 avoids clashing with the server's metrics port
     volumes:

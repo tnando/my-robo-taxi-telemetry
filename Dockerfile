@@ -20,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
         ./cmd/telemetry-server
 
 # Stage 2: Runtime
-# Minimal Alpine image — no shell, no package manager, no build tools.
+# Minimal Alpine image — only ca-certificates and the static binary.
 FROM alpine:3.20
 
 # ca-certificates is required at runtime so the server can open TLS
