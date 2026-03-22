@@ -137,6 +137,82 @@ func TestJWTAuthenticator_ValidateToken_RS256Rejected(t *testing.T) {
 	}
 }
 
+func TestJWTAuthenticator_ValidateToken_IssuerAudience(t *testing.T) {
+	a := &JWTAuthenticator{
+		secret:   []byte(testSecret),
+		issuer:   "myrobotaxi",
+		audience: "telemetry",
+		cache:    newVehicleCache(&stubQuerier{}, vehicleCacheTTL),
+	}
+
+	tests := []struct {
+		name    string
+		claims  jwt.MapClaims
+		wantErr error
+	}{
+		{
+			name: "correct iss and aud",
+			claims: jwt.MapClaims{
+				"sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix()),
+				"iss": "myrobotaxi", "aud": "telemetry",
+			},
+			wantErr: nil,
+		},
+		{
+			name: "wrong issuer",
+			claims: jwt.MapClaims{
+				"sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix()),
+				"iss": "other-app", "aud": "telemetry",
+			},
+			wantErr: ErrInvalidToken,
+		},
+		{
+			name: "wrong audience",
+			claims: jwt.MapClaims{
+				"sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix()),
+				"iss": "myrobotaxi", "aud": "other-service",
+			},
+			wantErr: ErrInvalidToken,
+		},
+		{
+			name: "missing issuer",
+			claims: jwt.MapClaims{
+				"sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix()),
+				"aud": "telemetry",
+			},
+			wantErr: ErrInvalidToken,
+		},
+		{
+			name: "missing audience",
+			claims: jwt.MapClaims{
+				"sub": "user-1", "exp": float64(time.Now().Add(time.Hour).Unix()),
+				"iss": "myrobotaxi",
+			},
+			wantErr: ErrInvalidToken,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			token := signToken(t, testSecret, tt.claims)
+			_, err := a.ValidateToken(context.Background(), token)
+
+			if tt.wantErr != nil {
+				if err == nil {
+					t.Fatalf("expected error wrapping %v, got nil", tt.wantErr)
+				}
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("expected error wrapping %v, got: %v", tt.wantErr, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestJWTAuthenticator_GetUserVehicles(t *testing.T) {
 	querier := &stubQuerier{
 		ids: []string{"vehicle-1", "vehicle-2"},

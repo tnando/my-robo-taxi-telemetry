@@ -40,7 +40,8 @@ type JWTAuthenticator struct {
 var _ wsAuthenticator = (*JWTAuthenticator)(nil)
 
 // wsAuthenticator mirrors the ws.Authenticator interface to avoid an
-// import cycle. The types are structurally identical.
+// import cycle. If ws.Authenticator changes, main.go (which assigns
+// *JWTAuthenticator to ws.Authenticator) will fail at compile time.
 type wsAuthenticator interface {
 	ValidateToken(ctx context.Context, token string) (string, error)
 	GetUserVehicles(ctx context.Context, userID string) ([]string, error)
