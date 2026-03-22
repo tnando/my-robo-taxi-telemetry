@@ -1,10 +1,9 @@
 # Stage 1: Build
-# golang:1.25-alpine does not exist yet; use 1.23-alpine which matches the
-# Go toolchain declared in go.mod (go 1.25.0 sets the minimum, not the image).
 FROM golang:1.23-alpine AS builder
 
-# ca-certificates is needed at build time so go mod download can reach HTTPS
-# endpoints and so the final COPY of certs works in multi-platform builds.
+# Allow Go to download the toolchain version declared in go.mod.
+ENV GOTOOLCHAIN=auto
+
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
