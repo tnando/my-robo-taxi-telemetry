@@ -54,6 +54,11 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 	}
 	logMiddleware := requestLogger(logger, skipPaths)
 
+	// Client mux includes /healthz so Railway (which probes the public port)
+	// can run healthchecks without needing access to the metrics port.
+	clientMux := http.NewServeMux()
+	clientMux.HandleFunc("GET /healthz", handleHealthz)
+
 	placeholder := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not implemented", http.StatusNotFound)
 	})
@@ -66,7 +71,7 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 		},
 		client: &http.Server{
 			Addr:              fmt.Sprintf(":%d", cfg.ClientPort),
-			Handler:           logMiddleware(placeholder),
+			Handler:           logMiddleware(clientMux),
 			ReadHeaderTimeout: readHeaderTimeout,
 		},
 		metrics: &http.Server{
@@ -92,10 +97,15 @@ func (s *Server) SetTeslaTLS(tlsConfig *tls.Config) {
 	s.tesla.TLSConfig = tlsConfig
 }
 
-// SetClientHandler replaces the client server's placeholder handler with
-// the given handler. Must be called before Start.
+// SetClientHandler adds routes from the given handler to the client server.
+// The client server always retains /healthz for Railway healthchecks.
+// Must be called before Start.
 func (s *Server) SetClientHandler(h http.Handler) {
-	s.client.Handler = s.logMiddleware(h)
+	// Create a new mux that has /healthz + the provided handler as fallback.
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", handleHealthz)
+	mux.Handle("/", h)
+	s.client.Handler = s.logMiddleware(mux)
 }
 
 // Start begins serving on all three ports. It blocks until ctx is

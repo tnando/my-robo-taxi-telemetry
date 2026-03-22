@@ -6,5 +6,10 @@ dockerfilePath = "Dockerfile"
 # This overrides the Dockerfile ENTRYPOINT+CMD. Keep in sync with Dockerfile.
 startCommand = "telemetry-server -config /etc/telemetry/config.json"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 10
+healthcheckTimeout = 30
 restartPolicyType = "on_failure"
+
+# Railway routes external traffic to this port (client WebSocket + healthcheck).
+# Tesla mTLS (port 443) and Prometheus metrics (port 9090) are internal.
+[deploy.env]
+PORT = "8080"

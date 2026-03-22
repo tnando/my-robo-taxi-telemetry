@@ -42,7 +42,8 @@ RUN adduser -D -u 1000 appuser
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
 
 # Operational config (no secrets — secrets arrive via env vars at runtime).
-COPY configs/default.json /etc/telemetry/config.json
+# Uses railway.json which has empty TLS paths (Railway handles TLS at the edge).
+COPY configs/railway.json /etc/telemetry/config.json
 
 USER appuser
 
