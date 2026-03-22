@@ -1,0 +1,9 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "telemetry-server -config /etc/telemetry/config.json"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 10
+restartPolicyType = "on_failure"
