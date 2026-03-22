@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"net/http"
 	"time"
 
@@ -58,6 +59,16 @@ func New(cfg config.ServerConfig, logger *slog.Logger, checker ReadinessChecker,
 	// can run healthchecks without needing access to the metrics port.
 	clientMux := http.NewServeMux()
 	clientMux.HandleFunc("GET /healthz", handleHealthz)
+
+	// Tesla Fleet Telemetry requires the app's public key at this path.
+	// The key is read from the TESLA_PUBLIC_KEY env var.
+	if pubKey := os.Getenv("TESLA_PUBLIC_KEY"); pubKey != "" {
+		clientMux.HandleFunc("GET /.well-known/appspecific/com.tesla.3p.public-key.pem", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/x-pem-file")
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			fmt.Fprint(w, pubKey)
+		})
+	}
 
 	placeholder := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not implemented", http.StatusNotFound)
