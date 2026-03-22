@@ -119,6 +119,41 @@ func TestServer_HealthzEndpoint(t *testing.T) {
 	}
 }
 
+func TestServer_HealthzOnClientPort(t *testing.T) {
+	cfg := testServerConfig(t)
+	reg := prometheus.NewRegistry()
+	checker := &mockChecker{}
+
+	srv := New(cfg, testLogger(), checker, reg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start(ctx)
+	}()
+
+	clientAddr := fmt.Sprintf("http://127.0.0.1:%d", cfg.ClientPort)
+	if err := waitForReady(t, clientAddr+"/healthz"); err != nil {
+		t.Fatalf("client port healthz did not become ready: %v", err)
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, clientAddr+"/healthz", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /healthz on client port: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status code: got %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+}
+
 func TestServer_ReadyzEndpoint(t *testing.T) {
 	tests := []struct {
 		name       string

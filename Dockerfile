@@ -42,7 +42,10 @@ RUN adduser -D -u 1000 appuser
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
 
 # Operational config (no secrets — secrets arrive via env vars at runtime).
-COPY configs/default.json /etc/telemetry/config.json
+# Default: railway.json (empty TLS paths, Railway handles TLS at the edge).
+# Override for other targets: docker build --build-arg CONFIG_FILE=default.json
+ARG CONFIG_FILE=railway.json
+COPY configs/${CONFIG_FILE} /etc/telemetry/config.json
 
 USER appuser
 
