@@ -39,6 +39,9 @@ func NewRouteFollower(rf *RouteFile) *RouteFollower {
 // over intervalSec seconds. Returns the new position along the route.
 func (f *RouteFollower) Advance(speedMPH, intervalSec float64) RoutePosition {
 	if f.finished || len(f.coords) < 2 {
+		if len(f.coords) == 0 {
+			return RoutePosition{Finished: true}
+		}
 		last := f.coords[len(f.coords)-1]
 		return RoutePosition{
 			Lat:            last[1],

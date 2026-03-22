@@ -41,10 +41,12 @@ func appendEncodedValue(buf []byte, val int) []byte {
 	// Each chunk is 5 bits (0-31) + continuation bit (0 or 32) + 63 offset,
 	// so the result is always in [63, 126] — safe for byte conversion.
 	for v >= 0x20 {
-		buf = append(buf, byte((v&0x1F)|0x20)+63) //nolint:gosec // max value is 95, fits in byte
+		// #nosec G115 -- max value of (v&0x1F)|0x20 is 63; +63 = 126, fits in byte
+		buf = append(buf, byte((v&0x1F)|0x20)+63) //nolint:gosec // safe: max 126
 		v >>= 5
 	}
-	buf = append(buf, byte(v)+63) //nolint:gosec // max value is 94, fits in byte
+	// #nosec G115 -- v is in [0, 31]; +63 = max 94, fits in byte
+	buf = append(buf, byte(v)+63) //nolint:gosec // safe: max 94
 
 	return buf
 }
