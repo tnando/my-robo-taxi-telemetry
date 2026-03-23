@@ -224,7 +224,8 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			mux := http.NewServeMux()
 			mux.Handle("POST /api/fleet-config/{vin}", handler)
 
-			req := httptest.NewRequest(
+			req := httptest.NewRequestWithContext(
+				context.Background(),
 				http.MethodPost,
 				"/api/fleet-config/"+tt.vin,
 				nil,
@@ -282,7 +283,7 @@ func TestExtractBearerToken(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", nil)
 			if tt.header != "" {
 				req.Header.Set("Authorization", tt.header)
 			}
@@ -343,7 +344,7 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.Handle("POST /api/fleet-config/{vin}", handler)
 
-	req := httptest.NewRequest(http.MethodPost, "/api/fleet-config/5YJ3E1EA1PF000001", nil)
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/api/fleet-config/5YJ3E1EA1PF000001", nil)
 	req.Header.Set("Authorization", "Bearer valid-token")
 
 	rec := httptest.NewRecorder()
