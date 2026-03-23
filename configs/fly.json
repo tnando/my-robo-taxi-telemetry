@@ -39,6 +39,6 @@
   "proxy": {
     "url": "https://127.0.0.1:4443",
     "fleet_telemetry_hostname": "telemetry.myrobotaxi.app",
-    "fleet_telemetry_port": 443
+    "fleet_telemetry_port": 8443
   }
 }
