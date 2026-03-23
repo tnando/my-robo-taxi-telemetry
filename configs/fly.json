@@ -1,14 +1,14 @@
 {
-  "_comment": "Fly.io deployment config. TLS paths are set because the app handles mTLS directly (Fly does TCP passthrough on port 443). Cert/key/CA paths are overridden by env vars TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE.",
+  "_comment": "Fly.io deployment config. TLS paths match start.sh decode locations (/tmp/certs/). These are also overridden at runtime by env vars TLS_CERT_FILE, TLS_KEY_FILE, TLS_CA_FILE that start.sh exports after decoding base64 secrets.",
   "server": {
     "tesla_port": 443,
     "client_port": 8080,
     "metrics_port": 9090
   },
   "tls": {
-    "cert_file": "/etc/telemetry/certs/server.crt",
-    "key_file": "/etc/telemetry/certs/server.key",
-    "ca_file": "/etc/telemetry/certs/tesla-ca.pem"
+    "cert_file": "/tmp/certs/server.crt",
+    "key_file": "/tmp/certs/server.key",
+    "ca_file": "/tmp/certs/tesla-ca.pem"
   },
   "database": {
     "max_conns": 10,

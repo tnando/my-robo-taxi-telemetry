@@ -1,10 +1,11 @@
 # Fly.io deployment configuration for the telemetry server.
 #
-# Three services:
+# Two public services:
 #   - Tesla mTLS (port 443): TCP passthrough — Fly does NOT terminate TLS,
 #     the app handles the mTLS handshake directly so it can read client certs.
 #   - Client WebSocket (port 8080): HTTP service with TLS at the edge.
-#   - Prometheus metrics (port 9090): Internal only, not publicly routed.
+#
+# Prometheus metrics (port 9090) is internal only — access via `fly proxy 9090`.
 #
 # Deploy: fly deploy
 # Secrets: fly secrets set DATABASE_URL=... AUTH_SECRET=... TESLA_KEY_FILE_B64=...
@@ -24,6 +25,10 @@ primary_region = 'iad'
 
   [[services.ports]]
     port = 443
+
+  [[services.tcp_checks]]
+    interval = '15s'
+    timeout = '5s'
 
 # Client WebSocket — standard HTTPS with Fly's automatic TLS.
 # Browser clients connect here for real-time telemetry.
@@ -47,13 +52,7 @@ primary_region = 'iad'
     method = 'GET'
     path = '/healthz'
 
-# Prometheus metrics — internal only, accessible via `fly proxy 9090`.
-[[services]]
-  internal_port = 9090
-  protocol = 'tcp'
-  auto_stop_machines = false
-
-# VM sizing — smallest machine, single instance for now.
+# VM sizing — 512MB to handle mTLS + WebSocket + PostgreSQL connections.
 [[vm]]
   size = 'shared-cpu-1x'
-  memory = '256mb'
+  memory = '512mb'

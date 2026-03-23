@@ -29,27 +29,27 @@ mkdir -p "$CERTS_DIR"
 # --- Decode base64 secrets to files ---
 
 if [ -n "$TESLA_KEY_FILE_B64" ] && [ -z "$TESLA_KEY_FILE" ]; then
-    echo "$TESLA_KEY_FILE_B64" | base64 -d > "$CERTS_DIR/tesla-key.pem"
+    printf '%s' "$TESLA_KEY_FILE_B64" | base64 -d > "$CERTS_DIR/tesla-key.pem"
     chmod 600 "$CERTS_DIR/tesla-key.pem"
     export TESLA_KEY_FILE="$CERTS_DIR/tesla-key.pem"
     echo "Decoded TESLA_KEY_FILE_B64 → $TESLA_KEY_FILE"
 fi
 
 if [ -n "$TLS_CERT_B64" ] && [ -z "$TLS_CERT_FILE" ]; then
-    echo "$TLS_CERT_B64" | base64 -d > "$CERTS_DIR/server.crt"
+    printf '%s' "$TLS_CERT_B64" | base64 -d > "$CERTS_DIR/server.crt"
     export TLS_CERT_FILE="$CERTS_DIR/server.crt"
     echo "Decoded TLS_CERT_B64 → $TLS_CERT_FILE"
 fi
 
 if [ -n "$TLS_KEY_B64" ] && [ -z "$TLS_KEY_FILE" ]; then
-    echo "$TLS_KEY_B64" | base64 -d > "$CERTS_DIR/server.key"
+    printf '%s' "$TLS_KEY_B64" | base64 -d > "$CERTS_DIR/server.key"
     chmod 600 "$CERTS_DIR/server.key"
     export TLS_KEY_FILE="$CERTS_DIR/server.key"
     echo "Decoded TLS_KEY_B64 → $TLS_KEY_FILE"
 fi
 
 if [ -n "$TLS_CA_B64" ] && [ -z "$TLS_CA_FILE" ]; then
-    echo "$TLS_CA_B64" | base64 -d > "$CERTS_DIR/tesla-ca.pem"
+    printf '%s' "$TLS_CA_B64" | base64 -d > "$CERTS_DIR/tesla-ca.pem"
     export TLS_CA_FILE="$CERTS_DIR/tesla-ca.pem"
     echo "Decoded TLS_CA_B64 → $TLS_CA_FILE"
 fi
