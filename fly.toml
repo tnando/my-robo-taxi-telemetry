@@ -19,14 +19,14 @@ primary_region = 'iad'
 # Tesla mTLS — TCP passthrough (no TLS termination by Fly).
 # Vehicles connect here with client certificates. The app terminates TLS
 # and extracts the VIN from the client cert.
-# internal_port is 8443 (non-privileged) because the app runs as non-root.
-# Fly maps external port 443 → internal port 8443.
+# External port 8443 avoids conflicting with Fly's HTTPS on port 443.
+# fleet_telemetry_config uses hostname:8443 as the vehicle connection target.
 [[services]]
   internal_port = 8443
   protocol = 'tcp'
 
   [[services.ports]]
-    port = 443
+    port = 8443
 
   [[services.tcp_checks]]
     interval = '15s'
