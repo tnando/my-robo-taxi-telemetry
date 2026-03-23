@@ -68,6 +68,11 @@ func NewFleetConfigHandler(
 
 // ServeHTTP handles the fleet config push request.
 func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
 	vin := r.PathValue("vin")
 	if len(vin) != vinLength {
 		h.writeError(w, http.StatusBadRequest, "invalid VIN: must be 17 characters")

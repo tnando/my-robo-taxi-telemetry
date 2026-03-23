@@ -180,6 +180,8 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 			BaseURL: cfg.Proxy().URL,
 		}, logger.With(slog.String("component", "fleet")))
 
+		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
+		// If new proxy fields are added to config, update this mapping.
 		fleetHandler := telemetry.NewFleetConfigHandler(
 			authenticator,
 			&vehicleOwnerAdapter{repo: vehicleRepo},
