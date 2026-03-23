@@ -34,5 +34,10 @@
   "auth": {
     "token_issuer": "myrobotaxi",
     "token_audience": "telemetry"
+  },
+  "proxy": {
+    "url": "https://localhost:4443",
+    "fleet_telemetry_hostname": "telemetry.myrobotaxi.app",
+    "fleet_telemetry_port": 443
   }
 }

@@ -1,4 +1,18 @@
-# Stage 1: Build
+# Stage 1a: Build tesla-http-proxy in an isolated builder.
+# Separate stage avoids polluting the telemetry server's go.mod.
+# Clone + build because vehicle-command's go.mod has replace directives,
+# which prevents `go install ...@latest` from working.
+FROM golang:1.23-alpine AS proxy-builder
+
+RUN apk add --no-cache git
+WORKDIR /build
+# Pin to a specific tag for reproducible builds.
+# Update this when upgrading the proxy.
+ARG VEHICLE_COMMAND_VERSION=v0.4.1
+RUN git clone --depth 1 --branch ${VEHICLE_COMMAND_VERSION} https://github.com/teslamotors/vehicle-command.git .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /tesla-http-proxy ./cmd/tesla-http-proxy
+
+# Stage 1b: Build telemetry-server
 FROM golang:1.23-alpine AS builder
 
 # Allow Go to download the toolchain version declared in go.mod.
@@ -40,6 +54,10 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
+COPY --from=proxy-builder /tesla-http-proxy /usr/local/bin/tesla-http-proxy
+
+# Entrypoint wrapper that starts the proxy sidecar alongside the telemetry server.
+COPY deployments/start.sh /usr/local/bin/start.sh
 
 # Operational config (no secrets — secrets arrive via env vars at runtime).
 # Default: railway.json (empty TLS paths, Railway handles TLS at the edge).
@@ -51,8 +69,12 @@ USER appuser
 
 # 443  — Tesla vehicle mTLS WebSocket
 # 8080 — Browser client WebSocket
+# 4443 — Tesla HTTP proxy (internal only — never expose publicly)
 # 9090 — Prometheus /metrics
-EXPOSE 443 8080 9090
+EXPOSE 443 8080 4443 9090
 
-ENTRYPOINT ["telemetry-server"]
+# start.sh conditionally launches tesla-http-proxy (when TESLA_KEY_FILE is set)
+# then execs the telemetry server. Safe as default — gracefully skips the proxy
+# when the key file is absent.
+ENTRYPOINT ["start.sh"]
 CMD ["-config", "/etc/telemetry/config.json"]

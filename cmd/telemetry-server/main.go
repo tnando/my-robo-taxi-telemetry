@@ -174,6 +174,34 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		OriginPatterns: originPatterns,
 	}))
 
+	// --- Fleet config push endpoint (optional — requires proxy config) ---
+	if cfg.Proxy().URL != "" && cfg.Proxy().FleetTelemetryHostname != "" {
+		fleetClient := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
+			BaseURL: cfg.Proxy().URL,
+		}, logger.With(slog.String("component", "fleet")))
+
+		// Map config.ProxyConfig fields → telemetry.EndpointConfig.
+		// If new proxy fields are added to config, update this mapping.
+		fleetHandler := telemetry.NewFleetConfigHandler(
+			authenticator,
+			&vehicleOwnerAdapter{repo: vehicleRepo},
+			fleetClient,
+			telemetry.EndpointConfig{
+				Hostname: cfg.Proxy().FleetTelemetryHostname,
+				Port:     cfg.Proxy().FleetTelemetryPort,
+				CA:       cfg.Proxy().FleetTelemetryCA,
+			},
+			logger.With(slog.String("component", "fleet-config")),
+		)
+
+		srv.HandleFunc("POST /api/fleet-config/{vin}", fleetHandler.ServeHTTP)
+		logger.Info("fleet config push endpoint enabled",
+			slog.String("proxy_url", cfg.Proxy().URL),
+		)
+	} else {
+		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
+	}
+
 	// Configure mTLS on Tesla port if TLS cert files are available.
 	if cfg.TLS().CertFile != "" && cfg.TLS().KeyFile != "" {
 		teslaTLS, err := buildTeslaTLS(cfg.TLS())
@@ -243,16 +271,3 @@ func buildTeslaTLS(cfg config.TLSConfig) (*tls.Config, error) {
 	return tlsCfg, nil
 }
 
-// vinResolverAdapter adapts store.VehicleRepo (returns Vehicle) to the
-// ws.VINResolver interface (returns vehicleID string).
-type vinResolverAdapter struct {
-	repo *store.VehicleRepo
-}
-
-func (a *vinResolverAdapter) GetByVIN(ctx context.Context, vin string) (string, error) {
-	v, err := a.repo.GetByVIN(ctx, vin)
-	if err != nil {
-		return "", fmt.Errorf("resolve VIN: %w", err)
-	}
-	return v.ID, nil
-}
