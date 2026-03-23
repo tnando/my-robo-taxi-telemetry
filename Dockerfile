@@ -1,9 +1,13 @@
 # Stage 1a: Build tesla-http-proxy in an isolated builder.
 # Separate stage avoids polluting the telemetry server's go.mod.
+# Clone + build because vehicle-command's go.mod has replace directives,
+# which prevents `go install ...@latest` from working.
 FROM golang:1.23-alpine AS proxy-builder
 
-RUN CGO_ENABLED=0 GOOS=linux \
-    go install github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy@latest
+RUN apk add --no-cache git
+WORKDIR /build
+RUN git clone --depth 1 https://github.com/teslamotors/vehicle-command.git .
+RUN CGO_ENABLED=0 GOOS=linux go build -o /tesla-http-proxy ./cmd/tesla-http-proxy
 
 # Stage 1b: Build telemetry-server
 FROM golang:1.23-alpine AS builder
@@ -47,7 +51,7 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
-COPY --from=proxy-builder /go/bin/tesla-http-proxy /usr/local/bin/tesla-http-proxy
+COPY --from=proxy-builder /tesla-http-proxy /usr/local/bin/tesla-http-proxy
 
 # Entrypoint wrapper that starts the proxy sidecar alongside the telemetry server.
 COPY deployments/start.sh /usr/local/bin/start.sh
