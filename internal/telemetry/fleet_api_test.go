@@ -65,12 +65,13 @@ func TestFleetAPIClient_PushTelemetryConfig_Success(t *testing.T) {
 		BaseURL: srv.URL,
 	}, fleetTestLogger())
 
+	testCA := "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
 	req := FleetConfigRequest{
 		VINs: []string{testVIN},
 		Config: FleetConfig{
 			Hostname:   "telemetry.myrobotaxi.app",
 			Port:       443,
-			CA:         "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+			CA:         &testCA,
 			Fields:     DefaultFieldConfig(),
 			AlertTypes: []string{"service"},
 		},

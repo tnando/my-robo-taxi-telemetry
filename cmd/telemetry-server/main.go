@@ -205,14 +205,23 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		logger.Warn("fleet config push disabled: proxy URL or telemetry hostname not configured")
 	}
 
-	// Configure mTLS on Tesla port if TLS cert files are available.
-	if cfg.TLS().CertFile != "" && cfg.TLS().KeyFile != "" {
+	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
+	// without it, Tesla vehicles cannot complete the handshake and report EOF.
+	if cfg.TLS().CertFile == "" || cfg.TLS().KeyFile == "" {
+		logger.Warn("TLS cert/key not configured — Tesla mTLS port will serve plain TCP (dev only)",
+			slog.String("cert_file", cfg.TLS().CertFile),
+			slog.String("key_file", cfg.TLS().KeyFile),
+		)
+	} else {
 		teslaTLS, err := buildTeslaTLS(cfg.TLS())
 		if err != nil {
-			logger.Warn("TLS not configured for Tesla port, skipping mTLS", slog.Any("error", err))
-		} else {
-			srv.SetTeslaTLS(teslaTLS)
+			return fmt.Errorf("building Tesla mTLS config: %w", err)
 		}
+		srv.SetTeslaTLS(teslaTLS)
+		logger.Info("Tesla mTLS configured",
+			slog.String("cert_file", cfg.TLS().CertFile),
+			slog.Bool("client_ca_loaded", cfg.TLS().CAFile != ""),
+		)
 	}
 
 	logger.Info("starting HTTP servers")
