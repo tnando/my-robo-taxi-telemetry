@@ -44,7 +44,6 @@ const (
 	FieldLatAccel            FieldName = "lateralAcceleration"
 	FieldLongAccel           FieldName = "longitudinalAcceleration"
 	FieldMilesSinceReset    FieldName = "milesSinceReset"
-	FieldRouteLastUpdated   FieldName = "routeLastUpdated"
 )
 
 // fieldMap maps Tesla's proto Field enum values to our internal field names.
