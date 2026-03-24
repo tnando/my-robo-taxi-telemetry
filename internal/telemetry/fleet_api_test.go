@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -554,6 +555,43 @@ func TestFleetAPIError_Error(t *testing.T) {
 				t.Fatal("Error() returned empty string")
 			}
 		})
+	}
+}
+
+func TestFleetConfig_CA_NullSerialization(t *testing.T) {
+	t.Parallel()
+
+	// nil CA must serialize as JSON null, not "".
+	cfg := FleetConfig{
+		Hostname: "telemetry.example.com",
+		Port:     8443,
+		CA:       nil,
+		Fields:   map[string]FieldConfig{"Gear": {IntervalSeconds: 1}},
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	if !strings.Contains(string(data), `"ca":null`) {
+		t.Errorf("nil CA should serialize as null, got: %s", data)
+	}
+
+	// Non-nil CA must serialize as a string.
+	ca := "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----"
+	cfg.CA = &ca
+
+	data, err = json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal error: %v", err)
+	}
+
+	if strings.Contains(string(data), `"ca":null`) {
+		t.Errorf("non-nil CA should not serialize as null, got: %s", data)
+	}
+	if !strings.Contains(string(data), `BEGIN CERTIFICATE`) {
+		t.Errorf("non-nil CA should contain PEM content, got: %s", data)
 	}
 }
 

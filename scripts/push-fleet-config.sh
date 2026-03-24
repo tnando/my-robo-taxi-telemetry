@@ -145,10 +145,10 @@ build_config_payload() {
         fields_json+="\"$field\":{\"interval_seconds\":$INTERVAL}"
     done
 
-    # Build the ca value: escaped PEM string or null.
+    # Build the ca value: JSON-escaped PEM string or null.
     local ca_value="null"
     if [[ -n "$CA_FILE" ]]; then
-        ca_value="\"$(awk '{printf "%s\\n", $0}' < "$CA_FILE")\""
+        ca_value="$(jq -Rs . < "$CA_FILE")"
     fi
 
     cat <<EOF
