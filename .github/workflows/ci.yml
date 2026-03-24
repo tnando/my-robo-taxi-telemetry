@@ -189,14 +189,15 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
+    environment: production
     timeout-minutes: 15
-    needs: [build]
+    needs: [build, security]
     # Only deploy on push to main (not PRs).
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v6
 
-      - uses: superfly/flyctl-action/setup-flyctl@master
+      - uses: superfly/flyctl-action/setup-flyctl@v2
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
