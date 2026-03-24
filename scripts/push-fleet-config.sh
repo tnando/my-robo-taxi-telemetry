@@ -253,7 +253,7 @@ main() {
     local payload
     payload="$(build_config_payload)"
 
-    local api_url="$API_BASE/api/1/vehicles/$VIN/fleet_telemetry_config"
+    local api_url="$API_BASE/api/1/vehicles/fleet_telemetry_config"
 
     if [[ "$DRY_RUN" == "true" ]]; then
         log "DRY RUN — would POST to: $api_url"
