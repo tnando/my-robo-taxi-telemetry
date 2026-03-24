@@ -15,11 +15,11 @@ type FleetConfigRequest struct {
 // FleetConfig describes the telemetry server and field selection
 // that the vehicle should use.
 type FleetConfig struct {
-	Hostname    string                 `json:"hostname"`
-	Port        int                    `json:"port"`
-	CA          string                 `json:"ca"`
-	Fields      map[string]FieldConfig `json:"fields"`
-	AlertTypes  []string               `json:"alert_types,omitempty"`
+	Hostname   string                 `json:"hostname"`
+	Port       int                    `json:"port"`
+	CA         *string                `json:"ca"`
+	Fields     map[string]FieldConfig `json:"fields"`
+	AlertTypes []string               `json:"alert_types,omitempty"`
 }
 
 // FieldConfig controls how often a field is emitted and, for spatial
