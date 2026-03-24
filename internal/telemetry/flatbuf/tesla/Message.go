@@ -9,6 +9,9 @@ package tesla
 // Message is the union type discriminator for the FlatbuffersEnvelope message field.
 type Message = byte
 
+// Tesla defines types 0-4. We only need 0 (NONE) and 4 (FlatbuffersStream).
+// Types 1-3 (FlatbuffersV2Batch, ProtobufStream, ProtobufStreamV2) are
+// intentionally omitted — we reject anything that isn't FlatbuffersStream.
 const (
 	MessageNONE              Message = 0
 	MessageFlatbuffersStream Message = 4

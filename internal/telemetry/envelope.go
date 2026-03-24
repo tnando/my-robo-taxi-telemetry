@@ -20,6 +20,9 @@ type EnvelopeResult struct {
 	DeviceID string
 
 	// PayloadBytes is the raw protobuf payload extracted from the stream message.
+	// NOTE: This is a slice into the FlatBuffers buffer. Decode() unmarshals it
+	// immediately, so this is safe. Do not hold a reference after the envelope
+	// buffer is garbage collected.
 	PayloadBytes []byte
 
 	// TxID is the transaction identifier from the envelope. Useful for future

@@ -53,26 +53,13 @@ func TestUnwrapEnvelope_ErrorCases(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   []byte
-		wantErr error
+		name  string
+		input []byte
 	}{
-		{
-			name:  "nil input",
-			input: nil,
-		},
-		{
-			name:  "empty input",
-			input: []byte{},
-		},
-		{
-			name:  "garbage bytes",
-			input: []byte("not a flatbuffers envelope"),
-		},
-		{
-			name:  "truncated bytes",
-			input: []byte{0x04, 0x00, 0x00, 0x00},
-		},
+		{name: "nil input", input: nil},
+		{name: "empty input", input: []byte{}},
+		{name: "garbage bytes", input: []byte("not a flatbuffers envelope")},
+		{name: "truncated bytes", input: []byte{0x04, 0x00, 0x00, 0x00}},
 	}
 
 	for _, tt := range tests {
@@ -83,6 +70,19 @@ func TestUnwrapEnvelope_ErrorCases(t *testing.T) {
 				t.Error("expected error, got nil")
 			}
 		})
+	}
+}
+
+func TestUnwrapEnvelope_EmptyPayload(t *testing.T) {
+	t.Parallel()
+
+	envelope := BuildTestEnvelope(testVIN, []byte{})
+	_, err := unwrapEnvelope(envelope)
+	if err == nil {
+		t.Fatal("expected error for empty payload, got nil")
+	}
+	if !errors.Is(err, ErrEmptyPayload) {
+		t.Errorf("error = %v, want ErrEmptyPayload", err)
 	}
 }
 
