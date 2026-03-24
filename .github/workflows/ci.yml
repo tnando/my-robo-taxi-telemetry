@@ -197,9 +197,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      # Pinned to commit SHA — flyctl-actions has no versioned tags for setup-flyctl.
-      # Update: gh api repos/superfly/flyctl-actions/commits/master --jq '.sha'
-      - uses: superfly/flyctl-actions/setup-flyctl@63da3ecc5e2793b98a3f2519b3d75d4f4c11cec2
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+        with:
+          version: 0.4.27
 
       - name: Deploy to Fly.io
         run: flyctl deploy --remote-only
