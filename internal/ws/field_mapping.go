@@ -20,21 +20,29 @@ var internalToClientField = map[string]string{
 	"minutesToArrival":       "etaMinutes",
 	"milesToArrival":         "tripDistanceRemaining",
 	"fsdMilesSinceReset":     "fsdMilesToday",
+	"hvacFanSpeed":           "fanSpeed",
 	// These fields map 1:1 and are listed for explicitness:
 	// speed, heading, estimatedRange, location (handled separately)
+	// hvacPower, defrostMode, climateKeeperMode, driverTempSetting,
+	// passengerTempSetting, seatHeaterLeft, seatHeaterRight pass through unchanged.
 }
 
 // integerFields are client field names that the frontend Vehicle model types
 // as integers. Float values for these fields are rounded before serialization.
 var integerFields = map[string]struct{}{
-	"speed":          {},
-	"heading":        {},
-	"chargeLevel":    {},
-	"estimatedRange": {},
-	"etaMinutes":     {},
-	"interiorTemp":   {},
-	"exteriorTemp":   {},
-	"odometerMiles":  {},
+	"speed":                {},
+	"heading":              {},
+	"chargeLevel":          {},
+	"estimatedRange":       {},
+	"etaMinutes":           {},
+	"interiorTemp":         {},
+	"exteriorTemp":         {},
+	"odometerMiles":        {},
+	"fanSpeed":             {},
+	"seatHeaterLeft":       {},
+	"seatHeaterRight":      {},
+	"driverTempSetting":    {},
+	"passengerTempSetting": {},
 }
 
 // locationFieldSplit maps internal location field names to the pair of
@@ -49,7 +57,8 @@ var locationFieldSplit = map[string][2]string{
 // plain key-value pairs suitable for JSON serialization to browser clients.
 // Pointer-wrapped values are unwrapped, LocationVal fields are split into
 // separate latitude/longitude pairs, routeLine is decoded into coordinates,
-// and field names are translated to match the frontend Vehicle model.
+// field names are translated to match the frontend Vehicle model, and
+// isClimateOn is derived from hvacPower when that field is present.
 func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any {
 	out := make(map[string]any, len(fields))
 	for name, val := range fields {
@@ -64,6 +73,11 @@ func mapFieldsForClient(fields map[string]events.TelemetryValue) map[string]any 
 				out[clientName] = roundIfInteger(clientName, v)
 			}
 		}
+	}
+	// Derive isClimateOn from hvacPower when present so the frontend can
+	// render the climate card without needing to interpret the enum itself.
+	if power, ok := out["hvacPower"].(string); ok {
+		out["isClimateOn"] = power != "off"
 	}
 	return out
 }
