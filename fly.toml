@@ -21,8 +21,10 @@ primary_region = 'iad'
 # The app terminates TLS and extracts the VIN from the client cert.
 # NO handlers — Fly passes raw TCP bytes so mTLS works end-to-end.
 # NO health checks — TCP probes cause TLS EOF errors on the mTLS listener.
+# internal_port 8443 because the app runs as non-root (can't bind <1024).
+# Fly routes external 443 → internal 8443 transparently.
 [[services]]
-  internal_port = 443
+  internal_port = 8443
   protocol = 'tcp'
 
   [[services.ports]]
