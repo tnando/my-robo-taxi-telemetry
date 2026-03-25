@@ -28,10 +28,9 @@ primary_region = 'iad'
   [[services.ports]]
     port = 8443
 
-  [[services.tcp_checks]]
-    interval = '15s'
-    timeout = '5s'
-    grace_period = '10s'
+  # No health checks on the mTLS port. Fly's TCP health check opens a raw
+  # socket (no TLS ClientHello), which the TLS listener rejects as EOF.
+  # Machine health is determined by the HTTP /healthz check on the client port.
 
 # Client WebSocket — standard HTTPS with Fly's automatic TLS.
 # Browser clients connect here for real-time telemetry.
