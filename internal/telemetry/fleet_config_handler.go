@@ -128,7 +128,8 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ca = &h.endpoint.CA
 	}
 
-	expTime := time.Now().Add(365 * 24 * time.Hour).Unix()
+	// Tesla requires exp between ~31 and ~360 days from now.
+	expTime := time.Now().Add(350 * 24 * time.Hour).Unix()
 
 	req := FleetConfigRequest{
 		VINs: []string{vin},
