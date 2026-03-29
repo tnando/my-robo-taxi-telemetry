@@ -97,6 +97,32 @@ func TestMapDriveCompletion(t *testing.T) {
 	}
 }
 
+func TestMapSingleRoutePoint(t *testing.T) {
+	ts := time.Date(2026, 3, 17, 14, 31, 0, 0, time.UTC)
+	pt := events.RoutePoint{
+		Latitude: 33.0975, Longitude: -96.8214,
+		Speed: 45.0, Heading: 245.0, Timestamp: ts,
+	}
+
+	r := mapSingleRoutePoint(pt)
+
+	if r.Latitude != 33.0975 {
+		t.Errorf("Latitude = %f, want 33.0975", r.Latitude)
+	}
+	if r.Longitude != -96.8214 {
+		t.Errorf("Longitude = %f, want -96.8214", r.Longitude)
+	}
+	if r.Speed != 45.0 {
+		t.Errorf("Speed = %f, want 45.0", r.Speed)
+	}
+	if r.Heading != 245.0 {
+		t.Errorf("Heading = %f, want 245.0", r.Heading)
+	}
+	if r.Timestamp != "2026-03-17T14:31:00Z" {
+		t.Errorf("Timestamp = %q, want %q", r.Timestamp, "2026-03-17T14:31:00Z")
+	}
+}
+
 func TestMapRoutePoints(t *testing.T) {
 	ts := time.Date(2026, 3, 17, 14, 31, 0, 0, time.UTC)
 

@@ -64,9 +64,36 @@ func (w *Writer) handleDriveStarted() events.Handler {
 	}
 }
 
+// handleDriveUpdated returns an event handler that buffers route points
+// during an active drive. Points are accumulated in the route buffer and
+// periodically flushed to the database so the frontend can display the
+// route before the drive ends.
+func (w *Writer) handleDriveUpdated() events.Handler {
+	return func(event events.Event) {
+		evt, ok := event.Payload.(events.DriveUpdatedEvent)
+		if !ok {
+			w.logger.Error("unexpected payload type for drive.updated",
+				slog.String("event_id", event.ID),
+			)
+			return
+		}
+
+		pt := mapSingleRoutePoint(evt.RoutePoint)
+		shouldFlush := w.routeBuf.add(evt.DriveID, pt)
+
+		if shouldFlush {
+			opCtx, cancel := context.WithTimeout(context.Background(), driveOpTimeout)
+			defer cancel()
+			w.routeBuf.flushDrive(opCtx, evt.DriveID)
+		}
+	}
+}
+
 // handleDriveEnded returns an event handler that completes a drive record,
-// appends route points, and sets the vehicle status to parked. If a
-// geocoder is configured, it reverse geocodes the end location.
+// flushes any remaining buffered route points, and sets the vehicle status
+// to parked. If a geocoder is configured, it reverse geocodes the end
+// location. Route points from DriveStats are not appended here because
+// they are persisted incrementally via handleDriveUpdated.
 func (w *Writer) handleDriveEnded() events.Handler {
 	return func(event events.Event) {
 		evt, ok := event.Payload.(events.DriveEndedEvent)
@@ -105,15 +132,8 @@ func (w *Writer) handleDriveEnded() events.Handler {
 			)
 		}
 
-		routePts := mapRoutePoints(evt.Stats.RoutePoints)
-		if len(routePts) > 0 {
-			if err := w.drives.AppendRoutePoints(opCtx, evt.DriveID, routePts); err != nil {
-				w.logger.Warn("failed to append route points",
-					slog.String("drive_id", evt.DriveID),
-					slog.String("error", err.Error()),
-				)
-			}
-		}
+		// Flush any remaining buffered route points for this drive.
+		w.routeBuf.flushDrive(opCtx, evt.DriveID)
 
 		if err := w.vehicles.UpdateStatus(opCtx, evt.VIN, VehicleStatusParked); err != nil {
 			w.logger.Warn("failed to set vehicle status to parked",

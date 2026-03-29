@@ -44,6 +44,18 @@ func mapDriveCompletion(evt events.DriveEndedEvent) DriveCompletion {
 	}
 }
 
+// mapSingleRoutePoint converts a single event-layer RoutePoint to the
+// store's RoutePointRecord format.
+func mapSingleRoutePoint(pt events.RoutePoint) RoutePointRecord {
+	return RoutePointRecord{
+		Latitude:  pt.Latitude,
+		Longitude: pt.Longitude,
+		Speed:     pt.Speed,
+		Heading:   pt.Heading,
+		Timestamp: pt.Timestamp.Format(time.RFC3339),
+	}
+}
+
 // mapRoutePoints converts event-layer RoutePoints to the store's
 // RoutePointRecord format for JSONB persistence.
 func mapRoutePoints(pts []events.RoutePoint) []RoutePointRecord {
