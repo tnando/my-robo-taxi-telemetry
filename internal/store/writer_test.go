@@ -349,6 +349,23 @@ func TestWriter_DriveEnded(t *testing.T) {
 	defer func() { _ = w.Stop() }()
 
 	now := time.Now()
+
+	// Buffer a route point via DriveUpdatedEvent (simulates mid-drive GPS).
+	// handleDriveEnded flushes the route buffer, so we need data in it.
+	updateEvt := events.NewEvent(events.DriveUpdatedEvent{
+		VIN:     "5YJ3E1EA1NF000001",
+		DriveID: "drive_001",
+		RoutePoint: events.RoutePoint{
+			Latitude: 33.0975, Longitude: -96.8214, Speed: 45.0, Heading: 245.0, Timestamp: now,
+		},
+	})
+	if err := bus.Publish(context.Background(), updateEvt); err != nil {
+		t.Fatalf("publish DriveUpdatedEvent: %v", err)
+	}
+
+	// Small delay to ensure the update event is processed before drive ends.
+	time.Sleep(20 * time.Millisecond)
+
 	evt := events.NewEvent(events.DriveEndedEvent{
 		VIN:     "5YJ3E1EA1NF000001",
 		DriveID: "drive_001",
@@ -386,7 +403,10 @@ func TestWriter_DriveEnded(t *testing.T) {
 		t.Errorf("DistanceMiles = %f, want 12.5", completes[0].Stats.DistanceMiles)
 	}
 
-	// Verify route points appended.
+	// Verify route points flushed from buffer on drive end.
+	waitForCondition(t, 2*time.Second, func() bool {
+		return len(drives.getAppends()) > 0
+	})
 	appends := drives.getAppends()
 	if len(appends) != 1 {
 		t.Fatalf("expected 1 route append, got %d", len(appends))

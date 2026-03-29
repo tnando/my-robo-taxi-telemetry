@@ -83,15 +83,15 @@ func (rb *routeBuffer) add(driveID string, pt RoutePointRecord) bool {
 }
 
 // flushDrive writes all buffered points for a single drive to the database
-// and removes them from the buffer. Returns the number of points flushed.
-func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) int {
+// and removes them from the buffer.
+func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) {
 	rb.mu.Lock()
 	pts := rb.buffers[driveID]
 	delete(rb.buffers, driveID)
 	rb.mu.Unlock()
 
 	if len(pts) == 0 {
-		return 0
+		return
 	}
 
 	if err := rb.drives.AppendRoutePoints(ctx, driveID, pts); err != nil {
@@ -104,14 +104,13 @@ func (rb *routeBuffer) flushDrive(ctx context.Context, driveID string) int {
 		rb.mu.Lock()
 		rb.buffers[driveID] = append(pts, rb.buffers[driveID]...)
 		rb.mu.Unlock()
-		return 0
+		return
 	}
 
 	rb.logger.Debug("flushed route points",
 		slog.String("drive_id", driveID),
 		slog.Int("points", len(pts)),
 	)
-	return len(pts)
 }
 
 // flushAll writes all buffered points for all drives to the database.
