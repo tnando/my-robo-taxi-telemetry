@@ -11,38 +11,41 @@ type routeCoordinate struct {
 	Latitude  float64
 }
 
-// routeAccumulator batches GPS route points per vehicle (keyed by VIN) so
-// the broadcaster can flush them periodically instead of sending one
-// WebSocket message per route point. This prevents flooding clients during
-// high-frequency telemetry (1-2 Hz GPS updates).
+// routeAccumulator keeps a running GPS trail per vehicle (keyed by VIN) and
+// periodically signals the broadcaster to send the full trail to WebSocket
+// clients. The buffer is never cleared on flush — it grows for the duration
+// of the drive so each broadcast contains the complete driven path. Only
+// Clear (called on drive end) resets the buffer.
 type routeAccumulator struct {
-	mu            sync.Mutex
-	routes        map[string][]routeCoordinate // VIN → accumulated points
-	lastFlush     map[string]time.Time
-	batchSize     int
-	flushInterval time.Duration
-	now           func() time.Time // injectable clock for testing
+	mu             sync.Mutex
+	routes         map[string][]routeCoordinate // VIN → full driven path
+	lastFlush      map[string]time.Time
+	lastFlushCount map[string]int // VIN → len(routes[vin]) at last flush
+	batchSize      int
+	flushInterval  time.Duration
+	now            func() time.Time // injectable clock for testing
 }
 
-// defaultRouteBatchSize is the number of route points accumulated before
-// flushing to WebSocket clients. At ~1 Hz GPS updates this means roughly
-// 5 seconds between batches.
+// defaultRouteBatchSize is the number of NEW points (since last flush)
+// that trigger a broadcast. At ~1 Hz GPS updates this means roughly
+// 5 seconds between broadcasts.
 const defaultRouteBatchSize = 5
 
-// defaultRouteFlushInterval is the maximum time between route batches.
+// defaultRouteFlushInterval is the maximum time between broadcasts.
 // Ensures clients receive updates even during slow GPS sample rates.
 const defaultRouteFlushInterval = 3 * time.Second
 
 // newRouteAccumulator creates a routeAccumulator. batchSize controls how
-// many points trigger an immediate flush; flushInterval controls how long
-// before a time-based flush is triggered.
+// many new points trigger an immediate broadcast; flushInterval controls
+// how long before a time-based broadcast is triggered.
 func newRouteAccumulator(batchSize int, flushInterval time.Duration) *routeAccumulator {
 	return &routeAccumulator{
-		routes:        make(map[string][]routeCoordinate),
-		lastFlush:     make(map[string]time.Time),
-		batchSize:     batchSize,
-		flushInterval: flushInterval,
-		now:           time.Now,
+		routes:         make(map[string][]routeCoordinate),
+		lastFlush:      make(map[string]time.Time),
+		lastFlushCount: make(map[string]int),
+		batchSize:      batchSize,
+		flushInterval:  flushInterval,
+		now:            time.Now,
 	}
 }
 
@@ -53,8 +56,9 @@ type addResult struct {
 }
 
 // Add appends a coordinate for the given VIN and returns whether the
-// accumulated batch should be flushed. When ShouldFlush is true, Points
-// contains all accumulated coordinates (the internal buffer is reset).
+// full trail should be broadcast. When ShouldFlush is true, Points
+// contains the complete driven path (the buffer is NOT cleared — it
+// keeps accumulating until Clear is called on drive end).
 func (a *routeAccumulator) Add(vin string, coord routeCoordinate) addResult {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -62,7 +66,8 @@ func (a *routeAccumulator) Add(vin string, coord routeCoordinate) addResult {
 	a.routes[vin] = append(a.routes[vin], coord)
 	now := a.now()
 
-	sizeTriggered := a.batchSize > 0 && len(a.routes[vin]) >= a.batchSize
+	newSinceLast := len(a.routes[vin]) - a.lastFlushCount[vin]
+	sizeTriggered := a.batchSize > 0 && newSinceLast >= a.batchSize
 
 	last, hasLast := a.lastFlush[vin]
 	intervalTriggered := hasLast && a.flushInterval > 0 && now.Sub(last) >= a.flushInterval
@@ -77,9 +82,12 @@ func (a *routeAccumulator) Add(vin string, coord routeCoordinate) addResult {
 		return addResult{ShouldFlush: false}
 	}
 
-	points := a.routes[vin]
-	a.routes[vin] = nil
+	// Return a copy of the full trail so the caller can broadcast it.
+	// The buffer stays intact — we just update the flush markers.
+	points := make([]routeCoordinate, len(a.routes[vin]))
+	copy(points, a.routes[vin])
 	a.lastFlush[vin] = now
+	a.lastFlushCount[vin] = len(a.routes[vin])
 
 	return addResult{
 		ShouldFlush: true,
@@ -87,8 +95,8 @@ func (a *routeAccumulator) Add(vin string, coord routeCoordinate) addResult {
 	}
 }
 
-// Flush returns all accumulated points for the given VIN and resets the
-// buffer. Returns nil if no points are accumulated.
+// Flush returns all accumulated points for the given VIN without clearing
+// the buffer. Returns nil if no points are accumulated.
 func (a *routeAccumulator) Flush(vin string) []routeCoordinate {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -97,9 +105,11 @@ func (a *routeAccumulator) Flush(vin string) []routeCoordinate {
 	if len(points) == 0 {
 		return nil
 	}
-	a.routes[vin] = nil
+	out := make([]routeCoordinate, len(points))
+	copy(out, points)
 	a.lastFlush[vin] = a.now()
-	return points
+	a.lastFlushCount[vin] = len(points)
+	return out
 }
 
 // Clear removes all accumulated points for the given VIN. Called when a
@@ -110,6 +120,7 @@ func (a *routeAccumulator) Clear(vin string) {
 
 	delete(a.routes, vin)
 	delete(a.lastFlush, vin)
+	delete(a.lastFlushCount, vin)
 }
 
 // coordsToMapbox converts route coordinates to the [lng, lat] slice format

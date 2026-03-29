@@ -121,10 +121,17 @@ func TestRouteAccumulator_Flush(t *testing.T) {
 		t.Fatalf("expected 2 points, got %d", len(points))
 	}
 
-	// Second flush should return nil (buffer cleared).
+	// Second flush returns same points (buffer persists until Clear).
+	points = acc.Flush(vin)
+	if len(points) != 2 {
+		t.Fatalf("expected 2 points on second flush, got %d", len(points))
+	}
+
+	// After Clear, flush returns nil.
+	acc.Clear(vin)
 	points = acc.Flush(vin)
 	if points != nil {
-		t.Fatal("expected nil after flush")
+		t.Fatal("expected nil after clear")
 	}
 }
 
@@ -207,28 +214,35 @@ func TestCoordsToMapbox(t *testing.T) {
 	}
 }
 
-func TestRouteAccumulator_BufferResetAfterFlush(t *testing.T) {
+func TestRouteAccumulator_FullTrailAfterFlush(t *testing.T) {
 	acc := newRouteAccumulator(2, 0)
 
 	vin := "5YJ3E1EA1NF000001"
 
-	// Fill and flush first batch.
+	// Fill and flush first batch (2 points).
 	acc.Add(vin, routeCoordinate{Latitude: 1.0, Longitude: 2.0})
 	result := acc.Add(vin, routeCoordinate{Latitude: 3.0, Longitude: 4.0})
 	if !result.ShouldFlush {
 		t.Fatal("expected flush")
 	}
+	if len(result.Points) != 2 {
+		t.Fatalf("expected 2 points in first flush, got %d", len(result.Points))
+	}
 
-	// Fill and flush second batch — should only contain new points.
+	// Add 2 more points — second flush contains ALL 4 points (full trail).
 	acc.Add(vin, routeCoordinate{Latitude: 5.0, Longitude: 6.0})
 	result = acc.Add(vin, routeCoordinate{Latitude: 7.0, Longitude: 8.0})
 	if !result.ShouldFlush {
 		t.Fatal("expected flush on second batch")
 	}
-	if len(result.Points) != 2 {
-		t.Fatalf("expected 2 points in second batch, got %d", len(result.Points))
+	if len(result.Points) != 4 {
+		t.Fatalf("expected 4 points (full trail), got %d", len(result.Points))
 	}
-	if result.Points[0].Latitude != 5.0 {
-		t.Fatalf("expected first point lat=5.0, got %f", result.Points[0].Latitude)
+	// Verify all points are present in order.
+	if result.Points[0].Latitude != 1.0 {
+		t.Fatalf("expected first point lat=1.0, got %f", result.Points[0].Latitude)
+	}
+	if result.Points[3].Latitude != 7.0 {
+		t.Fatalf("expected fourth point lat=7.0, got %f", result.Points[3].Latitude)
 	}
 }
