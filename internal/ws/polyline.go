@@ -69,7 +69,6 @@ func extractProtoStringField1(data []byte) (string, error) {
 // decodeVarint reads a protobuf varint from buf. Returns the value and
 // the number of bytes consumed. Returns (0, 0) on error.
 func decodeVarint(buf []byte) (value, bytesRead int) {
-	value := 0
 	shift := 0
 	for i, b := range buf {
 		value |= int(b&0x7f) << shift
