@@ -180,7 +180,9 @@ func deriveVehicleStatus(fields map[string]any) string {
 	}
 
 	switch {
-	case gear == "D" || gear == "R" || speed > 0:
+	case gear == "D" || gear == "R":
+		return "driving"
+	case speed > 0:
 		return "driving"
 	default:
 		return "parked"
