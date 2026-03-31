@@ -76,7 +76,11 @@ func mapRoutePoints(pts []events.RoutePoint) []RoutePointRecord {
 }
 
 // formatLocation formats a Location as a "lat,lng" string for the Prisma
-// schema's string-typed location columns.
+// schema's string-typed location columns. Returns empty string if both
+// coordinates are zero (protobuf default for "not set").
 func formatLocation(loc events.Location) string {
+	if loc.Latitude == 0 && loc.Longitude == 0 {
+		return ""
+	}
 	return fmt.Sprintf("%.6f,%.6f", loc.Latitude, loc.Longitude)
 }
