@@ -71,7 +71,7 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 	}
 
 	endpoint := r.oauthEndpoint // #nosec G107 -- hardcoded in constructor, not user input
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode())) //nolint:gosec
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode())) //nolint:gosec // endpoint is hardcoded above
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)
 	}
