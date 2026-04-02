@@ -9,10 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// AccountRepo reads from the Prisma-owned "Account" table to retrieve
-// OAuth tokens stored during Tesla account linking. This repo is
-// strictly read-only — the Account table is managed by NextAuth in
-// the Next.js app.
+// AccountRepo reads and updates the Prisma-owned "Account" table for
+// OAuth tokens stored during Tesla account linking. Reads token data
+// for Fleet API calls; writes updated tokens after auto-refresh.
 type AccountRepo struct {
 	pool *pgxpool.Pool
 }
