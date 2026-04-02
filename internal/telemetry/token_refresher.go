@@ -70,13 +70,14 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		r.oauthEndpoint,		strings.NewReader(form.Encode()))
+		r.oauthEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := r.httpClient.Do(req)	if err != nil {
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: http request: %w", err)
 	}
 	defer resp.Body.Close()
