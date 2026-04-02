@@ -109,9 +109,9 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// Location / Navigation — high frequency with delta filter
 		FleetFieldLocation:         {IntervalSeconds: 2, MinimumDelta: &locationDelta},
 		FleetFieldGpsHeading:       {IntervalSeconds: 5},
-		FleetFieldOriginLocation:   {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(60)},
-		FleetFieldDestLocation:     {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(60)},
-		FleetFieldDestinationName:  {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(60)},
+		FleetFieldOriginLocation:   {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestLocation:     {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldDestinationName:  {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
 		FleetFieldRouteLine:        {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(60)},
 		// RouteLastUpdated omitted — broken per Tesla docs, wastes buffer.
 		FleetFieldMilesToArrival:   {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
