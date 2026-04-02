@@ -32,15 +32,15 @@ func (t TeslaRefreshedToken) ExpiresAt() time.Time {
 	return time.Now().Add(time.Duration(t.ExpiresIn) * time.Second)
 }
 
+// teslaOAuthEndpoint is the Tesla OAuth2 token endpoint URL.
+const teslaOAuthEndpoint = "https://auth.tesla.com/oauth2/v3/token"
+
 // TokenRefresher refreshes expired Tesla OAuth tokens using the Tesla
 // authorization server's refresh_token grant.
 type TokenRefresher struct {
 	config     TeslaOAuthConfig
 	httpClient *http.Client
 	logger     *slog.Logger
-	// oauthEndpoint is the Tesla OAuth2 endpoint URL. Always set to the
-	// production endpoint in NewTokenRefresher; tests override for httptest.
-	oauthEndpoint string
 }
 
 // NewTokenRefresher creates a TokenRefresher that calls Tesla's OAuth2 endpoint
@@ -51,7 +51,6 @@ func NewTokenRefresher(cfg TeslaOAuthConfig, logger *slog.Logger) *TokenRefreshe
 		config:     cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		logger:     logger,
-		oauthEndpoint: "https://auth.tesla.com/oauth2/v3/token",
 	}
 }
 
@@ -59,6 +58,13 @@ func NewTokenRefresher(cfg TeslaOAuthConfig, logger *slog.Logger) *TokenRefreshe
 // Tesla's OAuth2 token endpoint. Returns the refreshed tokens or an error
 // describing the failure.
 func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (TeslaRefreshedToken, error) {
+	return r.refreshWithEndpoint(ctx, teslaOAuthEndpoint, refreshToken)
+}
+
+// refreshWithEndpoint is the internal implementation that accepts an explicit
+// endpoint URL. Refresh() always passes the hardcoded const; tests call this
+// directly with an httptest.Server URL.
+func (r *TokenRefresher) refreshWithEndpoint(ctx context.Context, endpoint, refreshToken string) (TeslaRefreshedToken, error) {
 	if refreshToken == "" {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: refresh token is empty")
 	}
@@ -70,14 +76,13 @@ func (r *TokenRefresher) Refresh(ctx context.Context, refreshToken string) (Tesl
 		"refresh_token": {refreshToken},
 	}
 
-	endpoint := r.oauthEndpoint // #nosec G107 -- hardcoded in constructor, not user input
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode())) //nolint:gosec // endpoint is hardcoded above
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := r.httpClient.Do(req) //nolint:gosec // #nosec G107
+	resp, err := r.httpClient.Do(req)
 	if err != nil {
 		return TeslaRefreshedToken{}, fmt.Errorf("TokenRefresher.Refresh: http request: %w", err)
 	}

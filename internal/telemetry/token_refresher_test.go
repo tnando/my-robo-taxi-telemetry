@@ -113,9 +113,7 @@ func TestTokenRefresher_Refresh(t *testing.T) {
 				ClientID:     "test-client-id",
 				ClientSecret: "test-client-secret",
 			}, discardLogger())
-			refresher.oauthEndpoint = srv.URL // inject test server URL
-
-			result, err := refresher.Refresh(context.Background(), tt.refreshToken)
+			result, err := refresher.refreshWithEndpoint(context.Background(), srv.URL, tt.refreshToken)
 
 			if tt.wantErr {
 				if err == nil {
