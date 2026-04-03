@@ -103,6 +103,8 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"destinationLongitude", derefFloat(u.DestinationLongitude)},
 		{"originLatitude", derefFloat(u.OriginLatitude)},
 		{"originLongitude", derefFloat(u.OriginLongitude)},
+		{"etaMinutes", derefInt(u.EtaMinutes)},
+		{"tripDistanceRemaining", derefFloat(u.TripDistRemaining)},
 	}
 }
 
@@ -146,6 +148,12 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 		setClauses = append(setClauses, fmt.Sprintf("%q = $%d", col.col, argIdx))
 		args = append(args, col.val)
 		argIdx++
+	}
+
+	// ClearFields: explicitly SET NULL for columns that should be cleared
+	// (e.g. navigation cancelled by the vehicle).
+	for _, col := range u.ClearFields {
+		setClauses = append(setClauses, fmt.Sprintf("%q = NULL", col))
 	}
 
 	if len(setClauses) == 0 {
