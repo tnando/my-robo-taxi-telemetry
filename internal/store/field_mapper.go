@@ -34,11 +34,11 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 // names that should be SET NULL when the vehicle marks the field invalid
 // (e.g. navigation cancelled).
 var navFieldColumns = map[string][]string{
-	"destinationName":     {"destinationName"},
-	"minutesToArrival":    {"etaMinutes"},
-	"milesToArrival":      {"tripDistanceRemaining"},
-	"originLocation":      {"originLatitude", "originLongitude"},
-	"destinationLocation": {"destinationLatitude", "destinationLongitude"},
+	string(telemetry.FieldDestinationName): {"destinationName"},
+	string(telemetry.FieldMinutesToArrival): {"etaMinutes"},
+	string(telemetry.FieldMilesToArrival):   {"tripDistanceRemaining"},
+	string(telemetry.FieldOriginLocation):   {"originLatitude", "originLongitude"},
+	string(telemetry.FieldDestLocation):     {"destinationLatitude", "destinationLongitude"},
 }
 
 // mapTelemetryToUpdate converts a map of telemetry field values into a

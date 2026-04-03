@@ -139,9 +139,15 @@ func buildTelemetryUpdate(vin string, u VehicleUpdate) (query string, args []any
 	var setClauses []string
 	argIdx := 1
 
+	// Build a set of columns to clear so we can skip them in the regular loop.
+	clearSet := make(map[string]bool, len(u.ClearFields))
+	for _, col := range u.ClearFields {
+		clearSet[col] = true
+	}
+
 	for _, col := range updateColumns(u) {
-		if col.val == nil {
-			continue
+		if col.val == nil || clearSet[col.col] {
+			continue // skip nil values AND columns being explicitly cleared
 		}
 		// %q produces Go double-quoted strings which match PostgreSQL's
 		// double-quoted identifier syntax. Column names are hardcoded constants.
