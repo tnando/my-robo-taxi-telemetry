@@ -69,10 +69,12 @@ func (b *Broadcaster) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop unsubscribes from all event bus topics. After Stop returns, no
-// further events will be processed.
+// Stop unsubscribes from all event bus topics and cancels any pending
+// nav accumulator timers. After Stop returns, no further events will
+// be processed and no timer callbacks will fire.
 func (b *Broadcaster) Stop() error {
 	b.unsubscribeAll()
+	b.nav.Stop()
 	b.logger.Info("broadcaster stopped")
 	return nil
 }
@@ -159,11 +161,11 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 	}
 	b.routes.Clear(payload.VIN)
 
-	// Flush and clear any pending nav fields for this VIN.
+	// Flush any pending nav fields for this VIN. Flush cancels the timer
+	// and clears state, so a separate Clear call is unnecessary.
 	if navFields := b.nav.Flush(payload.VIN); len(navFields) > 0 {
 		b.flushNav(payload.VIN, navFields)
 	}
-	b.nav.Clear(payload.VIN)
 
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
 		VehicleID: vehicleID,

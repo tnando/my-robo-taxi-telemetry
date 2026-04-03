@@ -111,3 +111,20 @@ func (a *navAccumulator) Clear(vin string) {
 	}
 	delete(a.pending, vin)
 }
+
+// Stop cancels all pending timers across all VINs. Called during
+// Broadcaster shutdown to prevent timer callbacks from racing with
+// teardown. Does not invoke onFlush for pending fields.
+func (a *navAccumulator) Stop() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	for vin, timer := range a.timers {
+		timer.Stop()
+		delete(a.timers, vin)
+	}
+	// Clear all pending state.
+	for vin := range a.pending {
+		delete(a.pending, vin)
+	}
+}

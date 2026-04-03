@@ -236,9 +236,11 @@ func TestNavAccumulator_FlushEmptyVIN(t *testing.T) {
 }
 
 func TestNavAccumulator_ClearRemovesState(t *testing.T) {
-	flushCount := 0
-	acc := newNavAccumulator(10*time.Second, func(_ string, _ map[string]events.TelemetryValue) {
-		flushCount++
+	// Use a short interval so we can verify the timer was cancelled by
+	// waiting for it NOT to fire within a bounded duration.
+	callbackFired := make(chan struct{}, 1)
+	acc := newNavAccumulator(50*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+		callbackFired <- struct{}{}
 	})
 
 	vin := "5YJ3E1EA1NF000001"
@@ -254,10 +256,12 @@ func TestNavAccumulator_ClearRemovesState(t *testing.T) {
 		t.Fatal("expected nil after clear")
 	}
 
-	// Timer should have been cancelled.
-	time.Sleep(50 * time.Millisecond)
-	if flushCount != 0 {
-		t.Fatalf("expected 0 timer flushes after clear, got %d", flushCount)
+	// Timer should have been cancelled — verify no callback within 3x the interval.
+	select {
+	case <-callbackFired:
+		t.Fatal("expected no timer flush after clear, but callback fired")
+	case <-time.After(150 * time.Millisecond):
+		// Success — timer did not fire.
 	}
 }
 
@@ -302,6 +306,30 @@ func TestNavAccumulator_MultipleVINsIndependent(t *testing.T) {
 	}
 	if *flushedByVIN[vin2]["destinationName"].StringVal != "Work" {
 		t.Fatalf("vin2 expected Work, got %v", flushedByVIN[vin2]["destinationName"])
+	}
+}
+
+func TestNavAccumulator_StopCancelsAllTimers(t *testing.T) {
+	callbackFired := make(chan struct{}, 2)
+	acc := newNavAccumulator(50*time.Millisecond, func(_ string, _ map[string]events.TelemetryValue) {
+		callbackFired <- struct{}{}
+	})
+
+	acc.Add("VIN1", map[string]events.TelemetryValue{
+		"destinationName": {StringVal: ptrString("A")},
+	})
+	acc.Add("VIN2", map[string]events.TelemetryValue{
+		"destinationName": {StringVal: ptrString("B")},
+	})
+
+	acc.Stop()
+
+	// No callbacks should fire after Stop.
+	select {
+	case <-callbackFired:
+		t.Fatal("expected no callbacks after Stop")
+	case <-time.After(150 * time.Millisecond):
+		// Success.
 	}
 }
 

@@ -95,12 +95,13 @@ func (b *Broadcaster) flushNav(vin string, fields map[string]events.TelemetryVal
 	if len(clientFields) == 0 {
 		return
 	}
-	clientFields["lastUpdated"] = time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339)
+	clientFields["lastUpdated"] = now
 
 	msg, err := marshalWSMessage(msgTypeVehicleUpdate, vehicleUpdatePayload{
 		VehicleID: vehicleID,
 		Fields:    clientFields,
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Timestamp: now,
 	})
 	if err != nil {
 		b.logger.Error("broadcaster.flushNav: marshal failed",
