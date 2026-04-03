@@ -114,8 +114,8 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		FleetFieldDestinationName:  {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 		FleetFieldRouteLine:        {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 		// RouteLastUpdated omitted — broken per Tesla docs, wastes buffer.
-		FleetFieldMilesToArrival:   {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
-		FleetFieldMinutesToArrival: {IntervalSeconds: 10, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldMilesToArrival:   {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
+		FleetFieldMinutesToArrival: {IntervalSeconds: 1, ResendIntervalSeconds: intPtr(30)},
 
 		// Battery / Charging — medium frequency
 		FleetFieldSOC:                 {IntervalSeconds: 30},
