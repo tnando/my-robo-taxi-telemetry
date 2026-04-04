@@ -6,8 +6,8 @@ import (
 	"math"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/polyline"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/telemetry"
-	"github.com/tnando/my-robo-taxi-telemetry/internal/ws"
 )
 
 // fieldApplier applies a TelemetryValue to the matching field on a
@@ -171,7 +171,7 @@ func applyRouteLine(u *VehicleUpdate, val events.TelemetryValue) bool {
 		u.ClearFields = append(u.ClearFields, "navRouteCoordinates")
 		return true
 	}
-	coords, err := ws.DecodeRouteLine(*val.StringVal)
+	coords, err := polyline.DecodeRouteLine(*val.StringVal)
 	if err != nil {
 		slog.Warn("applyRouteLine: decode failed, clearing navRouteCoordinates",
 			slog.Any("error", err),
