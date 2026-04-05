@@ -132,40 +132,52 @@ cmd/ → internal/* → pkg/sdk (interfaces only)
 - **Test coverage target:** 80%+ on `internal/` packages
 - **No test pollution:** Each test creates its own data, cleans up after itself
 
-## GitHub Issues and Agent Routing
+## Contracts
 
-Every GitHub issue is labeled with the **agent** that should implement it. When picking up an issue, Claude MUST use the specified agent(s) for implementation.
+The SDK v1 contract surface lives in [`docs/contracts/`](docs/contracts/README.md). It is the authoritative source for every WebSocket message, REST endpoint, persisted field, atomic group, classification label, and state transition exposed by the SDK.
+
+- Read [`docs/contracts/README.md`](docs/contracts/README.md) before touching WebSocket messages, DB schema, or public SDK API surface.
+- Every contract change follows the PR workflow: `sdk-architect` review + `contract-guard` gate, per the Merge Policy above.
+- Contract drift (schema change without doc update, missing P0/P1/P2 label, broken atomic group) blocks merge unconditionally.
+
+## Linear Issues and Agent Routing
+
+**Linear is the source of truth for issues and roadmap.** Team key: `MYR` (e.g., `MYR-42`). GitHub is connected to Linear for automatic status sync. Every Linear issue is labeled with the **agent** that should implement it. When picking up an issue, Claude MUST use the specified agent(s) for implementation.
 
 ### Agent Labels
 
-Issues carry one or more `agent:<name>` labels that map directly to `.claude/agents/<name>.md`:
+Issues carry one or more `Agent/<name>` labels in Linear that map directly to `.claude/agents/<name>.md`:
 
-| Label | Agent File | When to Use |
+| Linear Label | Agent File | When to Use |
 |-------|-----------|-------------|
-| `agent:sdk-architect` | `sdk-architect.md` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence, coordinates SDK work. Auto-invoked on contract-relevant paths. |
-| `agent:sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, RN, Node) |
-| `agent:sdk-swift` | `sdk-swift.md` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
-| `agent:contract-tester` | `contract-tester.md` | Contract conformance, FR/NFR, chaos test scenarios |
-| `agent:contract-guard` | `contract-guard.md` | Automated PR gate — blocks contract drift (session + CI) |
-| `agent:go-engineer` | `go-engineer.md` | Go implementation, constrained by SDK contract |
-| `agent:tesla-telemetry` | `tesla-telemetry.md` | Tesla protocol, protobuf, mTLS, cert management |
-| `agent:security` | `security.md` | Security, encryption, data classification (P0/P1/P2), RBAC |
-| `agent:testing` | `testing.md` | Unit tests (contract/FR/NFR/chaos owned by `contract-tester`) |
-| `agent:infra` | `infra.md` | CI/CD, observability stack, deployment, release pipelines |
-| `agent:ux-audit` | `ux-audit.md` | End-user experience quality audit |
+| `Agent/sdk-architect` | `sdk-architect.md` | **Supervisor** — owns requirements + contract docs, reviews every PR for contract adherence, coordinates SDK work. Auto-invoked on contract-relevant paths. |
+| `Agent/sdk-typescript` | `sdk-typescript.md` | TypeScript SDK implementation (core, React, RN, Node) |
+| `Agent/sdk-swift` | `sdk-swift.md` | Swift SDK implementation (iOS, iPadOS, macOS, watchOS, visionOS) |
+| `Agent/contract-tester` | `contract-tester.md` | Contract conformance, FR/NFR, chaos test scenarios |
+| `Agent/contract-guard` | `contract-guard.md` | Automated PR gate — blocks contract drift (session + CI) |
+| `Agent/go-engineer` | `go-engineer.md` | Go implementation, constrained by SDK contract |
+| `Agent/tesla-telemetry` | `tesla-telemetry.md` | Tesla protocol, protobuf, mTLS, cert management |
+| `Agent/security` | `security.md` | Security, encryption, data classification (P0/P1/P2), RBAC |
+| `Agent/testing` | `testing.md` | Unit tests (contract/FR/NFR/chaos owned by `contract-tester`) |
+| `Agent/infra` | `infra.md` | CI/CD, observability stack, deployment, release pipelines |
+| `Agent/ux-audit` | `ux-audit.md` | End-user experience quality audit |
 
-**Retired agents (do not use):** `agent:architect`, `agent:event-system`, `agent:websocket-sdk`, `agent:frontend-integration` — their responsibilities are absorbed by `sdk-architect`, `go-engineer`, `sdk-typescript`, and the SDK pattern (UI is a dumb SDK consumer; no dedicated frontend-integration agent needed).
+### Picking up issues
+
+- Trigger work from Linear via `W` then `O` (Open in Claude Code) — loads the issue into a new session with the configured prompt
+- Or say "pick up MYR-42" in an active session — Claude fetches the issue via the Linear MCP
+- Always fetch the latest issue body via the Linear MCP before implementing; comments may have newer context than the prompt snapshot
 
 ### Workflow (MUST FOLLOW)
 
 When picking up an issue, execute these steps in order:
 
-1. **Read the issue** — title, body, labels, milestone, and acceptance criteria
-2. **Create a feature branch** from main (see Branching Strategy below)
-3. **Identify ALL `agent:*` labels** on the issue — these are your implementation agents
+1. **Read the issue** — title, body, `Agent/*` labels, project, acceptance criteria, anchored FRs/NFRs
+2. **Create a feature branch** from main using Linear's `{{issue.branchName}}` (see Branching Strategy below)
+3. **Identify ALL `Agent/*` labels** on the issue — these are your implementation agents
 4. **Spin up the tagged agents** using the Agent tool following the execution order below
-5. **Commit in reasonable chunks** with the issue number in every commit message
-6. **Open a PR** when the issue is complete, carrying over the issue's labels
+5. **Commit in reasonable chunks** with the Linear identifier in every commit message (`MYR-<num> <verb> <what>`)
+6. **Open a PR** when the issue is complete; Linear auto-links it and transitions the issue to "In Review"
 
 ### Agent Execution Order (ENFORCED)
 
@@ -178,36 +190,36 @@ When picking up an issue, execute these steps in order:
 
 The architect reviews the plan, references FRs/NFRs in `docs/architecture/requirements.md`, and approves or redirects before implementation starts.
 
-**Phase 1 — Design (if `agent:sdk-architect` is explicitly tagged):**
+**Phase 1 — Design (if `Agent/sdk-architect` is explicitly tagged):**
 For planning sessions, architectural decisions, or new contract docs. Wait for its output before implementation.
 
 **Phase 2 — Implementation (spin up in parallel where possible):**
 Launch independent agents in parallel via multiple Agent tool calls in one message:
-- `agent:go-engineer` — server-side Go implementation
-- `agent:sdk-typescript` — TypeScript SDK implementation
-- `agent:sdk-swift` — Swift SDK implementation
-- `agent:tesla-telemetry` — Tesla protocol work
-- `agent:infra` — CI/CD, observability, deployment
+- `Agent/go-engineer` — server-side Go implementation
+- `Agent/sdk-typescript` — TypeScript SDK implementation
+- `Agent/sdk-swift` — Swift SDK implementation
+- `Agent/tesla-telemetry` — Tesla protocol work
+- `Agent/infra` — CI/CD, observability, deployment
 
 **Phase 3 — Contract enforcement (AUTO-INVOKED before PR):**
 `contract-guard` runs session-time against the working diff to catch contract drift before the PR is opened. Runs again at CI-time as a required check.
 
 **Phase 4 — Testing:**
-- `agent:testing` for unit tests
-- `agent:contract-tester` for contract conformance, FR/NFR, and chaos scenarios
+- `Agent/testing` for unit tests
+- `Agent/contract-tester` for contract conformance, FR/NFR, and chaos scenarios
 
-**Phase 5 — Security review (if `agent:security` is tagged):**
+**Phase 5 — Security review (if `Agent/security` is tagged):**
 Reviews for data classification, encryption, RBAC enforcement, audit logging.
 
 **Phase 6 — UX audit (ALWAYS runs):**
-`agent:ux-audit` reviews end-user experience impact.
+`Agent/ux-audit` reviews end-user experience impact.
 
 **Phase 7 — Architect PR review (AUTO-INVOKED on contract-touching PRs):**
 `sdk-architect` performs the final contract-adherence review before merge.
 
 ### Examples
 
-**Issue with labels `agent:sdk-architect, agent:go-engineer, agent:testing`:**
+**Issue with labels `Agent/sdk-architect`, `Agent/go-engineer`, `Agent/testing`:**
 1. `sdk-architect` → defines contract + scopes work (WAIT for output)
 2. `go-engineer` → implements against contract
 3. `contract-guard` → checks diff before PR
@@ -216,7 +228,7 @@ Reviews for data classification, encryption, RBAC enforcement, audit logging.
 6. `ux-audit` → UX impact
 7. `sdk-architect` → final PR review
 
-**Issue with labels `agent:sdk-typescript, agent:contract-tester`:**
+**Issue with labels `Agent/sdk-typescript`, `Agent/contract-tester`:**
 1. `sdk-architect` (auto) → approves the task scope
 2. `sdk-typescript` → implements TS SDK feature
 3. `contract-guard` → checks diff
@@ -224,7 +236,7 @@ Reviews for data classification, encryption, RBAC enforcement, audit logging.
 5. `ux-audit` → UX impact
 6. `sdk-architect` → final review
 
-**Issue with labels `agent:tesla-telemetry, agent:go-engineer, agent:security`:**
+**Issue with labels `Agent/tesla-telemetry`, `Agent/go-engineer`, `Agent/security`:**
 1. `sdk-architect` (auto) → approves scope
 2. `tesla-telemetry` + `go-engineer` in parallel → implement
 3. `contract-guard` → checks diff
@@ -232,16 +244,20 @@ Reviews for data classification, encryption, RBAC enforcement, audit logging.
 5. `ux-audit` → UX impact
 6. `sdk-architect` → final review
 
-### Milestones
+### Projects (SDK v1 roadmap)
 
-| Milestone | Phase | Focus |
-|-----------|-------|-------|
-| `Phase 1: Foundation` | Weeks 1-2 | Project scaffolding, event bus, config, DB layer, CI/CD |
-| `Phase 2: Tesla Integration` | Weeks 2-3 | mTLS, protobuf, telemetry receiver, Fleet API |
-| `Phase 3: Real-Time Processing` | Weeks 3-4 | Drive detection, geocoding, persistence, batch writes |
-| `Phase 4: Client WebSocket` | Weeks 4-5 | Auth, broadcast, SDK interfaces, frontend integration |
-| `Phase 5: Hardening` | Weeks 5-6 | Load tests, security audit, monitoring, deployment |
-| `Phase 6: Test Bench` | Ongoing | TUI dashboard, simulator, developer tooling |
+Work is organized into Linear Projects anchored to `docs/architecture/requirements.md` FRs/NFRs:
+
+| Project | Focus |
+|---------|-------|
+| P1 — Contract foundation | AsyncAPI/OpenAPI specs, JSON Schema, fixtures, data classification |
+| P2 — Backend SDK v1 | Go server: atomicity, 1s nav intervals, AES-256-GCM encryption, RBAC, audit |
+| P3 — TypeScript SDK v1 | Isomorphic SDK: core + React + RN adapters, <75KB bundle |
+| P4 — Swift SDK v1 | iOS 26+/iPadOS/macOS/watchOS/visionOS |
+| P5 — Observability & Scale | OTel, Prometheus/Grafana, 5K-client load tests, SLOs |
+| P6 — Web test bench | Contract/FR/NFR/chaos validation UI |
+| P7 — Frontend integration | Next.js consumes TS SDK (depends on P3) |
+| P8 — Autonomous agent | Linear Agent bot for hands-off issue delegation (post-v1) |
 
 ## Dev Tools (cmd/testbench, cmd/simulator)
 
@@ -280,35 +296,38 @@ go run ./cmd/simulator --server wss://localhost:443 --vehicles 5 --scenario high
 
 ## Branching Strategy (Enforced)
 
-When picking up a GitHub issue, ALWAYS create a feature branch from the latest `main`:
+When picking up a Linear issue, ALWAYS create a feature branch from the latest `main` using **Linear's auto-generated branch name**:
 
 ```bash
-git checkout main && git pull origin main && git checkout -b <issue-number>-<short-kebab-description>
+git checkout main && git pull origin main && git checkout -b <linear-branch-name>
 ```
 
-Branch name format: `<issue-number>-<short-kebab-description>` derived from the issue title.
+Branch name format: use the value Linear provides via `{{issue.branchName}}` in the Claude Code prompt (or copy from the Linear issue via `⌘⇧.`). This ensures GitHub ↔ Linear auto-sync (status transitions, PR linking) works correctly.
 
 Examples:
-- Issue #2 "Implement in-process event bus" → `2-event-bus`
-- Issue #9 "Telemetry receiver: mTLS WebSocket server" → `9-telemetry-receiver`
-- Issue #17 "Security audit" → `17-security-audit`
+- MYR-42 "Implement in-process event bus" → `thomas/myr-42-implement-in-process-event-bus`
+- MYR-9 "Telemetry receiver: mTLS WebSocket server" → `thomas/myr-9-telemetry-receiver-mtls-websocket-server`
+
+Do NOT hand-craft branch names — Linear's format is what the GitHub integration matches against.
 
 ## Commit Strategy
 
 ### Commit Message Format
 
-Every commit message MUST include the issue number and use imperative mood:
+Every commit message MUST include the Linear issue identifier and use imperative mood:
 
 ```
-#<issue> <Imperative verb> <what changed>
+MYR-<num> <Imperative verb> <what changed>
 ```
 
 Examples:
-- `#2 Add Bus interface and channel-based implementation`
-- `#2 Add backpressure handling with drop-oldest policy`
-- `#2 Add comprehensive tests for concurrent pub/sub`
-- `#9 Implement mTLS WebSocket server for Tesla vehicles`
-- `#9 Add protobuf decoding with field validation`
+- `MYR-42 Add Bus interface and channel-based implementation`
+- `MYR-42 Add backpressure handling with drop-oldest policy`
+- `MYR-42 Add comprehensive tests for concurrent pub/sub`
+- `MYR-9 Implement mTLS WebSocket server for Tesla vehicles`
+- `MYR-9 Add protobuf decoding with field validation`
+
+Linear auto-links commits containing `MYR-<num>` to the referenced issue.
 
 ### Commit Cadence
 
