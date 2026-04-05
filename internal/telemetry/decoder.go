@@ -66,6 +66,13 @@ func (d *Decoder) Decode(raw []byte) (DecodeResult, error) {
 		return DecodeResult{}, fmt.Errorf("decoder.Decode: decode protobuf: %w", err)
 	}
 
+	// Tesla's typed protobuf format often omits the VIN from the protobuf
+	// Payload — it's in the FlatBuffers envelope's deviceId instead.
+	// Fill it in before validation so DecodePayload doesn't reject it.
+	if payload.GetVin() == "" && env.DeviceID != "" {
+		payload.Vin = env.DeviceID
+	}
+
 	evt, fieldErrs, err := d.DecodePayload(&payload)
 	if err != nil {
 		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
@@ -171,9 +178,11 @@ func extractValue(datum *tpb.Datum) (events.TelemetryValue, error) {
 		return events.TelemetryValue{}, ErrNilValue
 	}
 
-	// Check the invalid flag first.
+	// When the vehicle marks a datum as invalid, return a TelemetryValue
+	// with Invalid=true instead of an error so downstream consumers can
+	// clear stale frontend state (e.g. cancelled nav destinations).
 	if _, ok := v.Value.(*tpb.Value_Invalid); ok {
-		return events.TelemetryValue{}, ErrInvalidValue
+		return events.TelemetryValue{Invalid: true}, nil
 	}
 
 	return convertValue(datum.GetKey(), v)
