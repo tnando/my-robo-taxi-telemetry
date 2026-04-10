@@ -123,6 +123,15 @@ func (a *routeAccumulator) Clear(vin string) {
 	delete(a.lastFlushCount, vin)
 }
 
+// Len returns the number of accumulated points for the given VIN without
+// mutating any state. Used by tests to wait deterministically on async
+// bus event processing.
+func (a *routeAccumulator) Len(vin string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.routes[vin])
+}
+
 // coordsToMapbox converts route coordinates to the [lng, lat] slice format
 // expected by the frontend (Mapbox/GeoJSON convention).
 func coordsToMapbox(points []routeCoordinate) [][]float64 {

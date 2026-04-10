@@ -1,0 +1,331 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/vehicle-state.schema.json",
+  "title": "VehicleState",
+  "description": "Canonical vehicle state as consumed by MyRoboTaxi SDKs. Defines every field name, type, unit, nullability, atomic group membership, and data classification. Both the WebSocket vehicle_update messages and the REST snapshot endpoint return subsets of this schema.",
+  "type": "object",
+  "required": [
+    "vehicleId",
+    "name",
+    "status",
+    "chargeLevel",
+    "estimatedRange",
+    "speed",
+    "heading",
+    "latitude",
+    "longitude",
+    "interiorTemp",
+    "exteriorTemp",
+    "odometerMiles",
+    "lastUpdated"
+  ],
+  "properties": {
+    "vehicleId": {
+      "type": "string",
+      "description": "Opaque database identifier (cuid). NOT the VIN. All SDK API calls use this ID (FR-4.2).",
+      "x-classification": "P0",
+      "examples": ["clxyz1234567890abcdef"]
+    },
+    "name": {
+      "type": "string",
+      "description": "User-assigned vehicle name.",
+      "x-classification": "P0",
+      "examples": ["Optimus"]
+    },
+    "model": {
+      "type": ["string", "null"],
+      "description": "Vehicle model (e.g., 'Model 3', 'Model Y'). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
+      "examples": ["Model 3"]
+    },
+    "year": {
+      "type": ["integer", "null"],
+      "description": "Model year. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
+      "examples": [2024]
+    },
+    "color": {
+      "type": ["string", "null"],
+      "description": "Vehicle exterior color. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
+      "examples": ["Midnight Silver Metallic"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["driving", "parked", "charging", "offline", "in_service"],
+      "description": "Derived vehicle status. Part of the gear atomic group -- updated atomically with gearPosition. When gearPosition is D or R, status is 'driving'; otherwise 'parked'. The 'charging', 'offline', and 'in_service' states are set by server-side logic.",
+      "x-classification": "P0",
+      "x-atomic-group": "gear"
+    },
+    "speed": {
+      "type": "integer",
+      "description": "Current vehicle speed. Rounded to nearest integer from Tesla's float emission.",
+      "x-unit": "mph",
+      "x-classification": "P0",
+      "minimum": 0
+    },
+    "heading": {
+      "type": "integer",
+      "description": "Compass heading. 0 = North, 90 = East, 180 = South, 270 = West.",
+      "x-unit": "degrees",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 359,
+      "x-atomic-group": "gps"
+    },
+    "latitude": {
+      "type": "number",
+      "description": "Current GPS latitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -90,
+      "maximum": 90,
+      "x-atomic-group": "gps"
+    },
+    "longitude": {
+      "type": "number",
+      "description": "Current GPS longitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -180,
+      "maximum": 180,
+      "x-atomic-group": "gps"
+    },
+    "locationName": {
+      "type": ["string", "null"],
+      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P1",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
+    },
+    "locationAddress": {
+      "type": ["string", "null"],
+      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-classification": "P1",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
+    },
+    "gearPosition": {
+      "type": ["string", "null"],
+      "enum": ["P", "D", "R", "N", null],
+      "description": "Transmission gear position. Null when vehicle is asleep or gear has not yet been reported. When gearPosition changes, status is re-derived and both are delivered together.",
+      "x-classification": "P0",
+      "x-atomic-group": "gear"
+    },
+    "chargeLevel": {
+      "type": "integer",
+      "description": "Battery state of charge. Rounded to nearest integer from Tesla's float emission. Maps from Tesla SOC or BatteryLevel fields.",
+      "x-unit": "percent",
+      "x-classification": "P0",
+      "minimum": 0,
+      "maximum": 100,
+      "x-atomic-group": "charge"
+    },
+    "estimatedRange": {
+      "type": "integer",
+      "description": "Estimated remaining driving range based on current charge. Rounded to nearest integer.",
+      "x-unit": "miles",
+      "x-classification": "P0",
+      "minimum": 0,
+      "x-atomic-group": "charge"
+    },
+    "interiorTemp": {
+      "type": "integer",
+      "description": "Cabin interior temperature. Rounded to nearest integer.",
+      "x-unit": "fahrenheit",
+      "x-classification": "P0"
+    },
+    "exteriorTemp": {
+      "type": "integer",
+      "description": "Ambient exterior temperature. Rounded to nearest integer.",
+      "x-unit": "fahrenheit",
+      "x-classification": "P0"
+    },
+    "odometerMiles": {
+      "type": "integer",
+      "description": "Total odometer reading. Rounded to nearest integer.",
+      "x-unit": "miles",
+      "x-classification": "P0",
+      "minimum": 0
+    },
+    "fsdMilesToday": {
+      "type": ["number", "null"],
+      "description": "Full Self-Driving miles driven since last counter reset (typically daily). SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go. Will be nullable until MYR-24 lands; consumers MUST tolerate null.",
+      "x-unit": "miles",
+      "x-classification": "P0",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24",
+      "minimum": 0
+    },
+    "destinationName": {
+      "type": ["string", "null"],
+      "description": "Name of the active navigation destination. Null when no navigation is active. When navigation is cancelled, this field and all other navigation group fields are atomically cleared to null.",
+      "x-classification": "P1",
+      "x-atomic-group": "navigation",
+      "examples": ["Whole Foods Market"]
+    },
+    "destinationAddress": {
+      "type": ["string", "null"],
+      "description": "Street address of the active navigation destination. Null when no navigation is active. SPEC-ONLY until MYR-24: not currently loaded by the Go Vehicle struct in internal/store/types.go; will always be null in snapshots until MYR-24 lands.",
+      "x-classification": "P1",
+      "x-atomic-group": "navigation",
+      "x-spec-only": true,
+      "x-spec-only-issue": "MYR-24"
+    },
+    "destinationLatitude": {
+      "type": ["number", "null"],
+      "description": "Latitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -90,
+      "maximum": 90,
+      "x-atomic-group": "navigation"
+    },
+    "destinationLongitude": {
+      "type": ["number", "null"],
+      "description": "Longitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -180,
+      "maximum": 180,
+      "x-atomic-group": "navigation"
+    },
+    "originLatitude": {
+      "type": ["number", "null"],
+      "description": "Latitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -90,
+      "maximum": 90,
+      "x-atomic-group": "navigation"
+    },
+    "originLongitude": {
+      "type": ["number", "null"],
+      "description": "Longitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "x-unit": "degrees",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "minimum": -180,
+      "maximum": 180,
+      "x-atomic-group": "navigation"
+    },
+    "etaMinutes": {
+      "type": ["integer", "null"],
+      "description": "Estimated time of arrival in minutes remaining. Null when no navigation is active. Rounded to nearest integer.",
+      "x-unit": "minutes",
+      "x-classification": "P0",
+      "minimum": 0,
+      "x-atomic-group": "navigation"
+    },
+    "tripDistanceRemaining": {
+      "type": ["number", "null"],
+      "description": "Remaining distance to navigation destination. Null when no navigation is active.",
+      "x-unit": "miles",
+      "x-classification": "P0",
+      "minimum": 0,
+      "x-atomic-group": "navigation"
+    },
+    "navRouteCoordinates": {
+      "type": ["array", "null"],
+      "description": "Active navigation route as an array of [longitude, latitude] coordinate pairs (GeoJSON/Mapbox order). Decoded from Tesla's RouteLine (Base64-encoded protobuf wrapping a Google Encoded Polyline at 1e6 precision). Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "x-classification": "P1",
+      "x-encrypted": true,
+      "x-atomic-group": "navigation",
+      "items": {
+        "type": "array",
+        "items": {
+          "type": "number"
+        },
+        "minItems": 2,
+        "maxItems": 2,
+        "description": "A coordinate pair: [longitude, latitude]."
+      }
+    },
+    "lastUpdated": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of the most recent telemetry update applied to this vehicle state.",
+      "x-classification": "P0"
+    }
+  },
+  "x-atomic-groups": {
+    "navigation": {
+      "description": "Navigation state delivered as a single atomic unit. When any navigation field changes, the server accumulates all sibling nav fields within a 500ms debounce window (NFR-3.2) and delivers them together. When navigation is cancelled, ALL fields in this group are atomically cleared to null (FR-2.3).",
+      "fields": [
+        "destinationName",
+        "destinationAddress",
+        "destinationLatitude",
+        "destinationLongitude",
+        "originLatitude",
+        "originLongitude",
+        "etaMinutes",
+        "tripDistanceRemaining",
+        "navRouteCoordinates"
+      ],
+      "consistency-predicates": [
+        "If destinationLatitude is non-null, then destinationLongitude MUST also be non-null, and vice versa.",
+        "If originLatitude is non-null, then originLongitude MUST also be non-null, and vice versa.",
+        "If destinationName is non-null, then destinationLatitude, destinationLongitude, and navRouteCoordinates MUST also be non-null (NFR-3.3).",
+        "If any navigation field is null, ALL navigation fields MUST be null (atomic clear on nav cancel, FR-2.3).",
+        "etaMinutes and tripDistanceRemaining MAY be null independently during the 500ms accumulation window, but the DB snapshot MUST have all-or-nothing consistency."
+      ],
+      "nullability": "All fields nullable. Null = no active navigation."
+    },
+    "charge": {
+      "description": "Battery and charge state delivered together. When any charge field changes, sibling fields are included in the same update message.",
+      "fields": [
+        "chargeLevel",
+        "estimatedRange"
+      ],
+      "consistency-predicates": [
+        "chargeLevel and estimatedRange MUST both be present in the DB snapshot (NFR-3.5). They are non-nullable with default 0.",
+        "chargeLevel: 0 is context-dependent. With status == 'offline', the UI SHOULD interpret chargeLevel: 0 as 'unknown' (no telemetry received yet, DB default). With status == 'driving' or 'parked' (i.e., the vehicle is online), chargeLevel: 0 SHOULD be interpreted as 'critical' or 'empty battery'. See §2.2 of vehicle-state-schema.md."
+      ],
+      "nullability": "Non-nullable. Default 0 on initial vehicle creation."
+    },
+    "gps": {
+      "description": "GPS position and orientation delivered together. On initial connect before the first GPS fix, latitude and longitude may be 0 (DB default).",
+      "fields": [
+        "latitude",
+        "longitude",
+        "heading"
+      ],
+      "consistency-predicates": [
+        "latitude and longitude MUST always be present together (NFR-3.3).",
+        "heading MUST be present whenever latitude/longitude are present.",
+        "Values of 0,0 for latitude/longitude represent the DB default (no GPS fix yet), not a valid location."
+      ],
+      "nullability": "Non-nullable in DB (default 0). SDK consumers SHOULD treat 0,0 as 'no fix'."
+    },
+    "gear": {
+      "description": "Gear position and derived vehicle status delivered together. When gearPosition changes, the server derives status (driving/parked) and includes both fields in the same message.",
+      "fields": [
+        "gearPosition",
+        "status"
+      ],
+      "consistency-predicates": [
+        "When gearPosition is 'D' or 'R', status MUST be 'driving'.",
+        "When gearPosition is 'P' or 'N', status MUST be 'parked' (unless overridden by charging/offline/in_service logic).",
+        "status is always present; gearPosition is nullable (null = vehicle asleep or gear not yet reported)."
+      ],
+      "nullability": "gearPosition is nullable. status is non-nullable (default 'offline')."
+    }
+  },
+  "dependentRequired": {
+    "destinationLatitude": ["destinationLongitude"],
+    "destinationLongitude": ["destinationLatitude"],
+    "originLatitude": ["originLongitude"],
+    "originLongitude": ["originLatitude"]
+  }
+}
