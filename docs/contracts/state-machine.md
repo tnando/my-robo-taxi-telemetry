@@ -275,7 +275,7 @@ This section maps every WebSocket server message type to the state transitions i
 | WebSocket closed (clean) | `connected → disconnected` (C-6) | ALL groups: `ready → stale` (D-4) | If driving: `driving → idle` (DR-4) |
 | WebSocket error (transport) | `connected → disconnected` (C-7) | ALL groups: `ready → stale` (D-4) | If driving: `driving → idle` (DR-4) |
 | Auth rejected (`error` with `auth_failed`) | `connected → error` (C-8) | -- | -- |
-| `vehicle_update` (normal fields) | -- | Per-group: `loading → ready` (D-1) or `ready → ready` (D-3) or `cleared → ready` (D-9) | -- |
+| `vehicle_update` (normal fields) | -- | Per-group: `ready → ready` (D-3) or `cleared → ready` (D-9) or `error → ready` (D-12) | -- |
 | `vehicle_update` (field-invalid / clear) | -- | Affected group: `ready → cleared` (D-5) | -- |
 | `drive_started` | -- | -- | `idle → driving` (DR-1) or `ended → driving` (DR-6) |
 | `drive_updated` (route point in `vehicle_update`) | -- | GPS group: `ready → ready` (D-3) | `driving → driving` (DR-2) |
