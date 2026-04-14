@@ -460,11 +460,12 @@ components:
               code: auth_timeout
               message: 'hub.authenticateClient: auth timeout'
         - name: rate-limited-per-user
-          summary: Per-user concurrent-connection cap exceeded; paired with close code 4003.
+          summary: Per-user concurrent-connection cap exceeded; paired with close code 4003. Carries `subCode: "device_cap"` so SDKs surface an actionable "too many devices" UI message instead of a generic rate-limit toast. See websocket-protocol.md §6.1.1.
           payload:
             type: error
             payload:
               code: rate_limited
+              subCode: device_cap
               message: per-user connection cap exceeded
 
     Subscribe:

@@ -229,6 +229,12 @@
           "type": "string",
           "description": "Human-readable description for logs and developer tooling. P0 BUT MUST NOT contain P1 values (no GPS, no addresses, no tokens, no emails, no VINs unless redacted to ***XXXX). Per data-classification.md §2.1-2.2, error message construction sites MUST use opaque IDs only.",
           "x-classification": "P0"
+        },
+        "subCode": {
+          "type": "string",
+          "description": "Optional typed sub-code for branching consumer-visible UI when the primary code is ambiguous across carriers. Currently defined only for `rate_limited`: when the server rejects a connection because it breached the per-user cap (post-auth, close 4003), the error frame MUST carry `subCode: \"device_cap\"` so SDKs can surface an actionable 'Too many devices signed in' message instead of a generic rate-limit toast. Per-IP breaches (HTTP 429 on upgrade) do NOT carry a sub-code because the SDK cannot distinguish NAT-mate floods from user intent. See websocket-protocol.md §6.1.1 for the full device_cap UX contract.",
+          "enum": ["device_cap"],
+          "x-classification": "P0"
         }
       }
     },
