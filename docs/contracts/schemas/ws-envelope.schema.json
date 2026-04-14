@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/ws-envelope.schema.json",
+  "title": "WebSocketEnvelope",
+  "description": "Top-level envelope for every WebSocket frame exchanged between the telemetry server and SDK clients. Both directions (server->client and client->server) use this envelope. The `type` discriminator selects the payload schema; `seq` and `ts` are server-authoritative fields populated only on server->client frames to support snapshot resume per NFR-3.11.",
+  "type": "object",
+  "required": ["type"],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "type": "string",
+      "description": "Discriminator naming the message type. Server->client values: 'vehicle_update', 'drive_started', 'drive_ended', 'connectivity', 'heartbeat', 'error'. Client->server values: 'auth' (only message currently accepted; 'subscribe', 'unsubscribe', 'ping' are reserved for follow-up — see websocket-protocol.md §10).",
+      "enum": [
+        "auth",
+        "vehicle_update",
+        "drive_started",
+        "drive_ended",
+        "connectivity",
+        "heartbeat",
+        "error",
+        "subscribe",
+        "unsubscribe",
+        "ping",
+        "pong"
+      ],
+      "x-classification": "P0"
+    },
+    "payload": {
+      "description": "Type-specific payload object. Schema is selected by the `type` discriminator. Omitted on bare control frames such as 'heartbeat'. See websocket-protocol.md §4 (server->client) and §5 (client->server) for the catalog.",
+      "x-classification": "P0"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "PLANNED (not yet emitted by the server). Monotonic per-connection sequence number assigned by the server, starting at 0 on each successful authenticated session. Used by clients on reconnect to request snapshot-resume from sequence N (NFR-3.11). Until the server is extended to emit `seq`, clients MUST tolerate its absence and treat every frame as gap-free. Tracked by follow-up issue (see websocket-protocol.md §10 open questions).",
+      "x-classification": "P0"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "PLANNED top-level timestamp (not yet emitted by the server). Server-authoritative ISO 8601 UTC timestamp for the envelope itself, distinct from any payload-internal `timestamp` field. Clients MUST tolerate its absence today; the per-payload `timestamp` field (e.g., `vehicle_update.timestamp`, `drive_started.timestamp`) carries the same information in v1.0. Tracked by follow-up issue.",
+      "x-classification": "P0"
+    }
+  },
+  "$defs": {
+    "MessageType": {
+      "type": "string",
+      "enum": [
+        "auth",
+        "vehicle_update",
+        "drive_started",
+        "drive_ended",
+        "connectivity",
+        "heartbeat",
+        "error",
+        "subscribe",
+        "unsubscribe",
+        "ping",
+        "pong"
+      ]
+    }
+  }
+}

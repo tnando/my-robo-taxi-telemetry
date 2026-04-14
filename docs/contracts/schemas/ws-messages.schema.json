@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/ws-messages.schema.json",
+  "title": "WebSocketMessages",
+  "description": "JSON Schemas for every WebSocket payload exchanged between the telemetry server and SDK clients. The vehicle_update payload's `fields` map is a subset of the canonical VehicleState (see vehicle-state.schema.json); per-field types/units/classification live there and are NOT duplicated here. This file holds the wire-only shapes (envelope payloads, control messages, errors).",
+  "$defs": {
+    "AuthPayload": {
+      "type": "object",
+      "description": "Client->server authentication payload. The first frame on every WebSocket connection MUST be {type: 'auth', payload: {token: '...'}}. The token is opaque to the server's transport layer and is validated by the configured Authenticator (JWT in production, NoopAuthenticator in dev). Anchored by FR-6.1, NFR-3.21.",
+      "required": ["token"],
+      "additionalProperties": false,
+      "properties": {
+        "token": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Bearer-style session token resolved by the consumer's getToken() callback (FR-6.1). Server validates via Authenticator.ValidateToken. P1 — never log this value (data-classification.md §1.2).",
+          "x-classification": "P1"
+        }
+      }
+    },
+    "VehicleUpdatePayload": {
+      "type": "object",
+      "description": "Server->client telemetry update for a single vehicle. The `fields` map carries one or more atomic-group members from VehicleState (see vehicle-state.schema.json). Each call to broadcast carries fields from at most ONE atomic group plus optionally non-grouped fields delivered alongside (NFR-3.1). Anchored by FR-1.1, FR-1.2, FR-1.3, FR-2.1, FR-2.2, FR-2.3, NFR-3.1, NFR-3.2.",
+      "required": ["vehicleId", "fields", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "Opaque database cuid for the vehicle (NOT the VIN). All SDK API calls use this ID per FR-4.2. VINs are P0 with mandatory last-4 redaction in logs (data-classification.md §2.1) and MUST NOT appear in this payload under any circumstance.",
+          "x-classification": "P0"
+        },
+        "fields": {
+          "type": "object",
+          "description": "Map of field name -> value. Field names and per-field classifications are defined in vehicle-state.schema.json. A single vehicle_update message contains the members of at most ONE atomic group (navigation, charge, gps, gear) plus any individually-delivered fields (speed, odometerMiles, interiorTemp, exteriorTemp, fsdMilesToday, locationName, locationAddress, lastUpdated). Server explicitly clears a navigation field by sending it as JSON null; the SDK MUST atomically null all members of the affected group per NFR-3.9. The optional `routeCoordinates` field (array of [lng, lat] pairs) carries an active drive's accumulated GPS trail and is not part of a normal atomic group — it is always paired with an active drive and routed to dataState.gps.",
+          "additionalProperties": true,
+          "x-classification": "mixed (per-field; see vehicle-state.schema.json)"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp for this update. Not the Tesla telemetry emission time — this is the server's `time.Now().UTC()` at broadcast (or the event's CreatedAt for non-nav fields). Drives the SDK's lastUpdated state and feeds NFR-3.11 snapshot resume.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "DriveStartedPayload": {
+      "type": "object",
+      "description": "Server->client message announcing the start of a new drive. Anchored by FR-3.1.",
+      "required": ["vehicleId", "driveId", "startLocation", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "Opaque vehicle cuid.",
+          "x-classification": "P0"
+        },
+        "driveId": {
+          "type": "string",
+          "description": "Opaque drive cuid. Matches the eventual Drive row's id when the drive completes and is persisted.",
+          "x-classification": "P0"
+        },
+        "startLocation": {
+          "type": "object",
+          "description": "GPS coordinates where the drive began. Encrypted at rest in the eventual Drive row but transported plaintext over WSS (NFR-3.22, NFR-3.25).",
+          "required": ["latitude", "longitude"],
+          "additionalProperties": false,
+          "properties": {
+            "latitude": {
+              "type": "number",
+              "minimum": -90,
+              "maximum": 90,
+              "x-classification": "P1",
+              "x-encrypted-at-rest": true
+            },
+            "longitude": {
+              "type": "number",
+              "minimum": -180,
+              "maximum": 180,
+              "x-classification": "P1",
+              "x-encrypted-at-rest": true
+            }
+          }
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp at which the drive detector (`internal/drives/`) declared the drive started.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "DriveEndedPayload": {
+      "type": "object",
+      "description": "Server->client message announcing a completed drive that passed the micro-drive filter (state-machine.md §3.5). The summary fields here are for immediate UI feedback; the full FR-3.4 drive record (energy used, FSD miles, intervention count, start/end charge level, start/end addresses, full route polyline) is fetched via REST `/drives/{id}` (see rest-api.md). Anchored by FR-3.1, FR-3.4.",
+      "required": ["vehicleId", "driveId", "distance", "duration", "avgSpeed", "maxSpeed", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "Opaque vehicle cuid.",
+          "x-classification": "P0"
+        },
+        "driveId": {
+          "type": "string",
+          "description": "Opaque drive cuid (matches the persisted Drive row id).",
+          "x-classification": "P0"
+        },
+        "distance": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Total distance driven in miles. Computed as the haversine sum of route points at drive completion.",
+          "x-unit": "miles",
+          "x-classification": "P0"
+        },
+        "duration": {
+          "type": "string",
+          "description": "Drive duration as a Go time.Duration string (e.g., '12m34.5s'). The SDK SHOULD parse this and re-expose it as seconds/minutes for consumers.",
+          "x-classification": "P0"
+        },
+        "avgSpeed": {
+          "type": "number",
+          "minimum": 0,
+          "x-unit": "mph",
+          "x-classification": "P0"
+        },
+        "maxSpeed": {
+          "type": "number",
+          "minimum": 0,
+          "x-unit": "mph",
+          "x-classification": "P0"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server-authoritative ISO 8601 UTC timestamp at which the drive detector declared the drive ended.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "ConnectivityPayload": {
+      "type": "object",
+      "description": "Server->client signal that a vehicle's mTLS connection to the telemetry server has changed state. This is vehicle<->server connectivity, NOT client<->server connectivity (the latter is implicit in the WebSocket connection itself). Anchored by FR-1.3 (extensibility) and FR-8.1 (state surface).",
+      "required": ["vehicleId", "online", "timestamp"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "x-classification": "P0"
+        },
+        "online": {
+          "type": "boolean",
+          "description": "True when the vehicle has an active mTLS Tesla Fleet Telemetry stream into the server. False on disconnect (e.g., vehicle asleep, network drop).",
+          "x-classification": "P0"
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "HeartbeatPayload": {
+      "type": "object",
+      "description": "Server->client keepalive frame. The current server emits a bare envelope `{\"type\":\"heartbeat\"}` with NO payload (heartbeat.go computes the message once at init). The optional `timestamp` field is reserved for future use. Anchored by NFR-3.10 (reconnect cadence).",
+      "additionalProperties": false,
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "OPTIONAL and NOT currently emitted. Reserved for future use to expose server clock to clients (would also enable client clock-skew detection). Tracked by follow-up issue.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "ErrorPayload": {
+      "type": "object",
+      "description": "Server->client error frame. The server sends this for transport-level failures the client must surface (auth rejection, auth timeout). The Code field is a stable enum that consumers branch on (FR-7.1) — never string-match the Message field. Anchored by FR-7.1, FR-7.3.",
+      "required": ["code", "message"],
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Stable typed error code from the catalog in websocket-protocol.md §6. Consumer SDKs map these to typed errors per FR-7.1.",
+          "enum": [
+            "auth_failed",
+            "auth_timeout",
+            "permission_denied",
+            "vehicle_not_owned",
+            "rate_limited",
+            "internal_error"
+          ],
+          "x-classification": "P0"
+        },
+        "message": {
+          "type": "string",
+          "description": "Human-readable description for logs and developer tooling. P0 BUT MUST NOT contain P1 values (no GPS, no addresses, no tokens, no emails, no VINs unless redacted to ***XXXX). Per data-classification.md §2.1-2.2, error message construction sites MUST use opaque IDs only.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "SubscribePayload": {
+      "type": "object",
+      "description": "PLANNED (not yet accepted by the server). Client->server request to begin or resume streaming a specific vehicle. Today the server implicitly subscribes the client to ALL vehicles owned by the authenticated user as part of the auth handshake (handler.go authenticateClient -> Authenticator.GetUserVehicles). Adding explicit subscribe/unsubscribe is tracked as a follow-up issue (see websocket-protocol.md §10). When implemented, `sinceSeq` enables per-vehicle snapshot-resume per NFR-3.11.",
+      "required": ["vehicleId"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "x-classification": "P0"
+        },
+        "sinceSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "PLANNED. Last envelope `seq` the client successfully processed for this vehicle. The server uses this to choose between snapshot-resume (replay missed frames) and full-refresh (REST snapshot fetch + live stream from current seq).",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "UnsubscribePayload": {
+      "type": "object",
+      "description": "PLANNED (not yet accepted by the server). Client->server request to stop receiving updates for a specific vehicle. Tracked as a follow-up issue.",
+      "required": ["vehicleId"],
+      "additionalProperties": false,
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "PingPayload": {
+      "type": "object",
+      "description": "PLANNED (not yet accepted by the server). Client->server ping. Today, browser clients rely on the server's outbound `heartbeat` frames and the underlying WebSocket protocol's PING/PONG control frames (handled transparently by coder/websocket) to detect liveness. An app-level `ping` is a follow-up to enable client-driven keepalive on platforms where the WebSocket library does not expose RFC 6455 PING/PONG (some React Native runtimes, watchOS background sessions).",
+      "additionalProperties": false,
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "description": "Optional opaque value echoed back in the corresponding `pong` for round-trip latency measurement.",
+          "x-classification": "P0"
+        }
+      }
+    },
+    "PongPayload": {
+      "type": "object",
+      "description": "PLANNED. Server->client response to a client-initiated `ping`. Echoes the nonce.",
+      "additionalProperties": false,
+      "properties": {
+        "nonce": {
+          "type": "string",
+          "x-classification": "P0"
+        }
+      }
+    }
+  }
+}
