@@ -313,10 +313,10 @@ paths:
                     fsdMiles: 8.1
                     fsdPercentage: 65.3
                     interventions: 1
-                    startLocation: Home
-                    startAddress: 742 Evergreen Terrace, Springfield
-                    endLocation: Work
-                    endAddress: 100 Main Street, Springfield
+                    startLocation: Location A
+                    startAddress: synthetic-start-address
+                    endLocation: Location B
+                    endAddress: synthetic-end-address
                     createdAt: '2026-04-13T18:46:19Z'
         '401':
           $ref: '#/components/responses/Unauthorized'

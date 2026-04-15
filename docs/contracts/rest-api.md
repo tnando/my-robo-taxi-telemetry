@@ -200,7 +200,7 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 | `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | PLANNED | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
 | `not_found` | 404 | **REST-only** | PLANNED (DV-20) | Surface to UI; do not retry. The resource either does not exist or is filtered out by ownership / role mask. | Unknown `vehicleId`, `driveId`, or `inviteId`. The SDK cannot distinguish "never existed" from "revoked access" -- this is intentional, so the server never leaks the existence of resources the caller cannot see. |
 | `invalid_request` | 400 | **REST-only** | PLANNED (DV-20) | Surface to UI as a developer error; do not retry. | Request body, path params, or query string failed server-side validation (malformed cursor, `limit` out of range, malformed email on invite creation, etc.). |
-| `rate_limited` | 429 | Shared (WS + REST) | PLANNED (WS DV-08; REST DV-22) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Caller exceeded the REST rate limit (§4.1.2). Per-user cap breaches on the WebSocket use the same typed code with `subCode: device_cap`; REST rate-limiting does not emit `device_cap` in v1. |
+| `rate_limited` | 429 | Shared (WS + REST) | PLANNED (WS DV-08; REST DV-22) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
 | `internal_error` | 500 | Shared (WS + REST) | PLANNED | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
 | `service_unavailable` | 503 | **REST-only, PLANNED** | PLANNED (DV-21) | Auto-retry with exponential backoff; honor `Retry-After` header if present. | Reserved for maintenance windows and graceful-shutdown states. The server MAY return `503` during rolling deployments; v1 does not yet emit this code. Added to the REST catalog so SDK consumers can write forward-compatible handlers. |
 | `snapshot_required` | -- | **WS-only** (close code 4005 + error frame) | PLANNED (DV-02) | n/a for REST | WS-only. REST has no analogue because REST is already the snapshot channel (the "fall back to snapshot fetch" signal IS a REST call). Listed here for completeness; REST clients never receive this code. |
@@ -214,6 +214,8 @@ Three codes are REST-only extensions of the shared catalog: `not_found`, `invali
 - `service_unavailable` is RESERVED for the REST contract so the SDK can write forward-compatible handlers before the server begins emitting it during maintenance windows.
 
 Both `not_found` and `invalid_request` MUST be added to the shared `ErrorPayload.code` enum in [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) even though the WS never emits them, so the SDK's `CoreError` union is a single enum across both transports. This is not a drift -- the WS contract explicitly lists them as "REST-only" in the catalog description. Tracked as DV-20.
+
+**`service_unavailable` is intentionally REST-only and is NOT promoted to the shared enum** in DV-20. The WS equivalent of a 503 maintenance window is a connection-refused close code (4003/1011), not a typed `service_unavailable` error frame. Keeping `service_unavailable` out of the shared enum preserves transport-appropriate error semantics: REST clients retry on 503+`service_unavailable`, WS clients retry on close 4003/1011 per `websocket-protocol.md` §7.1.
 
 #### 4.1.2 Rate limiting
 
@@ -645,10 +647,10 @@ Accept: application/json
   "fsdMiles": 8.1,
   "fsdPercentage": 65.3,
   "interventions": 1,
-  "startLocation": "Home",
-  "startAddress": "742 Evergreen Terrace, Springfield",
-  "endLocation": "Work",
-  "endAddress": "100 Main Street, Springfield",
+  "startLocation": "Location A",
+  "startAddress": "synthetic-start-address",
+  "endLocation": "Location B",
+  "endAddress": "synthetic-end-address",
   "createdAt": "2026-04-13T18:46:19Z"
 }
 ```
@@ -770,7 +772,7 @@ Accept: application/json
 
 | Field | Type | Required | Classification | Notes |
 |-------|------|----------|----------------|-------|
-| `label` | string | Yes | P0 | Display name the owner chose for the invite (e.g., "Mom", "Spouse"). Max 64 characters. |
+| `label` | string | Yes | P0 | Display name the owner chose for the invite (e.g., "Viewer", "Shared user"). Max 64 characters. |
 | `email` | string (RFC 5322 email) | Yes | P1 | Invitee's email address. Server-side validation on format. |
 | `permission` | string (enum) | Yes | P0 | `live` (live state only) or `live_history` (live state + drive history). Matches the `InvitePermission` enum in `data-classification.md` §1.6. |
 
