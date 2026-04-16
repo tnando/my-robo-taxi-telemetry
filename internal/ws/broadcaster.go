@@ -168,13 +168,13 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 	}
 
 	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
-		VehicleID: vehicleID,
-		DriveID:   payload.DriveID,
-		Distance:  payload.Stats.Distance,
-		Duration:  payload.Stats.Duration.String(),
-		AvgSpeed:  payload.Stats.AvgSpeed,
-		MaxSpeed:  payload.Stats.MaxSpeed,
-		Timestamp: payload.EndedAt.Format(time.RFC3339),
+		VehicleID:       vehicleID,
+		DriveID:         payload.DriveID,
+		Distance:        payload.Stats.Distance,
+		DurationSeconds: payload.Stats.Duration.Seconds(),
+		AvgSpeed:        payload.Stats.AvgSpeed,
+		MaxSpeed:        payload.Stats.MaxSpeed,
+		Timestamp:       payload.EndedAt.Format(time.RFC3339),
 	})
 	if err != nil {
 		b.logger.Error("broadcaster.handleDriveEnded: marshal failed",
