@@ -71,14 +71,16 @@ type startLocation struct {
 
 // driveEndedPayload is the server-to-client payload sent when a drive
 // completes. Contains summary statistics for the trip.
+// DurationSeconds is seconds as float64, matching the v1 wire contract
+// (websocket-protocol.md §4.3, DV-12).
 type driveEndedPayload struct {
-	VehicleID string  `json:"vehicleId"`
-	DriveID   string  `json:"driveId"`
-	Distance  float64 `json:"distance"`
-	Duration  string  `json:"duration"`
-	AvgSpeed  float64 `json:"avgSpeed"`
-	MaxSpeed  float64 `json:"maxSpeed"`
-	Timestamp string  `json:"timestamp"`
+	VehicleID       string  `json:"vehicleId"`
+	DriveID         string  `json:"driveId"`
+	Distance        float64 `json:"distance"`
+	DurationSeconds float64 `json:"durationSeconds"`
+	AvgSpeed        float64 `json:"avgSpeed"`
+	MaxSpeed        float64 `json:"maxSpeed"`
+	Timestamp       string  `json:"timestamp"`
 }
 
 // connectivityPayload is the server-to-client payload sent when a vehicle

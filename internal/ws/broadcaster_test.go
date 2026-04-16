@@ -658,13 +658,13 @@ func TestMarshalWSMessage(t *testing.T) {
 			name:    "drive_ended",
 			msgType: msgTypeDriveEnded,
 			payload: driveEndedPayload{
-				VehicleID: "v-1",
-				DriveID:   "d-1",
-				Distance:  15.3,
-				Duration:  "25m0s",
-				AvgSpeed:  36.7,
-				MaxSpeed:  65.0,
-				Timestamp: "2026-03-18T12:30:00Z",
+				VehicleID:       "v-1",
+				DriveID:         "d-1",
+				Distance:        15.3,
+				DurationSeconds: 1500,
+				AvgSpeed:        36.7,
+				MaxSpeed:        65.0,
+				Timestamp:       "2026-03-18T12:30:00Z",
 			},
 		},
 		{
@@ -779,13 +779,13 @@ func TestMarshalWSMessage_DriveStarted_Payload(t *testing.T) {
 
 func TestMarshalWSMessage_DriveEnded_Payload(t *testing.T) {
 	raw, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
-		VehicleID: "v-1",
-		DriveID:   "drive-abc",
-		Distance:  15.3,
-		Duration:  "25m0s",
-		AvgSpeed:  36.7,
-		MaxSpeed:  65.0,
-		Timestamp: "2026-03-18T12:30:00Z",
+		VehicleID:       "v-1",
+		DriveID:         "drive-abc",
+		Distance:        15.3,
+		DurationSeconds: 1500,
+		AvgSpeed:        36.7,
+		MaxSpeed:        65.0,
+		Timestamp:       "2026-03-18T12:30:00Z",
 	})
 	if err != nil {
 		t.Fatalf("marshalWSMessage: %v", err)
@@ -804,14 +804,70 @@ func TestMarshalWSMessage_DriveEnded_Payload(t *testing.T) {
 	if payload.Distance != 15.3 {
 		t.Fatalf("expected distance=15.3, got %v", payload.Distance)
 	}
-	if payload.Duration != "25m0s" {
-		t.Fatalf("expected duration=25m0s, got %q", payload.Duration)
+	if payload.DurationSeconds != 1500 {
+		t.Fatalf("expected durationSeconds=1500, got %v", payload.DurationSeconds)
 	}
 	if payload.AvgSpeed != 36.7 {
 		t.Fatalf("expected avgSpeed=36.7, got %v", payload.AvgSpeed)
 	}
 	if payload.MaxSpeed != 65.0 {
 		t.Fatalf("expected maxSpeed=65.0, got %v", payload.MaxSpeed)
+	}
+}
+
+func TestDriveEnded_DurationSeconds_MatchesDuration(t *testing.T) {
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     float64
+	}{
+		{"25 minutes", 25 * time.Minute, 1500},
+		{"1 hour 30 seconds", time.Hour + 30*time.Second, 3630},
+		{"zero", 0, 0},
+		{"sub-second", 500 * time.Millisecond, 0.5},
+		{"24 minutes 18 seconds", 24*time.Minute + 18*time.Second, 1458},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := driveEndedPayload{
+				VehicleID:       "v-1",
+				DriveID:         "d-1",
+				DurationSeconds: tt.duration.Seconds(),
+				Timestamp:       "2026-03-18T12:30:00Z",
+			}
+
+			raw, err := marshalWSMessage(msgTypeDriveEnded, p)
+			if err != nil {
+				t.Fatalf("marshalWSMessage: %v", err)
+			}
+
+			var msg wsMessage
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				t.Fatalf("unmarshal envelope: %v", err)
+			}
+
+			var got driveEndedPayload
+			if err := json.Unmarshal(msg.Payload, &got); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+
+			if math.Abs(got.DurationSeconds-tt.want) > 1e-9 {
+				t.Fatalf("durationSeconds = %v, want %v", got.DurationSeconds, tt.want)
+			}
+
+			// Verify JSON key is "durationSeconds", not "duration".
+			var raw2 map[string]json.RawMessage
+			if err := json.Unmarshal(msg.Payload, &raw2); err != nil {
+				t.Fatalf("unmarshal raw payload: %v", err)
+			}
+			if _, ok := raw2["durationSeconds"]; !ok {
+				t.Fatal("expected JSON key \"durationSeconds\" in payload")
+			}
+			if _, ok := raw2["duration"]; ok {
+				t.Fatal("unexpected JSON key \"duration\" in payload — must use \"durationSeconds\"")
+			}
+		})
 	}
 }
 
