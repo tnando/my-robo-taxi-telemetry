@@ -41,7 +41,7 @@ stateDiagram-v2
     initializing --> connecting : CONNECT_REQUESTED
     initializing --> error : INIT_FAILED
 
-    connecting --> connected : WS_OPEN
+    connecting --> connected : AUTH_OK_RECEIVED
     connecting --> disconnected : WS_OPEN_FAILED [attempts < maxRetries]
     connecting --> error : WS_OPEN_FAILED [attempts >= maxRetries]
 
@@ -71,7 +71,7 @@ stateDiagram-v2
 |---|---------------|-------|-------|------------|-----------|
 | C-1 | `initializing` | `CONNECT_REQUESTED` | Auth token valid | `connecting` | Open WebSocket connection to server |
 | C-2 | `initializing` | `INIT_FAILED` | Config invalid or auth token missing/expired | `error` | Emit `connectionState` change; set error reason |
-| C-3 | `connecting` | `WS_OPEN` | Server accepts connection + auth handshake succeeds | `connected` | Emit `connectionState` change; reset retry counter to 0; start heartbeat |
+| C-3 | `connecting` | `AUTH_OK_RECEIVED` | Server sends `auth_ok` frame (see [`websocket-protocol.md`](websocket-protocol.md) §2.3 rule 1 and §2.4 row 2) | `connected` | Emit `connectionState` change; reset retry counter to 0; start SDK liveness watchdog ([`websocket-protocol.md`](websocket-protocol.md) §7.4.1) |
 | C-4 | `connecting` | `WS_OPEN_FAILED` | `attempts < maxRetries` | `disconnected` | Increment retry counter; schedule reconnect timer with backoff |
 | C-5 | `connecting` | `WS_OPEN_FAILED` | `attempts >= maxRetries` | `error` | Emit `connectionState` change; set error reason "max retries exhausted" |
 | C-6 | `connected` | `WS_CLOSED` | -- | `disconnected` | Mark all `dataState` groups as `stale` (NFR-3.8b); schedule reconnect timer |
@@ -81,6 +81,14 @@ stateDiagram-v2
 | C-10 | `disconnected` | `USER_STOPPED` | User explicitly stops the SDK | `error` | Cancel reconnect timer; emit `connectionState` change |
 | C-11 | `error` | `USER_RETRY` | -- | `connecting` | Reset retry counter to 0; open WebSocket connection |
 | C-12 | `error` | `USER_DESTROYED` | -- | (terminal) | Release all resources; unsubscribe all listeners |
+
+### 1.3.1 C-3 trigger: `auth_ok` receipt
+
+The canonical trigger for C-3 (`connecting -> connected`) is **receipt of the `auth_ok` frame** from the server, not "first data frame" or "first heartbeat". The `auth_ok` frame is the server's positive acknowledgement that the auth handshake succeeded and the client is registered in the hub. This is defined authoritatively in [`websocket-protocol.md`](websocket-protocol.md) §2.3 rule 1 and mapped in §2.4 row 2.
+
+**Why `auth_ok` instead of first data/heartbeat.** On idle vehicles, the first data frame may not arrive for up to one heartbeat interval (default 15 seconds). On a cold watchOS wake the entire session may be short-lived. Without `auth_ok`, the SDK would be stuck in `connecting` for up to 15 seconds after a successful auth handshake, leaving the UI in a "Connecting..." state with no actionable signal. The `auth_ok` frame provides a deterministic, sub-second transition to `connected` regardless of telemetry activity.
+
+**Pre-`auth_ok` liveness bound.** The SDK MUST bound its wait for `auth_ok` with a local timer of 6 seconds (1-second grace over the server's 5-second `AuthTimeout`). If `auth_ok` has not arrived within this window, the SDK treats it as a silent handshake failure and transitions `connecting -> disconnected` (C-4) with a typed reason of `auth_timeout`. See [`websocket-protocol.md`](websocket-protocol.md) §2.3 rule 4 for the full specification.
 
 ### 1.4 Reconnect backoff parameters (NFR-3.10)
 
@@ -254,6 +262,7 @@ This section maps every WebSocket server message type to the state transitions i
 
 | Message Type | Wire Value | Payload Shape | Source |
 |--------------|-----------|---------------|--------|
+| Auth OK | `auth_ok` | `{ userId, vehicleCount, issuedAt }` | Server handshake success acknowledgement (see [`websocket-protocol.md`](websocket-protocol.md) §2.3) |
 | Vehicle update | `vehicle_update` | `{ vehicleId, fields, timestamp }` | Telemetry event on bus |
 | Drive started | `drive_started` | `{ vehicleId, driveId, startLocation, timestamp }` | Drive detector |
 | Drive ended | `drive_ended` | `{ vehicleId, driveId, distance, duration, avgSpeed, maxSpeed, timestamp }` | Drive detector (post micro-drive filter). See note below. |
@@ -270,7 +279,7 @@ This section maps every WebSocket server message type to the state transitions i
 
 | Server Event | `connectionState` Transition | `dataState` Transition(s) | Drive Lifecycle Transition |
 |--------------|------------------------------|---------------------------|---------------------------|
-| WebSocket opened + auth accepted | `connecting → connected` (C-3) | -- (snapshot fetch begins separately) | -- |
+| Receipt of `auth_ok` frame | `connecting → connected` (C-3) | -- (snapshot fetch begins separately) | -- |
 | WebSocket open failed | `connecting → disconnected` (C-4) or `connecting → error` (C-5) | -- | -- |
 | WebSocket closed (clean) | `connected → disconnected` (C-6) | ALL groups: `ready → stale` (D-4) | If driving: `driving → idle` (DR-4) |
 | WebSocket error (transport) | `connected → disconnected` (C-7) | ALL groups: `ready → stale` (D-4) | If driving: `driving → idle` (DR-4) |
@@ -334,9 +343,10 @@ sequenceDiagram
     alt Connection succeeds
         WS-->>SDK: WebSocket opened
         SDK->>WS: Send auth frame { token }
-        WS-->>SDK: Auth accepted
-        SDK->>SDK: connectionState = connected
+        WS-->>SDK: auth_ok frame received
+        SDK->>SDK: connectionState = connected (C-3)
         SDK->>SDK: Reset retry counter to 0
+        SDK->>SDK: Start liveness watchdog
         SDK->>UI: Emit connectionState change
 
         Note over SDK,API: Re-fetch DB snapshot (NFR-3.11)
@@ -570,4 +580,5 @@ The `contract-guard` agent/CI check enforces the following rules derived from th
 
 | Date | Change | Author |
 |------|--------|--------|
+| 2026-04-15 | Amend C-3 trigger from "first data frame OR heartbeat" to "receipt of `auth_ok`". Aligns with [`websocket-protocol.md`](websocket-protocol.md) §2.3 / §2.4. Closes DV-15 from MYR-11. Changes: (1) §1.1 Mermaid event label `WS_OPEN` -> `AUTH_OK_RECEIVED`. (2) §1.3 C-3 row: event, guard, and action columns updated. (3) New §1.3.1 prose explaining the trigger, rationale, and pre-`auth_ok` liveness bound. (4) §4.1 server message types: added `auth_ok` row. (5) §4.2 event-to-transition mapping: first row now reads "Receipt of `auth_ok` frame". (6) §5.1 reconnect sequence diagram: "Auth accepted" -> "`auth_ok` frame received", added C-3 label and liveness watchdog step. | sdk-architect agent |
 | 2026-04-12 | Initial draft — connectionState, dataState, drive lifecycle state machines; transition tables; server event mapping; reconnect sequence; contract-guard rules | sdk-architect agent |
