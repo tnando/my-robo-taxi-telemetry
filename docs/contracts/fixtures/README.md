@@ -60,6 +60,10 @@ Every fixture MUST have a `_meta` block at the top level:
 | `anchoredFRs` | string[] | Yes | FR and NFR IDs from `requirements.md` that this fixture validates. |
 | `scenario` | string (enum) | Yes | One of: `happy-path`, `edge-case`, `error`, `transitional`. |
 
+### Fixture independence
+
+Each fixture is a **standalone canonical payload** -- not a scene from a sequential timeline. Fixtures share consistent synthetic identifiers (same `vehicleId`, `userId`, `driveId`) for cross-referencing, but their timestamps and states are independent. Do not assume that the REST snapshot, the WS drive_started, and the WS vehicle_update fixtures form a coherent chronological sequence.
+
 ### `_meta` and JSON Schema validation
 
 The `ws-envelope.schema.json` schema sets `additionalProperties: false`. The `_meta` block is NOT a member of the envelope schema. **Validation harnesses MUST strip `_meta` from the top-level object before validating a fixture against the schema.** This is a fixture-only concern -- production wire frames never contain `_meta`.
