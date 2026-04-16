@@ -10,6 +10,7 @@ package contract_test
 import (
 	"bytes"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,7 +201,6 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	wsDir := filepath.Join(fixturesRoot, "websocket")
 	wsFiles := mustGlobJSON(t, wsDir)
 	for _, f := range wsFiles {
-		f := f // capture
 		baseName := filepath.Base(f)
 		cases = append(cases, testCase{
 			name: "websocket/" + baseName,
@@ -248,7 +248,6 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	restDir := filepath.Join(fixturesRoot, "rest")
 	restFiles := mustGlobJSON(t, restDir)
 	for _, f := range restFiles {
-		f := f
 		baseName := filepath.Base(f)
 		cases = append(cases, testCase{
 			name: "rest/" + baseName,
@@ -285,7 +284,6 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	edgeDir := filepath.Join(fixturesRoot, "edge-cases")
 	edgeFiles := mustGlobJSON(t, edgeDir)
 	for _, f := range edgeFiles {
-		f := f
 		baseName := filepath.Base(f)
 		cases = append(cases, testCase{
 			name: "edge-cases/" + baseName,
@@ -624,11 +622,11 @@ func mustGlobJSON(t *testing.T, dir string) []string {
 func mustGlobJSONRecursive(t *testing.T, dir string) []string {
 	t.Helper()
 	var files []string
-	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".json") {
 			files = append(files, path)
 		}
 		return nil
