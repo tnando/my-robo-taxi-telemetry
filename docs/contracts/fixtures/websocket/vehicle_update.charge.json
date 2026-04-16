@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Charge atomic group update with all four v1 members. Represents the target wire shape after DV-03/DV-04 wiring ships. chargeState and timeToFull are non-null here; see vehicle_update.charge_partial.json for the transitional form.",
+    "description": "Charge atomic group update with all four v1 members. Represents the target wire shape after DV-03/DV-04 wiring ships. chargeState is non-null; timeToFull is null (expected when chargeState is Disconnected — not charging). See vehicle_update.charge_partial.json for the transitional form where both are null, and edge-cases/snapshot.charging.json for a scenario with non-null timeToFull.",
     "anchoredFRs": ["FR-1.2", "NFR-3.1"],
     "scenario": "happy-path"
   },
