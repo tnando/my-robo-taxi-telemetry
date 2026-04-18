@@ -36,7 +36,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | Field | Type | Nullable | Unit | Classification | Group | Source |
 |-------|------|----------|------|----------------|-------|--------|
 | `vehicleId` | `string` | No | -- | P0 | -- | DB `Vehicle.id` |
-| `name` | `string` | No | -- | P0 | -- | DB `Vehicle.name` |
+| `name` | `string` | No | -- | P0 | -- | DB `Vehicle.name` (user-assigned; see §1.2 design note on name disambiguation) |
 | `model` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.model` |
 | `year` | `integer` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.year` |
 | `color` | `string` or `null` | Yes (Spec-only, MYR-24) | -- | P0 | -- | DB `Vehicle.color` |
@@ -102,6 +102,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 - **Integer rounding.** Tesla emits most numeric fields as floats. The telemetry server rounds `speed`, `heading`, `chargeLevel`, `estimatedRange`, `interiorTemp`, `exteriorTemp`, `odometerMiles`, and `etaMinutes` to the nearest integer before delivery.
 - **Coordinate order.** `navRouteCoordinates` uses `[longitude, latitude]` order (GeoJSON/Mapbox convention), NOT `[lat, lng]`.
 - **`locationName` and `locationAddress` are derived fields.** They are reverse-geocoded from GPS coordinates on the server. They are NOT part of the GPS atomic group because they update asynchronously (geocoding is async) and are not sourced from Tesla telemetry.
+- **`name` is sourced from the DB, not Tesla telemetry.** `VehicleState.name` comes exclusively from the DB `Vehicle.name` column (user-assigned via the Next.js settings UI). Tesla also streams a `VehicleName` proto field (decoded as internal field `vehicleName` in `internal/telemetry/fields.go`) at a 300s interval, but this value is received by the telemetry decoder and is NOT broadcast to SDK clients or used to populate the SDK `name` field. Rationale: (1) the user can rename their vehicle in the MyRoboTaxi app, so the DB is the source of truth for user-facing names; (2) Tesla's `VehicleName` may lag a user rename by up to 300s, creating stale-name confusion; (3) if Tesla-to-DB name sync is ever needed, that responsibility belongs to the Next.js app layer (which owns the `Vehicle` table via Prisma), not the telemetry server. The `Settings.teslaVehicleName` column (see `data-classification.md` §1.8) stores the Tesla-reported name separately and may differ from `Vehicle.name` if the user renames the vehicle in the MyRoboTaxi app.
 
 ---
 
@@ -349,6 +350,7 @@ public enum GearPosition: String, Codable, Sendable {
 | `navRouteCoordinates` uses `[lng, lat]` order | GeoJSON/Mapbox standard. Tesla's raw protobuf uses `[lat, lng]`; the server converts on decode. |
 | Integer rounding applied server-side | SDK consumers receive pre-rounded values. This prevents inconsistent rounding across TypeScript/Swift/etc. |
 | `fsdMilesToday` renamed to `fsdMilesSinceReset` (MYR-27, 2026-04-15) | Tesla's `SelfDrivingMilesSinceReset` does NOT reset daily -- it resets on OTA updates, factory resets, etc. The wire name `fsdMilesToday` was a cosmetic label applied without checking the upstream source. Renamed to `fsdMilesSinceReset` before any SDK type-gen ships, avoiding a breaking change. If a "miles today" metric is needed, the SDK can compute it by sampling `fsdMilesSinceReset` at midnight. |
+| Vehicle `name` field source disambiguation (MYR-30, 2026-04-15) | `VehicleState.name` is sourced exclusively from DB `Vehicle.name` (user-assigned via the Next.js settings UI). Tesla's streamed `VehicleName` (proto field, 300s interval) is received by the telemetry decoder but is NOT broadcast to SDK clients and does NOT overwrite the DB value. If Tesla-to-DB name sync is needed, it belongs in the Next.js app layer, not the telemetry server. See §1.2 design note for full rationale. |
 
 ### 7.2 Open questions
 
