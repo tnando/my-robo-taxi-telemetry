@@ -142,7 +142,7 @@ func DefaultFieldConfig() map[string]FieldConfig {
 
 		// Vehicle state — low frequency
 		FleetFieldOdometer:    {IntervalSeconds: 60},
-		FleetFieldVehicleName: {IntervalSeconds: 300},
+		FleetFieldVehicleName: {IntervalSeconds: 300}, // Received for potential sync but NOT broadcast to SDK clients (MYR-30). SDK name comes from DB Vehicle.name.
 		FleetFieldCarType:     {IntervalSeconds: 300},
 		FleetFieldVersion:     {IntervalSeconds: 300},
 		FleetFieldLocked:      {IntervalSeconds: 30},

@@ -184,7 +184,7 @@ Each element in the `routePoints` array is a `RoutePointRecord`:
 | `id` | `String` (cuid) | P0 | No | Yes | Opaque internal identifier |
 | `userId` | `String` | P0 | No | Yes | FK to User — opaque identifier |
 | `teslaLinked` | `Boolean` | P0 | No | Yes | Feature flag |
-| `teslaVehicleName` | `String?` | P0 | No | Yes | Vehicle name — same as Vehicle.name |
+| `teslaVehicleName` | `String?` | P0 | No | Yes | Tesla-reported vehicle name. May differ from the user-assigned `Vehicle.name` if the user renames the vehicle in the MyRoboTaxi app (see MYR-30). |
 | `virtualKeyPaired` | `Boolean` | P0 | No | Yes | Feature flag |
 | `keyPairingDeferredAt` | `DateTime?` | P0 | No | Yes | Non-sensitive timestamp |
 | `keyPairingReminderCount` | `Int` | P0 | No | Yes | Counter |

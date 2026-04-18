@@ -28,7 +28,7 @@
     },
     "name": {
       "type": "string",
-      "description": "User-assigned vehicle name.",
+      "description": "User-assigned vehicle name from DB Vehicle.name (managed by the Next.js settings UI). NOT the Tesla-streamed VehicleName proto field — see vehicle-state-schema.md §1.2 for the disambiguation rationale (MYR-30).",
       "x-classification": "P0",
       "examples": ["Optimus"]
     },
