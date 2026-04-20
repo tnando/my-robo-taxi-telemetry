@@ -107,25 +107,8 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 			continue
 		}
 
-		// MYR-25/28/29: Temporary debug log for Tesla field unit verification.
-		// These fields are NOT in fieldMap (intentionally excluded from the event
-		// bus to avoid leaking uncontracted fields to WS clients). We intercept
-		// them here for observation only. Remove after empirical verification.
-		switch datum.GetKey() {
-		case tpb.Field_TimeToFullCharge, tpb.Field_EstimatedHoursToChargeTermination:
-			if tv, err := extractValue(datum); err == nil {
-				vin := payload.GetVin()
-				vinSuffix := vin
-				if len(vin) > 4 {
-					vinSuffix = vin[len(vin)-4:]
-				}
-				slog.Info("MYR-25/28/29 FIELD VERIFICATION",
-					slog.String("field", datum.GetKey().String()),
-					slog.String("vin_last4", vinSuffix),
-					slog.Any("raw_value", tv),
-				)
-			}
-		}
+		// MYR-25/28/29: observation-only log for untracked charge fields.
+		logVerificationField(datum, payload.GetVin())
 
 		name, ok := InternalFieldName(datum.GetKey())
 		if !ok {
@@ -144,19 +127,9 @@ func (d *Decoder) DecodePayload(payload *tpb.Payload) (events.VehicleTelemetryEv
 
 		fields[string(name)] = tv
 
-		// MYR-25/29: Log MilesToArrival (already in fieldMap) for unit verification.
-		// Remove after empirical verification is complete.
+		// MYR-25/29: observation-only log for MilesToArrival (already in fieldMap).
 		if name == FieldMilesToArrival {
-			vin := payload.GetVin()
-			vinSuffix := vin
-			if len(vin) > 4 {
-				vinSuffix = vin[len(vin)-4:]
-			}
-			slog.Info("MYR-25/28/29 FIELD VERIFICATION",
-				slog.String("field", string(name)),
-				slog.String("vin_last4", vinSuffix),
-				slog.Any("raw_value", tv),
-			)
+			logFieldVerification(datum.GetKey().String(), payload.GetVin(), tv)
 		}
 	}
 
@@ -222,6 +195,32 @@ func extractValue(datum *tpb.Datum) (events.TelemetryValue, error) {
 	}
 
 	return convertValue(datum.GetKey(), v)
+}
+
+// logVerificationField logs raw values for Tesla fields under empirical unit
+// verification (MYR-25/28/29). These fields are NOT in fieldMap — they are
+// observation-only. Remove after verification is complete.
+func logVerificationField(datum *tpb.Datum, vin string) {
+	switch datum.GetKey() {
+	case tpb.Field_TimeToFullCharge, tpb.Field_EstimatedHoursToChargeTermination:
+		if tv, err := extractValue(datum); err == nil {
+			logFieldVerification(datum.GetKey().String(), vin, tv)
+		}
+	}
+}
+
+// logFieldVerification emits a structured log line for MYR-25/28/29 field unit
+// verification. Remove after empirical verification is complete.
+func logFieldVerification(field, vin string, tv events.TelemetryValue) {
+	vinSuffix := vin
+	if len(vin) > 4 {
+		vinSuffix = vin[len(vin)-4:]
+	}
+	slog.Info("MYR-25/28/29 FIELD VERIFICATION",
+		slog.String("field", field),
+		slog.String("vin_last4", vinSuffix),
+		slog.Any("raw_value", tv),
+	)
 }
 
 // DecodeTimestamp extracts a Go time.Time from a Tesla payload's created_at.
