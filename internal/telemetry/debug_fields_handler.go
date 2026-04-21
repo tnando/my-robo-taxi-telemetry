@@ -15,9 +15,19 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/events"
 )
 
+// debugFramesBuffer is the per-client channel buffer for raw field frames.
+// Sized for ~1.2s of buffering at 10 msg/sec × 5 dev vehicles; slow clients
+// have frames dropped rather than back-pressuring the event bus.
+const debugFramesBuffer = 64
+
 // DebugFieldsConfig configures the dev-only /api/debug/fields WebSocket
 // endpoint. API keys are optional (dev only); when empty, any connection is
 // accepted which matches the existing dev-mode WS policy.
+//
+// Security note: when APIKey is set, clients may supply it via either the
+// X-Debug-Token header or the ?token= query parameter. The query param
+// form appears in most HTTP access logs — prefer the header whenever
+// possible. The CLI (cmd/ops fields watch) always uses the header.
 type DebugFieldsConfig struct {
 	// APIKey is a shared secret the client must supply via the
 	// X-Debug-Token header or ?token= query parameter. Empty disables
@@ -79,7 +89,7 @@ func (h *DebugFieldsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	frames := make(chan []byte, 64)
+	frames := make(chan []byte, debugFramesBuffer)
 	handler := h.makeHandler(filterVIN, frames)
 
 	sub, err := h.bus.Subscribe(events.TopicVehicleTelemetryRaw, handler)
@@ -140,13 +150,19 @@ func (h *DebugFieldsHandler) makeHandler(filterVIN string, frames chan<- []byte)
 
 // readLoop discards incoming frames; the endpoint is server→client only.
 // When the client closes or errors, it cancels the parent context to stop
-// the write loop.
+// the write loop. Unexpected inbound frames are logged at debug level so
+// an operator can tell a misbehaving client from a silent disconnect.
 func (h *DebugFieldsHandler) readLoop(ctx context.Context, conn *websocket.Conn, cancel context.CancelFunc) {
 	defer cancel()
 	for {
-		if _, _, err := conn.Read(ctx); err != nil {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
 			return
 		}
+		h.logger.Debug("debug_fields: discarded unexpected client frame",
+			slog.Int("message_type", int(typ)),
+			slog.Int("bytes", len(data)),
+		)
 	}
 }
 

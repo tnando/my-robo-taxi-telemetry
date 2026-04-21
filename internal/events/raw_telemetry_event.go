@@ -21,9 +21,9 @@ func (RawVehicleTelemetryEvent) EventTopic() Topic { return TopicVehicleTelemetr
 // metadata preserved. The Value holds the concrete Go type chosen by the
 // decoder for that field (float64, int64, string, bool, *Location, or nil).
 type RawTelemetryField struct {
-	ProtoField int32       // Tesla proto field number (e.g. 43 for TimeToFullCharge)
-	ProtoName  string      // Tesla Field enum name (e.g. "TimeToFullCharge")
-	Type       string      // Go type tag: "float", "int", "string", "bool", "location", "invalid"
-	Value      interface{} // Raw value; nil when Invalid is true
-	Invalid    bool        // True when the vehicle marked the datum invalid
+	ProtoField int32  // Tesla proto field number (e.g. 43 for TimeToFullCharge)
+	ProtoName  string // Tesla Field enum name (e.g. "TimeToFullCharge")
+	Type       string // Go type tag: "float", "int", "string", "bool", "location", "invalid"
+	Value      any    // Raw value; nil when Invalid is true
+	Invalid    bool   // True when the vehicle marked the datum invalid
 }
