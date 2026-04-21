@@ -4,13 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewPKCE_ChallengeIsSha256OfVerifier(t *testing.T) {
@@ -68,6 +69,24 @@ func TestBuildAuthorizeURL_ContainsAllRequiredParams(t *testing.T) {
 	for k, want := range checks {
 		if got := q.Get(k); got != want {
 			t.Errorf("param %s: got %q, want %q", k, got, want)
+		}
+	}
+}
+
+func TestBuildTokenExchangeForm_AssemblesAllFields(t *testing.T) {
+	form := buildTokenExchangeForm("cid", "csec", "http://localhost:8765/callback", "the-code", "pkce-verifier")
+
+	want := map[string]string{
+		"grant_type":    "authorization_code",
+		"client_id":     "cid",
+		"client_secret": "csec",
+		"code":          "the-code",
+		"redirect_uri":  "http://localhost:8765/callback",
+		"code_verifier": "pkce-verifier",
+	}
+	for k, v := range want {
+		if got := form.Get(k); got != v {
+			t.Errorf("form[%s]: got %q, want %q", k, got, v)
 		}
 	}
 }
@@ -133,7 +152,31 @@ func TestCallbackHandler_TeslaErrorSurfaced(t *testing.T) {
 	}
 }
 
-func TestExchangeCodeForToken_SendsExpectedFormAndParsesResponse(t *testing.T) {
+func TestCallbackHandler_DuplicateSendDoesNotBlock(t *testing.T) {
+	// Buffered capacity 1 — if the handler blocked on a second send, this
+	// test would deadlock.
+	result := make(chan callbackResult, 1)
+	handler := callbackHandler("s", result)
+
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/callback?state=s&code=c1", nil)
+	handler(httptest.NewRecorder(), req)
+
+	req2 := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/callback?state=s&code=c2", nil)
+	// Must not block even though the channel is full. Use a timeout guard
+	// so a regression surfaces as a test failure instead of a hang.
+	done := make(chan struct{})
+	go func() {
+		handler(httptest.NewRecorder(), req2)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal("duplicate callback blocked on full channel")
+	}
+}
+
+func TestExchangeCodeForToken_SuccessParses200Response(t *testing.T) {
 	var gotForm url.Values
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -141,57 +184,76 @@ func TestExchangeCodeForToken_SendsExpectedFormAndParsesResponse(t *testing.T) {
 		if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
 			t.Errorf("content-type: got %q", ct)
 		}
-		// Write the JSON manually to avoid the gosec G117 literal-struct
-		// scanner flagging the fake token values as "marshaled secrets".
+		// Literal JSON avoids the gosec G117 literal-struct credential scanner.
 		_, _ = w.Write([]byte(`{"access_token":"fake-access","refresh_token":"fake-refresh","expires_in":3600,"token_type":"Bearer"}`))
 	}))
 	defer srv.Close()
+	withTokenEndpoint(t, srv.URL)
 
-	// Swap the package-level constant by temporarily overriding via a thin
-	// indirection: the function uses teslaOAuthTokenURL, so we can't mock it
-	// without touching the constant. Use t.Run to document the expected
-	// form fields against a locally-built request instead.
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", "cid")
-	form.Set("client_secret", "csec")
-	form.Set("code", "the-code")
-	form.Set("redirect_uri", "http://localhost:8765/callback")
-	form.Set("code_verifier", "pkce-verifier")
-
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, srv.URL, strings.NewReader(form.Encode()))
+	tok, err := exchangeCodeForToken(
+		context.Background(),
+		slog.Default(),
+		"cid", "csec", "http://localhost:8765/callback", "the-code", "pkce-verifier",
+	)
 	if err != nil {
-		t.Fatalf("build request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := srv.Client().Do(req)
-	if err != nil {
-		t.Fatalf("post: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status: %d", resp.StatusCode)
-	}
-	var tok tokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&tok); err != nil {
-		t.Fatalf("decode: %v", err)
+		t.Fatalf("exchangeCodeForToken: %v", err)
 	}
 	if tok.AccessToken != "fake-access" || tok.RefreshToken != "fake-refresh" {
 		t.Errorf("token decode: %+v", tok)
 	}
-
-	wantForm := map[string]string{
+	if tok.ExpiresIn != 3600 {
+		t.Errorf("expires_in: %d", tok.ExpiresIn)
+	}
+	// Confirm the real function built the expected form body.
+	for k, want := range map[string]string{
 		"grant_type":    "authorization_code",
 		"client_id":     "cid",
 		"client_secret": "csec",
 		"code":          "the-code",
 		"redirect_uri":  "http://localhost:8765/callback",
 		"code_verifier": "pkce-verifier",
-	}
-	for k, want := range wantForm {
+	} {
 		if got := gotForm.Get(k); got != want {
 			t.Errorf("form[%s]: got %q, want %q", k, got, want)
 		}
 	}
+}
+
+func TestExchangeCodeForToken_Non200ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"invalid_grant"}`))
+	}))
+	defer srv.Close()
+	withTokenEndpoint(t, srv.URL)
+
+	_, err := exchangeCodeForToken(context.Background(), slog.Default(), "c", "s", "r", "c", "v")
+	if err == nil {
+		t.Fatal("expected error on 401")
+	}
+	if !strings.Contains(err.Error(), "401") || !strings.Contains(err.Error(), "invalid_grant") {
+		t.Errorf("error should include status + body, got: %v", err)
+	}
+}
+
+func TestExchangeCodeForToken_MissingTokenFieldsRejected(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"access_token":"","refresh_token":"","expires_in":0}`))
+	}))
+	defer srv.Close()
+	withTokenEndpoint(t, srv.URL)
+
+	_, err := exchangeCodeForToken(context.Background(), slog.Default(), "c", "s", "r", "c", "v")
+	if err == nil || !strings.Contains(err.Error(), "missing access_token") {
+		t.Errorf("expected missing-token error, got: %v", err)
+	}
+}
+
+// withTokenEndpoint points the Tesla token endpoint at a test server for
+// the duration of a single test and restores the production URL at the end.
+func withTokenEndpoint(t *testing.T, endpoint string) {
+	t.Helper()
+	prev := teslaOAuthTokenEndpoint
+	teslaOAuthTokenEndpoint = endpoint
+	t.Cleanup(func() { teslaOAuthTokenEndpoint = prev })
 }

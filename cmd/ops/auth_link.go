@@ -2,23 +2,16 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"html"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
@@ -118,53 +111,9 @@ func runAuthLink(ctx context.Context, args []string) error {
 
 	return writeJSON(os.Stdout, authLinkOutput{
 		UserID:    *userID,
-		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
+		ExpiresAt: formatExpiry(expiresAt),
 		Message:   "Tesla account linked — run `ops auth token` to verify",
 	})
-}
-
-// pkcePair holds a PKCE verifier/challenge pair for a single OAuth flow.
-type pkcePair struct {
-	verifier  string
-	challenge string
-}
-
-// newPKCE generates a fresh PKCE verifier + S256 challenge per RFC 7636.
-// The verifier is a URL-safe random string; the challenge is
-// base64url(sha256(verifier)) without padding.
-func newPKCE() (pkcePair, error) {
-	verifier, err := randomURLSafeString(32)
-	if err != nil {
-		return pkcePair{}, err
-	}
-	sum := sha256.Sum256([]byte(verifier))
-	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
-	return pkcePair{verifier: verifier, challenge: challenge}, nil
-}
-
-// randomURLSafeString returns n bytes of cryptographic randomness encoded
-// with unpadded base64url, producing a string safe to use in URLs and
-// query parameters.
-func randomURLSafeString(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("rand.Read: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
-}
-
-// buildAuthorizeURL constructs the Tesla /oauth2/v3/authorize URL that
-// starts the authorization_code + PKCE flow.
-func buildAuthorizeURL(clientID, redirectURI, scopes, state, codeChallenge string) string {
-	q := url.Values{}
-	q.Set("response_type", "code")
-	q.Set("client_id", clientID)
-	q.Set("redirect_uri", redirectURI)
-	q.Set("scope", scopes)
-	q.Set("state", state)
-	q.Set("code_challenge", codeChallenge)
-	q.Set("code_challenge_method", "S256")
-	return teslaOAuthAuthorizeURL + "?" + q.Encode()
 }
 
 // runCallbackServer starts a one-shot HTTP server on 127.0.0.1:<port>,
@@ -234,6 +183,8 @@ type callbackResult struct {
 // callbackHandler returns an http.HandlerFunc that validates the state
 // parameter, surfaces Tesla-reported errors, and forwards the auth code
 // through the result channel. The page the user sees reflects the outcome.
+// Non-blocking sends protect against duplicate callbacks (double-click,
+// refresh) holding handler goroutines open forever.
 func callbackHandler(expectedState string, result chan<- callbackResult) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
@@ -241,25 +192,35 @@ func callbackHandler(expectedState string, result chan<- callbackResult) http.Ha
 		if errCode := q.Get("error"); errCode != "" {
 			msg := fmt.Sprintf("Tesla rejected the authorization: %s — %s", errCode, q.Get("error_description"))
 			respondCallback(w, http.StatusBadRequest, "OAuth failed", msg)
-			result <- callbackResult{err: fmt.Errorf("tesla oauth error: %s: %s", errCode, q.Get("error_description"))}
+			trySendResult(result, callbackResult{err: fmt.Errorf("tesla oauth error: %s: %s", errCode, q.Get("error_description"))})
 			return
 		}
 
 		if gotState := q.Get("state"); gotState != expectedState {
 			respondCallback(w, http.StatusBadRequest, "State mismatch", "The OAuth state parameter did not match. Possible CSRF — retry the command.")
-			result <- callbackResult{err: errors.New("oauth state mismatch")}
+			trySendResult(result, callbackResult{err: errors.New("oauth state mismatch")})
 			return
 		}
 
 		code := q.Get("code")
 		if code == "" {
 			respondCallback(w, http.StatusBadRequest, "Missing code", "Tesla did not return an authorization code.")
-			result <- callbackResult{err: errors.New("tesla returned no authorization code")}
+			trySendResult(result, callbackResult{err: errors.New("tesla returned no authorization code")})
 			return
 		}
 
 		respondCallback(w, http.StatusOK, "Tesla account linked", "You can close this tab and return to the terminal.")
-		result <- callbackResult{code: code}
+		trySendResult(result, callbackResult{code: code})
+	}
+}
+
+// trySendResult forwards r to the buffered channel without blocking. A
+// second concurrent callback (e.g. browser retry) is silently dropped
+// rather than holding its handler goroutine open.
+func trySendResult(ch chan<- callbackResult, r callbackResult) {
+	select {
+	case ch <- r:
+	default:
 	}
 }
 
@@ -279,15 +240,20 @@ func respondCallback(w http.ResponseWriter, status int, title, body string) {
 // openBrowser tries to open browserURL in the user's default browser using
 // the platform-appropriate command. On failure it logs a warning; the
 // user is already told to open the URL manually in the stderr banner.
+//
+// The URL passed here is the authorize URL built by buildAuthorizeURL
+// from static constants plus CLI flags and env vars — not arbitrary
+// user input — so gosec G204 (subprocess launched with variable) is
+// suppressed on each exec call.
 func openBrowser(ctx context.Context, logger *slog.Logger, browserURL string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
 	case "darwin":
-		cmd = exec.CommandContext(ctx, "open", browserURL)
+		cmd = exec.CommandContext(ctx, "open", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
 	case "linux":
-		cmd = exec.CommandContext(ctx, "xdg-open", browserURL)
+		cmd = exec.CommandContext(ctx, "xdg-open", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
 	case "windows":
-		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", browserURL)
+		cmd = exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", browserURL) //#nosec G204 -- browserURL is the CLI-built Tesla authorize URL
 	default:
 		logger.Warn("unsupported platform for auto-open — open the URL manually",
 			slog.String("platform", runtime.GOOS),
@@ -297,61 +263,4 @@ func openBrowser(ctx context.Context, logger *slog.Logger, browserURL string) {
 	if err := cmd.Start(); err != nil {
 		logger.Warn("failed to auto-open browser", slog.Any("error", err))
 	}
-}
-
-// tokenResponse mirrors Tesla's /oauth2/v3/token response body.
-type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	ExpiresIn    int64  `json:"expires_in"`
-	TokenType    string `json:"token_type"`
-}
-
-// exchangeCodeForToken swaps the one-time authorization code (plus PKCE
-// verifier) for an access_token / refresh_token pair.
-func exchangeCodeForToken(
-	ctx context.Context,
-	logger *slog.Logger,
-	clientID, clientSecret, redirectURI, code, codeVerifier string,
-) (*tokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("client_id", clientID)
-	form.Set("client_secret", clientSecret)
-	form.Set("code", code)
-	form.Set("redirect_uri", redirectURI)
-	form.Set("code_verifier", codeVerifier)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, teslaOAuthTokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("post to token endpoint: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-	if err != nil {
-		return nil, fmt.Errorf("read token response: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		logger.Warn("tesla token exchange failed",
-			slog.Int("status", resp.StatusCode),
-			slog.String("body", string(body)),
-		)
-		return nil, fmt.Errorf("tesla returned %d: %s", resp.StatusCode, string(body))
-	}
-
-	var tok tokenResponse
-	if err := json.Unmarshal(body, &tok); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if tok.AccessToken == "" || tok.RefreshToken == "" {
-		return nil, errors.New("tesla response missing access_token or refresh_token")
-	}
-	return &tok, nil
 }
