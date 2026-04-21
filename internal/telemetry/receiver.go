@@ -31,18 +31,25 @@ type ReceiverConfig struct {
 	// MaxMessagesPerSec is the per-vehicle rate limit. Zero or negative
 	// means no rate limiting.
 	MaxMessagesPerSec float64
+
+	// PublishRawFields enables publication of RawVehicleTelemetryEvent to
+	// TopicVehicleTelemetryRaw in parallel with the filtered
+	// VehicleTelemetryEvent. Dev/debug use only — production should leave
+	// this false to avoid the extra per-field allocations.
+	PublishRawFields bool
 }
 
 // Receiver accepts mTLS WebSocket connections from Tesla vehicles, decodes
 // their protobuf telemetry payloads, and publishes domain events to the
 // event bus.
 type Receiver struct {
-	decoder     *Decoder
-	bus         events.Bus
-	logger      *slog.Logger
-	metrics     ReceiverMetrics
-	rateLimiter *rateLimiter
-	maxVehicles int
+	decoder          *Decoder
+	bus              events.Bus
+	logger           *slog.Logger
+	metrics          ReceiverMetrics
+	rateLimiter      *rateLimiter
+	maxVehicles      int
+	publishRawFields bool
 
 	connections sync.Map // VIN -> *vehicleConn
 	connCount   atomic.Int32
@@ -57,12 +64,13 @@ func NewReceiver(decoder *Decoder, bus events.Bus, logger *slog.Logger, metrics 
 	}
 
 	return &Receiver{
-		decoder:     decoder,
-		bus:         bus,
-		logger:      logger,
-		metrics:     metrics,
-		rateLimiter: newRateLimiter(maxPerSec),
-		maxVehicles: cfg.MaxVehicles,
+		decoder:          decoder,
+		bus:              bus,
+		logger:           logger,
+		metrics:          metrics,
+		rateLimiter:      newRateLimiter(maxPerSec),
+		maxVehicles:      cfg.MaxVehicles,
+		publishRawFields: cfg.PublishRawFields,
 	}
 }
 
@@ -173,55 +181,90 @@ func (r *Receiver) handleConnection(ctx context.Context, vc *vehicleConn) {
 
 		if !r.rateLimiter.allow(vc.vin) {
 			r.metrics.IncRateLimited(redacted)
-			r.logger.Debug("message rate limited",
-				slog.String("vin", redacted),
-			)
+			r.logger.Debug("message rate limited", slog.String("vin", redacted))
 			continue
 		}
 
-		result, err := r.decoder.Decode(data)
-		if err != nil {
-			r.metrics.IncDecodeErrors(redacted)
-			r.logger.Warn("decode failed",
-				slog.String("vin", redacted),
-				slog.Any("error", err),
-			)
-			continue
-		}
-
-		for _, fe := range result.FieldErrors {
-			r.logger.Warn("field decode error",
-				slog.String("vin", redacted),
-				slog.String("field", string(fe.Field)),
-				slog.String("proto_key", fe.Key.String()),
-				slog.Any("error", fe.Err),
-			)
-			r.metrics.IncFieldDecodeError(redacted, string(fe.Field))
-		}
-
-		evt := result.Event
-		r.reconcileVIN(&evt, result.DeviceID, vc.vin, redacted)
-
-		if err := r.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
-			r.logger.Error("publish telemetry event failed",
-				slog.String("vin", redacted),
-				slog.Any("error", err),
-			)
+		if !r.processMessage(ctx, vc, data, start, redacted) {
 			return
 		}
-
-		vc.lastMessage.Store(time.Now())
-		vc.messageCount.Add(1)
-
-		latency := time.Since(start)
-		r.metrics.ObserveMessageLatency(latency.Seconds())
-		r.logger.Debug("telemetry received",
-			slog.String("vin", redacted),
-			slog.String("topic", result.Topic),
-			slog.Int("fields", len(evt.Fields)),
-			slog.Duration("latency", latency),
-		)
 	}
+}
+
+// processMessage decodes one telemetry frame and publishes the resulting
+// events to the bus. Returns false when the caller should terminate the
+// read loop (bus closed or unrecoverable publish error).
+func (r *Receiver) processMessage(
+	ctx context.Context,
+	vc *vehicleConn,
+	data []byte,
+	start time.Time,
+	redacted string,
+) bool {
+	result, rawEvt, err := r.decodeMessage(data)
+	if err != nil {
+		r.metrics.IncDecodeErrors(redacted)
+		r.logger.Warn("decode failed",
+			slog.String("vin", redacted),
+			slog.Any("error", err),
+		)
+		return true
+	}
+
+	for _, fe := range result.FieldErrors {
+		r.logger.Warn("field decode error",
+			slog.String("vin", redacted),
+			slog.String("field", string(fe.Field)),
+			slog.String("proto_key", fe.Key.String()),
+			slog.Any("error", fe.Err),
+		)
+		r.metrics.IncFieldDecodeError(redacted, string(fe.Field))
+	}
+
+	evt := result.Event
+	r.reconcileVIN(&evt, result.DeviceID, vc.vin, redacted)
+
+	if err := r.bus.Publish(ctx, events.NewEvent(evt)); err != nil {
+		r.logger.Error("publish telemetry event failed",
+			slog.String("vin", redacted),
+			slog.Any("error", err),
+		)
+		return false
+	}
+
+	if r.publishRawFields {
+		rawEvt.VIN = vc.vin
+		if err := r.bus.Publish(ctx, events.NewEvent(rawEvt)); err != nil {
+			r.logger.Warn("publish raw telemetry event failed",
+				slog.String("vin", redacted),
+				slog.Any("error", err),
+			)
+		}
+	}
+
+	vc.lastMessage.Store(time.Now())
+	vc.messageCount.Add(1)
+
+	latency := time.Since(start)
+	r.metrics.ObserveMessageLatency(latency.Seconds())
+	r.logger.Debug("telemetry received",
+		slog.String("vin", redacted),
+		slog.String("topic", result.Topic),
+		slog.Int("fields", len(evt.Fields)),
+		slog.Duration("latency", latency),
+	)
+	return true
+}
+
+// decodeMessage routes to the appropriate decoder entry point based on
+// whether the receiver is configured to emit raw field events. The raw
+// event is the zero value when publishRawFields is false.
+func (r *Receiver) decodeMessage(data []byte) (DecodeResult, events.RawVehicleTelemetryEvent, error) {
+	if r.publishRawFields {
+		return r.decoder.DecodeWithRaw(data)
+	}
+	result, err := r.decoder.Decode(data)
+	return result, events.RawVehicleTelemetryEvent{}, err
 }
 
 // reconcileVIN cross-checks the envelope and payload VINs against the cert
