@@ -25,6 +25,11 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `
 FROM "Vehicle"
 WHERE "id" = $1`
 
+const queryVehiclesByUser = `SELECT ` + vehicleSelectColumns + `
+FROM "Vehicle"
+WHERE "userId" = $1
+ORDER BY "name", "vin"`
+
 const queryUpdateVehicleStatus = `UPDATE "Vehicle"
 SET "status" = $1::"VehicleStatus", "lastUpdated" = NOW()
 WHERE "vin" = $2`
