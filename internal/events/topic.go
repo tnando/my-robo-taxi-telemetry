@@ -8,6 +8,12 @@ const (
 	// arrives from a vehicle. The payload is VehicleTelemetryEvent.
 	TopicVehicleTelemetry Topic = "vehicle.telemetry"
 
+	// TopicVehicleTelemetryRaw carries every decoded proto field from a
+	// vehicle payload, unfiltered by the broadcast field map. Emitted only
+	// when the receiver is configured with PublishRawFields (dev/debug
+	// mode). The payload is RawVehicleTelemetryEvent.
+	TopicVehicleTelemetryRaw Topic = "vehicle.telemetry.raw"
+
 	// TopicConnectivity is published when a vehicle connects or disconnects
 	// from the telemetry server. The payload is ConnectivityEvent.
 	TopicConnectivity Topic = "vehicle.connectivity"

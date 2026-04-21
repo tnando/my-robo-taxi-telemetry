@@ -36,6 +36,44 @@ func (r *VehicleRepo) GetByVIN(ctx context.Context, vin string) (Vehicle, error)
 	return v, nil
 }
 
+// ListByUser returns every vehicle owned by the given user, ordered by
+// name and VIN. Returns an empty slice (and nil error) when the user has
+// no linked vehicles.
+func (r *VehicleRepo) ListByUser(ctx context.Context, userID string) ([]Vehicle, error) {
+	start := time.Now()
+	rows, err := r.pool.Query(ctx, queryVehiclesByUser, userID)
+	r.metrics.ObserveQueryDuration("vehicle.list_by_user", time.Since(start).Seconds())
+	if err != nil {
+		r.metrics.IncQueryError("vehicle.list_by_user")
+		return nil, fmt.Errorf("VehicleRepo.ListByUser(%s): %w", userID, err)
+	}
+	defer rows.Close()
+
+	var out []Vehicle
+	for rows.Next() {
+		var v Vehicle
+		var status string
+		if err := rows.Scan(
+			&v.ID, &v.UserID, &v.VIN, &v.Name, &status,
+			&v.ChargeLevel, &v.EstimatedRange, &v.Speed, &v.GearPosition,
+			&v.Heading, &v.Latitude, &v.Longitude,
+			&v.InteriorTemp, &v.ExteriorTemp, &v.OdometerMiles,
+			&v.DestinationName, &v.DestinationLatitude,
+			&v.DestinationLongitude, &v.OriginLatitude, &v.OriginLongitude,
+			&v.EtaMinutes, &v.TripDistRemaining,
+			&v.NavRouteCoordinates, &v.LastUpdated,
+		); err != nil {
+			return nil, fmt.Errorf("VehicleRepo.ListByUser(%s): scan: %w", userID, err)
+		}
+		v.Status = VehicleStatus(status)
+		out = append(out, v)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("VehicleRepo.ListByUser(%s): rows: %w", userID, err)
+	}
+	return out, nil
+}
+
 // GetByID returns the vehicle with the given Prisma cuid.
 // Returns ErrVehicleNotFound if no vehicle has that ID.
 func (r *VehicleRepo) GetByID(ctx context.Context, id string) (Vehicle, error) {

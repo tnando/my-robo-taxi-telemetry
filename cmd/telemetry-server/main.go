@@ -108,6 +108,10 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 		telemetry.ReceiverConfig{
 			MaxVehicles:       cfg.Telemetry().MaxVehicles,
 			MaxMessagesPerSec: 10,
+			// Dev mode publishes raw field events so the /api/debug/fields
+			// endpoint and cmd/ops fields watch can inspect every decoded
+			// proto field. Production leaves this off to avoid extra work.
+			PublishRawFields: *devMode,
 		},
 	)
 
@@ -191,6 +195,20 @@ func run() error { //nolint:funlen // composition root — sequential dependency
 
 	// --- Fleet config push endpoint (optional — requires proxy config) ---
 	setupFleetConfigEndpoint(cfg, srv, authenticator, vehicleRepo, accountRepo, logger)
+
+	// --- Dev-only debug fields endpoint (guarded by --dev flag) ---
+	if *devMode {
+		debugHandler := telemetry.NewDebugFieldsHandler(
+			bus,
+			logger.With(slog.String("component", "debug-fields")),
+			telemetry.DebugFieldsConfig{
+				APIKey:         os.Getenv("DEBUG_FIELDS_TOKEN"),
+				OriginPatterns: originPatterns,
+			},
+		)
+		srv.HandleFunc("GET /api/debug/fields", debugHandler.ServeHTTP)
+		logger.Warn("dev mode: /api/debug/fields endpoint enabled — do not run in production")
+	}
 
 	// Configure mTLS on Tesla port. TLS is required for vehicle connections —
 	// without it, Tesla vehicles cannot complete the handshake and report EOF.

@@ -53,18 +53,34 @@ type DecodeResult struct {
 // decode errors that did not prevent the overall payload from being
 // decoded. Callers can log these but should still use the event.
 func (d *Decoder) Decode(raw []byte) (DecodeResult, error) {
+	result, _, err := d.decodeCommon(raw, false)
+	return result, err
+}
+
+// DecodeWithRaw runs the normal decode path and, in the same unmarshal
+// pass, also builds a RawVehicleTelemetryEvent with every decoded proto
+// field. Used by the dev-only debug endpoint; callers in the hot path
+// should use Decode.
+func (d *Decoder) DecodeWithRaw(raw []byte) (DecodeResult, events.RawVehicleTelemetryEvent, error) {
+	return d.decodeCommon(raw, true)
+}
+
+// decodeCommon is the shared envelope-unwrap + protobuf-unmarshal path.
+// When includeRaw is true, a RawVehicleTelemetryEvent is also built from
+// the same unmarshalled payload.
+func (d *Decoder) decodeCommon(raw []byte, includeRaw bool) (DecodeResult, events.RawVehicleTelemetryEvent, error) {
 	env, err := unwrapEnvelope(raw)
 	if err != nil {
-		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
+		return DecodeResult{}, events.RawVehicleTelemetryEvent{}, fmt.Errorf("decoder.Decode: %w", err)
 	}
 
 	if env.Topic != topicVehicleData {
-		return DecodeResult{}, fmt.Errorf("decoder.Decode(topic=%s): %w", env.Topic, ErrUnsupportedTopic)
+		return DecodeResult{}, events.RawVehicleTelemetryEvent{}, fmt.Errorf("decoder.Decode(topic=%s): %w", env.Topic, ErrUnsupportedTopic)
 	}
 
 	var payload tpb.Payload
 	if err := proto.Unmarshal(env.PayloadBytes, &payload); err != nil {
-		return DecodeResult{}, fmt.Errorf("decoder.Decode: decode protobuf: %w", err)
+		return DecodeResult{}, events.RawVehicleTelemetryEvent{}, fmt.Errorf("decoder.Decode: decode protobuf: %w", err)
 	}
 
 	// Tesla's typed protobuf format often omits the VIN from the protobuf
@@ -76,15 +92,24 @@ func (d *Decoder) Decode(raw []byte) (DecodeResult, error) {
 
 	evt, fieldErrs, err := d.DecodePayload(&payload)
 	if err != nil {
-		return DecodeResult{}, fmt.Errorf("decoder.Decode: %w", err)
+		return DecodeResult{}, events.RawVehicleTelemetryEvent{}, fmt.Errorf("decoder.Decode: %w", err)
 	}
 
-	return DecodeResult{
+	result := DecodeResult{
 		Event:       evt,
 		FieldErrors: fieldErrs,
 		Topic:       env.Topic,
 		DeviceID:    env.DeviceID,
-	}, nil
+	}
+
+	var rawEvt events.RawVehicleTelemetryEvent
+	if includeRaw {
+		rawEvt, err = d.DecodeRawPayload(&payload)
+		if err != nil {
+			return result, events.RawVehicleTelemetryEvent{}, fmt.Errorf("decoder.Decode: %w", err)
+		}
+	}
+	return result, rawEvt, nil
 }
 
 // DecodePayload converts an already-unmarshalled Tesla Payload into a
