@@ -121,7 +121,7 @@ func createSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"interiorTemp"     INT NOT NULL DEFAULT 0,
 		"exteriorTemp"     INT NOT NULL DEFAULT 0,
 		"odometerMiles"    INT NOT NULL DEFAULT 0,
-		"fsdMilesSinceReset" DOUBLE PRECISION NOT NULL DEFAULT 0,
+		"fsdMilesToday"    DOUBLE PRECISION NOT NULL DEFAULT 0,
 		"virtualKeyPaired" BOOLEAN NOT NULL DEFAULT FALSE,
 		"destinationName"  TEXT,
 		"destinationLatitude"  DOUBLE PRECISION,
@@ -204,6 +204,36 @@ func seedVehicle(t *testing.T, pool *pgxpool.Pool, id, vin string) {
 		id, vin)
 	if err != nil {
 		t.Fatalf("seed vehicle: %v", err)
+	}
+}
+
+// seedVehicleWithCatalog inserts a test vehicle and also sets the seven
+// catalog columns promoted by MYR-24. Used by TestVehicleRepo_CatalogFields
+// to verify the SELECT / scan path loads every column.
+func seedVehicleWithCatalog(
+	t *testing.T, pool *pgxpool.Pool, id, vin string, cat catalogFields,
+) {
+	t.Helper()
+	ctx := context.Background()
+	_, err := pool.Exec(ctx,
+		`INSERT INTO "Vehicle" (
+			"id", "userId", "vin", "name", "status",
+			"model", "year", "color",
+			"locationName", "locationAddress", "fsdMilesToday",
+			"destinationAddress"
+		) VALUES (
+			$1, 'user_001', $2, 'Test Model 3', 'parked',
+			$3, $4, $5,
+			$6, $7, $8,
+			$9
+		)`,
+		id, vin,
+		cat.model, cat.year, cat.color,
+		cat.locationName, cat.locationAddress, cat.fsdMilesToday,
+		cat.destinationAddress,
+	)
+	if err != nil {
+		t.Fatalf("seed vehicle with catalog: %v", err)
 	}
 }
 

@@ -9,6 +9,19 @@ import (
 	"github.com/tnando/my-robo-taxi-telemetry/internal/store"
 )
 
+// catalogFields bundles the seven DB-backed columns that MYR-24 promoted
+// out of spec-only status. Kept adjacent to the repo tests so the test
+// cases stay close to the exact shape we're asserting against.
+type catalogFields struct {
+	model              string
+	year               int
+	color              string
+	locationName       string
+	locationAddress    string
+	fsdMilesToday      float64
+	destinationAddress *string
+}
+
 func TestVehicleRepo_GetByVIN(t *testing.T) {
 	cleanTables(t, testPool)
 	seedVehicle(t, testPool, "veh_001", "5YJ3E1EA1NF000001")
@@ -238,6 +251,153 @@ func TestVehicleRepo_UpdateTelemetry(t *testing.T) {
 		t.Errorf("GearPosition = %v, want %q", v.GearPosition, gear)
 	}
 }
+
+// TestVehicleRepo_CatalogFields verifies that the seven catalog columns
+// promoted by MYR-24 (model, year, color, fsdMilesToday, locationName,
+// locationAddress, destinationAddress) are loaded on GetByVIN, GetByID, and
+// ListByUser. Before MYR-24 none of these columns were scanned; the test
+// is the regression guard for the drift that §7.2 of
+// docs/contracts/vehicle-state-schema.md used to track.
+func TestVehicleRepo_CatalogFields(t *testing.T) {
+	cleanTables(t, testPool)
+
+	seedVehicleWithCatalog(t, testPool, "veh_cat_001", "5YJ3E1EA1NF000C01", catalogFields{
+		model:              "Model 3",
+		year:               2024,
+		color:              "Midnight Silver Metallic",
+		locationName:       "Home",
+		locationAddress:    "123 Market St, San Francisco, CA",
+		fsdMilesToday:      412.7,
+		destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
+	})
+	// Second vehicle: minimal catalog (defaults) + null destinationAddress to
+	// exercise the nullable branch of the scan.
+	seedVehicleWithCatalog(t, testPool, "veh_cat_002", "5YJ3E1EA1NF000C02", catalogFields{
+		model:              "Model Y",
+		year:               2023,
+		color:              "Pearl White",
+		locationName:       "",
+		locationAddress:    "",
+		fsdMilesToday:      0,
+		destinationAddress: nil,
+	})
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		vin  string
+		want catalogFields
+	}{
+		{
+			name: "full catalog populated",
+			vin:  "5YJ3E1EA1NF000C01",
+			want: catalogFields{
+				model:              "Model 3",
+				year:               2024,
+				color:              "Midnight Silver Metallic",
+				locationName:       "Home",
+				locationAddress:    "123 Market St, San Francisco, CA",
+				fsdMilesToday:      412.7,
+				destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
+			},
+		},
+		{
+			name: "nullable destinationAddress with empty location strings",
+			vin:  "5YJ3E1EA1NF000C02",
+			want: catalogFields{
+				model:              "Model Y",
+				year:               2023,
+				color:              "Pearl White",
+				locationName:       "",
+				locationAddress:    "",
+				fsdMilesToday:      0,
+				destinationAddress: nil,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v, err := repo.GetByVIN(ctx, tt.vin)
+			if err != nil {
+				t.Fatalf("GetByVIN(%s): %v", tt.vin, err)
+			}
+			assertCatalog(t, v, tt.want)
+
+			byID, err := repo.GetByID(ctx, v.ID)
+			if err != nil {
+				t.Fatalf("GetByID(%s): %v", v.ID, err)
+			}
+			assertCatalog(t, byID, tt.want)
+		})
+	}
+
+	t.Run("ListByUser loads catalog fields", func(t *testing.T) {
+		vehicles, err := repo.ListByUser(ctx, "user_001")
+		if err != nil {
+			t.Fatalf("ListByUser: %v", err)
+		}
+		if len(vehicles) != 2 {
+			t.Fatalf("ListByUser returned %d vehicles, want 2", len(vehicles))
+		}
+		byVIN := map[string]store.Vehicle{}
+		for _, v := range vehicles {
+			byVIN[v.VIN] = v
+		}
+		assertCatalog(t, byVIN["5YJ3E1EA1NF000C01"], catalogFields{
+			model:              "Model 3",
+			year:               2024,
+			color:              "Midnight Silver Metallic",
+			locationName:       "Home",
+			locationAddress:    "123 Market St, San Francisco, CA",
+			fsdMilesToday:      412.7,
+			destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
+		})
+		assertCatalog(t, byVIN["5YJ3E1EA1NF000C02"], catalogFields{
+			model:              "Model Y",
+			year:               2023,
+			color:              "Pearl White",
+			locationName:       "",
+			locationAddress:    "",
+			fsdMilesToday:      0,
+			destinationAddress: nil,
+		})
+	})
+}
+
+func assertCatalog(t *testing.T, v store.Vehicle, want catalogFields) {
+	t.Helper()
+	if v.Model != want.model {
+		t.Errorf("Model = %q, want %q", v.Model, want.model)
+	}
+	if v.Year != want.year {
+		t.Errorf("Year = %d, want %d", v.Year, want.year)
+	}
+	if v.Color != want.color {
+		t.Errorf("Color = %q, want %q", v.Color, want.color)
+	}
+	if v.LocationName != want.locationName {
+		t.Errorf("LocationName = %q, want %q", v.LocationName, want.locationName)
+	}
+	if v.LocationAddress != want.locationAddress {
+		t.Errorf("LocationAddress = %q, want %q", v.LocationAddress, want.locationAddress)
+	}
+	if v.FsdMilesToday != want.fsdMilesToday {
+		t.Errorf("FsdMilesToday = %v, want %v", v.FsdMilesToday, want.fsdMilesToday)
+	}
+	switch {
+	case want.destinationAddress == nil && v.DestinationAddress != nil:
+		t.Errorf("DestinationAddress = %q, want nil", *v.DestinationAddress)
+	case want.destinationAddress != nil && v.DestinationAddress == nil:
+		t.Errorf("DestinationAddress = nil, want %q", *want.destinationAddress)
+	case want.destinationAddress != nil && *v.DestinationAddress != *want.destinationAddress:
+		t.Errorf("DestinationAddress = %q, want %q", *v.DestinationAddress, *want.destinationAddress)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 func TestVehicleRepo_UpdateStatus(t *testing.T) {
 	cleanTables(t, testPool)
