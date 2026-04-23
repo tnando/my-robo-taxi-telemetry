@@ -18,6 +18,8 @@ func convertValue(field tpb.Field, v *tpb.Value) (events.TelemetryValue, error) 
 		return convertLocation(v)
 	case tpb.Field_Gear:
 		return convertShiftState(v)
+	case tpb.Field_ChargeState:
+		return convertChargeState(v)
 	case tpb.Field_DetailedChargeState:
 		return convertDetailedChargeState(v)
 	case tpb.Field_CarType:
@@ -78,6 +80,26 @@ func convertShiftState(v *tpb.Value) (events.TelemetryValue, error) {
 	default:
 		return events.TelemetryValue{}, fmt.Errorf(
 			"%w: expected shiftState or string, got %T", ErrUnexpectedValueType, v.Value,
+		)
+	}
+}
+
+// convertChargeState extracts Tesla's proto 2 ChargeState enum (emitted
+// via the `charging_value` oneof variant, which wraps the ChargingState
+// enum) and returns it as a string. Produced values match the v1 charge
+// atomic group contract: Unknown, Disconnected, NoPower, Starting,
+// Charging, Complete, Stopped.
+func convertChargeState(v *tpb.Value) (events.TelemetryValue, error) {
+	switch val := v.Value.(type) {
+	case *tpb.Value_ChargingValue:
+		s := chargingStateString(val.ChargingValue)
+		return events.TelemetryValue{StringVal: &s}, nil
+	case *tpb.Value_StringValue:
+		s := val.StringValue
+		return events.TelemetryValue{StringVal: &s}, nil
+	default:
+		return events.TelemetryValue{}, fmt.Errorf(
+			"%w: expected chargingState or string, got %T", ErrUnexpectedValueType, v.Value,
 		)
 	}
 }
