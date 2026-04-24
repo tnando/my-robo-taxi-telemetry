@@ -171,7 +171,7 @@
     },
     "fsdMilesSinceReset": {
       "type": "number",
-      "description": "Miles driven using Full Self-Driving since last reset. The counter resets on OTA updates and factory resets, NOT daily. Maps from Tesla SelfDrivingMilesSinceReset. Non-nullable per DB Vehicle.fsdMilesToday (NOT NULL DEFAULT 0). The DB column name is the legacy `fsdMilesToday`; the wire rename to `fsdMilesSinceReset` landed in MYR-27 (see §7.1 resolved decisions). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "description": "Miles driven using Full Self-Driving since last reset. The counter resets on OTA updates and factory resets, NOT daily. Maps from Tesla SelfDrivingMilesSinceReset. Non-nullable per DB Vehicle.fsdMilesSinceReset (NOT NULL DEFAULT 0) — DB column renamed from the legacy fsdMilesToday by MYR-24 (2026-04-23, cross-repo Prisma migration). Loaded by the Go Vehicle struct and populated on snapshot.",
       "x-unit": "miles",
       "x-classification": "P0",
       "minimum": 0

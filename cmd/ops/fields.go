@@ -203,7 +203,7 @@ func runFieldsSnapshot(ctx context.Context, args []string) error {
 		InteriorTemp:         v.InteriorTemp,
 		ExteriorTemp:         v.ExteriorTemp,
 		OdometerMiles:        v.OdometerMiles,
-		FsdMilesSinceReset:   v.FsdMilesToday,
+		FsdMilesSinceReset:   v.FsdMilesSinceReset,
 		DestinationName:      v.DestinationName,
 		DestinationAddress:   v.DestinationAddress,
 		DestinationLatitude:  v.DestinationLatitude,
