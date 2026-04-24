@@ -12,8 +12,8 @@ import (
 // REST snapshot wire shape. It pins:
 //   - the seven catalog fields promoted by MYR-24 are serialized with real
 //     values (not null/omitted)
-//   - the Go struct field FsdMilesToday is emitted under the contract wire
-//     name "fsdMilesSinceReset" (MYR-27)
+//   - fsdMilesSinceReset is emitted under the contract wire name (MYR-27
+//     rename, DB column renamed in MYR-24 cross-repo Prisma migration)
 //   - destinationAddress stays nullable (omitempty) when the DB column is NULL
 //   - locationName / locationAddress serialize as empty strings (non-nullable
 //     per Prisma NOT NULL DEFAULT '') when no reverse geocode is available
@@ -29,7 +29,7 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 		Status:             store.VehicleStatusParked,
 		LocationName:       "Home",
 		LocationAddress:    "123 Market St, San Francisco, CA",
-		FsdMilesToday:      412.7,
+		FsdMilesSinceReset:      412.7,
 		DestinationAddress: &destAddr,
 		LastUpdated:        time.Date(2026, 4, 23, 12, 0, 0, 0, time.UTC),
 	}
@@ -52,10 +52,6 @@ func TestVehicleSnapshot_JSONShape(t *testing.T) {
 	assertField(t, got, "locationAddress", "123 Market St, San Francisco, CA")
 	assertField(t, got, "fsdMilesSinceReset", 412.7)
 	assertField(t, got, "destinationAddress", destAddr)
-
-	if _, present := got["fsdMilesToday"]; present {
-		t.Errorf("snapshot leaks DB column name fsdMilesToday; wire name must be fsdMilesSinceReset")
-	}
 
 	// Empty-strings / nil branches: nullable destinationAddress must omit.
 	minimal := store.Vehicle{
@@ -108,7 +104,7 @@ func toSnapshot(v store.Vehicle) vehicleSnapshot {
 		InteriorTemp:         v.InteriorTemp,
 		ExteriorTemp:         v.ExteriorTemp,
 		OdometerMiles:        v.OdometerMiles,
-		FsdMilesSinceReset:   v.FsdMilesToday,
+		FsdMilesSinceReset:   v.FsdMilesSinceReset,
 		DestinationName:      v.DestinationName,
 		DestinationAddress:   v.DestinationAddress,
 		DestinationLatitude:  v.DestinationLatitude,

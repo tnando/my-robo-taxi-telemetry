@@ -18,7 +18,7 @@ type catalogFields struct {
 	color              string
 	locationName       string
 	locationAddress    string
-	fsdMilesToday      float64
+	fsdMilesSinceReset float64
 	destinationAddress *string
 }
 
@@ -204,7 +204,7 @@ func TestVehicleRepo_UpdateTelemetry(t *testing.T) {
 }
 
 // TestVehicleRepo_CatalogFields verifies that the seven catalog columns
-// promoted by MYR-24 (model, year, color, fsdMilesToday, locationName,
+// promoted by MYR-24 (model, year, color, fsdMilesSinceReset, locationName,
 // locationAddress, destinationAddress) are loaded on GetByVIN, GetByID, and
 // ListByUser. Before MYR-24 none of these columns were scanned; the test
 // is the regression guard for the drift that §7.2 of
@@ -218,7 +218,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 		color:              "Midnight Silver Metallic",
 		locationName:       "Home",
 		locationAddress:    "123 Market St, San Francisco, CA",
-		fsdMilesToday:      412.7,
+		fsdMilesSinceReset: 412.7,
 		destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
 	})
 	// Second vehicle: minimal catalog (defaults) + null destinationAddress to
@@ -229,7 +229,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 		color:              "Pearl White",
 		locationName:       "",
 		locationAddress:    "",
-		fsdMilesToday:      0,
+		fsdMilesSinceReset: 0,
 		destinationAddress: nil,
 	})
 
@@ -250,7 +250,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 				color:              "Midnight Silver Metallic",
 				locationName:       "Home",
 				locationAddress:    "123 Market St, San Francisco, CA",
-				fsdMilesToday:      412.7,
+				fsdMilesSinceReset: 412.7,
 				destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
 			},
 		},
@@ -263,7 +263,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 				color:              "Pearl White",
 				locationName:       "",
 				locationAddress:    "",
-				fsdMilesToday:      0,
+				fsdMilesSinceReset: 0,
 				destinationAddress: nil,
 			},
 		},
@@ -303,7 +303,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 			color:              "Midnight Silver Metallic",
 			locationName:       "Home",
 			locationAddress:    "123 Market St, San Francisco, CA",
-			fsdMilesToday:      412.7,
+			fsdMilesSinceReset: 412.7,
 			destinationAddress: strPtr("2001 Market St, San Francisco, CA 94114"),
 		})
 		assertCatalog(t, byVIN["5YJ3E1EA1NF000C02"], catalogFields{
@@ -312,7 +312,7 @@ func TestVehicleRepo_CatalogFields(t *testing.T) {
 			color:              "Pearl White",
 			locationName:       "",
 			locationAddress:    "",
-			fsdMilesToday:      0,
+			fsdMilesSinceReset: 0,
 			destinationAddress: nil,
 		})
 	})
@@ -335,8 +335,8 @@ func assertCatalog(t *testing.T, v store.Vehicle, want catalogFields) {
 	if v.LocationAddress != want.locationAddress {
 		t.Errorf("LocationAddress = %q, want %q", v.LocationAddress, want.locationAddress)
 	}
-	if v.FsdMilesToday != want.fsdMilesToday {
-		t.Errorf("FsdMilesToday = %v, want %v", v.FsdMilesToday, want.fsdMilesToday)
+	if v.FsdMilesSinceReset != want.fsdMilesSinceReset {
+		t.Errorf("FsdMilesSinceReset = %v, want %v", v.FsdMilesSinceReset, want.fsdMilesSinceReset)
 	}
 	switch {
 	case want.destinationAddress == nil && v.DestinationAddress != nil:

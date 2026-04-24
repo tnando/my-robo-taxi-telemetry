@@ -43,16 +43,16 @@ type Vehicle struct {
 	InteriorTemp         int
 	ExteriorTemp         int
 	OdometerMiles        int
-	FsdMilesToday        float64 // DB column "fsdMilesToday"; wire name is "fsdMilesSinceReset" (MYR-27).
-	DestinationName      *string  // nullable
-	DestinationAddress   *string  // nullable
-	DestinationLatitude  *float64 // nullable
-	DestinationLongitude *float64 // nullable
-	OriginLatitude       *float64 // nullable
-	OriginLongitude      *float64 // nullable
-	EtaMinutes           *int     // nullable
-	TripDistRemaining    *float64          // nullable
-	NavRouteCoordinates  json.RawMessage   // nullable JSONB
+	FsdMilesSinceReset   float64
+	DestinationName      *string         // nullable
+	DestinationAddress   *string         // nullable
+	DestinationLatitude  *float64        // nullable
+	DestinationLongitude *float64        // nullable
+	OriginLatitude       *float64        // nullable
+	OriginLongitude      *float64        // nullable
+	EtaMinutes           *int            // nullable
+	TripDistRemaining    *float64        // nullable
+	NavRouteCoordinates  json.RawMessage // nullable JSONB
 	LastUpdated          time.Time
 }
 
@@ -111,18 +111,18 @@ type DriveRecord struct {
 
 // DriveCompletion holds the final values written when a drive ends.
 type DriveCompletion struct {
-	EndTime          string
-	EndLocation      string
-	EndAddress       string
-	DistanceMiles    float64
-	DurationMinutes  int
-	AvgSpeedMph      float64
-	MaxSpeedMph      float64
-	EnergyUsedKwh    float64
-	EndChargeLevel   int
-	FsdMiles         float64
-	FsdPercentage    float64
-	Interventions    int
+	EndTime         string
+	EndLocation     string
+	EndAddress      string
+	DistanceMiles   float64
+	DurationMinutes int
+	AvgSpeedMph     float64
+	MaxSpeedMph     float64
+	EnergyUsedKwh   float64
+	EndChargeLevel  int
+	FsdMiles        float64
+	FsdPercentage   float64
+	Interventions   int
 }
 
 // RoutePointRecord is a single GPS point stored inside the Drive.routePoints
