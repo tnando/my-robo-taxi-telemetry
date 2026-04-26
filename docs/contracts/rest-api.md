@@ -45,7 +45,7 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 | **NFR-3.5** | Snapshot must contain enough data to render the full UI (no per-field spinners) | §7.1 `GET /vehicles/{vehicleId}/snapshot` |
 | **NFR-3.11** | Reconnect re-fetches DB snapshot before resuming live stream | §7.1 + cross-ref to `websocket-protocol.md` §7.2 reconnect sequence |
 | **NFR-3.19** | Every WS broadcast projected through recipient's role mask; no raw fan-out | §5 RBAC field masks (applied to REST too) |
-| **NFR-3.20** | Persisted DB reads respect viewer's role-based field visibility | §5 RBAC field masks |
+| **NFR-3.20** | REST responses are projected through the caller's role mask before encoding (handler-layer mask; the underlying DB read returns plaintext and is role-agnostic) | §5 RBAC field masks |
 | **NFR-3.21** | Vehicle ownership enforced on every API call | §3 Authentication + §5 RBAC |
 | **NFR-3.22** | TLS in transit for all external connections | §2.1 Transport |
 | **NFR-3.23** | AES-256-GCM application-level encryption for P1 fields | §7.4 drive route transport note; §8 resource schemas |
@@ -334,7 +334,7 @@ v1 defines two roles:
 | `owner` | Full | Full (create/delete invites, delete account) | FR-5.4 |
 | `viewer` | Full read of the vehicle's live state, drive history, and route playback | None | FR-5.4 |
 
-The third architectural slot `limited_viewer` is NOT a v1 role but is kept available as an extension seam per FR-5.5. The masking machinery below is defined as a static per-role projection applied at the store layer, so adding a third role is a one-file change (a new mask entry) rather than an architectural change.
+The third architectural slot `limited_viewer` is NOT a v1 role but is kept available as an extension seam per FR-5.5. The masking machinery below is defined as a static per-role projection applied at the handler layer (see §5.1) via `internal/mask/`, so adding a third role is a one-file change (a new mask entry) rather than an architectural change.
 
 ### 5.1 Masking rule
 
@@ -356,7 +356,7 @@ The mask is applied at the **handler layer**: the store returns plaintext, fully
 |------|----------------|-------|
 | `owner` | All fields in [`schemas/vehicle-state.schema.json`](schemas/vehicle-state.schema.json) | Including GPS, nav, charge, gear -- the full v1 `VehicleState` shape. |
 | `viewer` | All fields EXCEPT `licensePlate` | **Note:** `licensePlate` is a Prisma-owned column per [`data-classification.md`](data-classification.md) §1.3 and is NOT currently a member of `vehicle-state.schema.json`, so this mask rule is **forward-looking**: it codifies the behavior the first time `licensePlate` is surfaced over the SDK. Viewers retain full GPS, nav, and charge visibility because the whole point of sharing is to watch the vehicle in real time (FR-5.1, FR-5.4). |
-| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file store-layer change. |
+| `limited_viewer` (FR-5.5 future slot) | All fields EXCEPT `licensePlate`, `navRouteCoordinates`, `destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`; `latitude`/`longitude` reduced to a coarse-grained hash (city-block resolution) | Documented here as the extension seam for FR-5.5. NOT implemented in v1. The mask is a static per-role projection; adding the `limited_viewer` row is a one-file handler-layer change in `internal/mask/`. |
 
 #### 5.2.2 Drive list (`GET /api/vehicles/{vehicleId}/drives`)
 
@@ -402,13 +402,16 @@ Note on the Invite response shape: `email` is **P1** per `data-classification.md
 
 > **Anchored:** NFR-3.20, FR-10 (audit infrastructure), `data-lifecycle.md` §4.
 
-Every REST response and every WebSocket frame whose mask projection removed at least one field MUST be audit-logged at a **1% sampling rate**, computed deterministically by hash:
+Every REST response and every WebSocket frame whose mask projection removed at least one field MUST be audit-logged at a **1% sampling rate**, computed deterministically by hash. The hash inputs differ per channel because the WS audit emit is per-`(vehicleId, role, frame)` at the hub (not per-client), while the REST audit emit is per-request:
 
 ```
-shouldAudit := hash(userId || resourceId || frameSeq) mod 100 == 0
+REST: shouldAudit := hash(userId || requestId || resourceId) mod 100 == 0
+WS:   shouldAudit := hash(vehicleId || role || frameSeq)    mod 100 == 0
 ```
 
-Hash-based sampling rather than a counter avoids concentrating samples on bursty vehicles (a counter samples every 100th frame regardless of source; hash-based sampling distributes uniformly across the active vehicle set, which is essential for incident triage).
+`requestId` is the `X-Request-ID` echoed per §4.4. `frameSeq` is the envelope sequence number once DV-02 lands; until then, the hub uses an in-process monotonic per-vehicle counter.
+
+Hash-based sampling rather than a counter avoids concentrating samples on bursty vehicles (a counter samples every 100th regardless of source; hash-based sampling distributes uniformly across the active vehicle set, which is essential for incident triage).
 
 Audit entries land in the existing `AuditLog` table per `data-lifecycle.md` §4 with:
 
@@ -428,9 +431,9 @@ For WebSocket broadcasts, the audit emit happens **once per (vehicleId, role, fr
 
 ### 5.4 Extension seam for a third role (FR-5.5)
 
-The RBAC masking machinery is implemented as a static lookup table keyed by `(resourceType, role)` at the store layer. Adding a new role is a three-step change:
+The RBAC masking machinery is implemented as a static lookup table keyed by `(resourceType, role)` in `internal/mask/`, consumed by both the REST handler layer (§5.1) and the WebSocket hub's per-role pre-projection (`websocket-protocol.md` §4.6). Adding a new role is a three-step change:
 
-1. Add the role name to the `Role` enum in the store layer.
+1. Add the role name to the `Role` enum in `internal/auth/`.
 2. Add mask entries for each resource type that the new role should see (or inherit from `viewer` with a diff).
 3. Wire the role into the `Authenticator.ResolveRole(userId, vehicleId)` call site.
 
