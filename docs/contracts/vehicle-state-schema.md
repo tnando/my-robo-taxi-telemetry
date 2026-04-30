@@ -52,7 +52,7 @@ Every field below corresponds to a column in the `Vehicle` table or a value deri
 | Field | Type | Nullable | Unit | Classification | Group | Source |
 |-------|------|----------|------|----------------|-------|--------|
 | `gearPosition` | `string` or `null` | Yes | -- | P0 | `gear` | Tesla `Gear` |
-| `status` | `string` (enum) | No | -- | P0 | `gear` | Derived from `gearPosition` |
+| `status` | `string` (enum) | No | -- | P0 | `gear` | Derived from `gearPosition`. **See §2.4 known gap:** on the live wire `status` is recomputed only on frames carrying `gearPosition`; speed-only frames do not refresh it. |
 
 `status` enum values: `driving`, `parked`, `charging`, `offline`, `in_service`.
 `gearPosition` enum values: `P`, `D`, `R`, `N`, or `null`.
