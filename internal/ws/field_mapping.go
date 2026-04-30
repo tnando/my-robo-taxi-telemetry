@@ -45,23 +45,14 @@ var integerFields = map[string]struct{}{
 	"passengerTempSetting": {},
 }
 
-// navFieldSet contains internal telemetry field names that are considered
-// navigation-related. These fields are accumulated and broadcast together
-// after a time window to avoid race conditions in the frontend.
-var navFieldSet = map[string]struct{}{
-	"routeLine":           {},
-	"destinationName":     {},
-	"minutesToArrival":    {},
-	"milesToArrival":      {},
-	"destinationLocation": {},
-	"originLocation":      {},
-}
-
-// isNavField reports whether the given internal field name is a navigation
-// field that should be routed through the navAccumulator.
+// isNavField reports whether the given internal field name belongs to the
+// navigation atomic group, in which case it is routed through the
+// groupAccumulator. The set of navigation members lives in atomicGroupMembers
+// (atomic_groups.go) — the single source of truth for atomic-group
+// membership.
 func isNavField(name string) bool {
-	_, ok := navFieldSet[name]
-	return ok
+	g, ok := groupOf(name)
+	return ok && g == groupNavigation
 }
 
 // locationFieldSplit maps internal location field names to the pair of
