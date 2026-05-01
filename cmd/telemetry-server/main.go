@@ -45,7 +45,7 @@ func main() {
 	}
 }
 
-func run() error { //nolint:funlen // composition root — sequential dependency wiring
+func run() error { //nolint:funlen,cyclop // composition root — sequential dependency wiring; each new dependency adds a guard, not branching logic
 	// --- Flag parsing ---
 	var (
 		configPath = flag.String("config", "", "path to JSON configuration file")
