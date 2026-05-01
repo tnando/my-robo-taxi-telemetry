@@ -14,7 +14,7 @@ These contracts are the single source of truth. If the code and the contract dis
 
 ---
 
-## The eight contract documents
+## The nine contract documents
 
 | Document | Purpose | Target artifact |
 |----------|---------|-----------------|
