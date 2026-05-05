@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -15,7 +16,7 @@ func (h *FleetConfigHandler) handleTeslaTokenError(w http.ResponseWriter, userID
 		h.logger.Warn("fleet config: Tesla token not found",
 			slog.String("user_id", userID),
 		)
-		h.writeError(w, http.StatusUnauthorized, "Tesla account not linked — connect your Tesla account first")
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "Tesla account not linked — connect your Tesla account first")
 		return
 	}
 
@@ -23,13 +24,13 @@ func (h *FleetConfigHandler) handleTeslaTokenError(w http.ResponseWriter, userID
 		slog.String("user_id", userID),
 		slog.String("error", err.Error()),
 	)
-	h.writeError(w, http.StatusInternalServerError, "internal error")
+	h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 }
 
 // handleVehicleLookupError maps vehicle lookup errors to HTTP responses.
 func (h *FleetConfigHandler) handleVehicleLookupError(w http.ResponseWriter, vin string, err error) {
 	if errors.Is(err, sdk.ErrNotFound) {
-		h.writeError(w, http.StatusNotFound, "vehicle not found")
+		h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
 		return
 	}
 
@@ -37,7 +38,7 @@ func (h *FleetConfigHandler) handleVehicleLookupError(w http.ResponseWriter, vin
 		slog.String("vin", redactVIN(vin)),
 		slog.String("error", err.Error()),
 	)
-	h.writeError(w, http.StatusInternalServerError, "internal error")
+	h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 }
 
 // handleFleetAPIError maps Fleet API errors to HTTP responses.
@@ -50,10 +51,10 @@ func (h *FleetConfigHandler) handleFleetAPIError(w http.ResponseWriter, vin stri
 			slog.String("body", apiErr.Body),
 		)
 		if apiErr.StatusCode >= 500 {
-			h.writeError(w, http.StatusBadGateway, "fleet API error")
+			h.writeError(w, http.StatusBadGateway, wserrors.ErrCodeInternalError, "fleet API error")
 			return
 		}
-		h.writeError(w, http.StatusBadGateway, fmt.Sprintf("fleet API rejected request: %s", apiErr.Body))
+		h.writeError(w, http.StatusBadGateway, wserrors.ErrCodeInternalError, fmt.Sprintf("fleet API rejected request: %s", apiErr.Body))
 		return
 	}
 
@@ -61,5 +62,5 @@ func (h *FleetConfigHandler) handleFleetAPIError(w http.ResponseWriter, vin stri
 		slog.String("vin", redactVIN(vin)),
 		slog.String("error", err.Error()),
 	)
-	h.writeError(w, http.StatusBadGateway, "failed to reach fleet API proxy")
+	h.writeError(w, http.StatusBadGateway, wserrors.ErrCodeInternalError, "failed to reach fleet API proxy")
 }

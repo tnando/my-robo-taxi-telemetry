@@ -85,7 +85,3 @@ type fleetConfigResponse struct {
 	VIN    string `json:"vin"`
 }
 
-// fleetConfigErrorResponse is the JSON body returned when a config push fails.
-type fleetConfigErrorResponse struct {
-	Error string `json:"error"`
-}

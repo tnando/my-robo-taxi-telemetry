@@ -194,14 +194,14 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 
 | Code | HTTP | Carrier | Status | Reconnect/retry policy | Description |
 |------|------|---------|--------|------------------------|-------------|
-| `auth_failed` | 401 | Shared (WS + REST) | Implemented (WS); PLANNED (REST, DV-19) | Surface to UI; refresh token via `getToken()`; retry once (FR-6.2). A second `auth_failed` is terminal for the operation. | Token signature/issuer/audience/expiry check failed, or the `Authorization` header was missing/malformed. |
-| `auth_timeout` | 401 | Shared (WS + REST) | Implemented (WS); PLANNED (REST, DV-19) | Auto-retry once with fresh token; NFR-3.10-style backoff on subsequent attempts. | Rare REST path: server-side token validation exceeded its internal deadline. Treated as transient. |
-| `permission_denied` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | PLANNED | Surface to UI; do not auto-retry the same operation. | Authenticated user attempted a resource they do not own or a role they do not have (e.g., viewer calling an invite endpoint). |
-| `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | PLANNED | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
-| `not_found` | 404 | **REST-only** | PLANNED (DV-20) | Surface to UI; do not retry. The resource either does not exist or is filtered out by ownership / role mask. | Unknown `vehicleId`, `driveId`, or `inviteId`. The SDK cannot distinguish "never existed" from "revoked access" -- this is intentional, so the server never leaks the existence of resources the caller cannot see. |
-| `invalid_request` | 400 | **REST-only** | PLANNED (DV-20) | Surface to UI as a developer error; do not retry. | Request body, path params, or query string failed server-side validation (malformed cursor, `limit` out of range, malformed email on invite creation, etc.). |
-| `rate_limited` | 429 | Shared (WS + REST) | PLANNED (WS DV-08; REST DV-22) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
-| `internal_error` | 500 | Shared (WS + REST) | PLANNED | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
+| `auth_failed` | 401 | Shared (WS + REST) | Implemented (MYR-47) | Surface to UI; refresh token via `getToken()`; retry once (FR-6.2). A second `auth_failed` is terminal for the operation. | Token signature/issuer/audience/expiry check failed, or the `Authorization` header was missing/malformed. |
+| `auth_timeout` | 401 | Shared (WS + REST) | Implemented (WS); REST path not yet exercised (server-side ValidateToken has no deadline-only branch in v1) | Auto-retry once with fresh token; NFR-3.10-style backoff on subsequent attempts. | Rare REST path: server-side token validation exceeded its internal deadline. Treated as transient. |
+| `permission_denied` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | PLANNED — emitted alongside MYR-46 per-vehicle subscribe | Surface to UI; do not auto-retry the same operation. | Authenticated user attempted a resource they do not own or a role they do not have (e.g., viewer calling an invite endpoint). |
+| `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | Implemented on REST (MYR-47); PLANNED on WS per DV-07 | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
+| `not_found` | 404 | **REST-only** | Implemented (MYR-47) | Surface to UI; do not retry. The resource either does not exist or is filtered out by ownership / role mask. | Unknown `vehicleId`, `driveId`, or `inviteId`. The SDK cannot distinguish "never existed" from "revoked access" -- this is intentional, so the server never leaks the existence of resources the caller cannot see. |
+| `invalid_request` | 400 | **REST-only** | Implemented (MYR-47) | Surface to UI as a developer error; do not retry. | Request body, path params, or query string failed server-side validation (malformed cursor, `limit` out of range, malformed email on invite creation, etc.). |
+| `rate_limited` | 429 | Shared (WS + REST) | Implemented for WS pre-auth per-IP cap (MYR-47); REST per-user request cap PLANNED (DV-22); WS post-auth per-user cap PLANNED (DV-08) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
+| `internal_error` | 500 | Shared (WS + REST) | Implemented on REST (MYR-47); PLANNED on WS | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
 | `service_unavailable` | 503 | **REST-only, PLANNED** | PLANNED (DV-21) | Auto-retry with exponential backoff; honor `Retry-After` header if present. | Reserved for maintenance windows and graceful-shutdown states. The server MAY return `503` during rolling deployments; v1 does not yet emit this code. Added to the REST catalog so SDK consumers can write forward-compatible handlers. |
 | `snapshot_required` | -- | **WS-only** (close code 4005 + error frame) | PLANNED (DV-02) | n/a for REST | WS-only. REST has no analogue because REST is already the snapshot channel (the "fall back to snapshot fetch" signal IS a REST call). Listed here for completeness; REST clients never receive this code. |
 
@@ -214,6 +214,44 @@ Three codes are REST-only extensions of the shared catalog: `not_found`, `invali
 - `service_unavailable` is RESERVED for the REST contract so the SDK can write forward-compatible handlers before the server begins emitting it during maintenance windows.
 
 Both `not_found` and `invalid_request` MUST be added to the shared `ErrorPayload.code` enum in [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) even though the WS never emits them, so the SDK's `CoreError` union is a single enum across both transports. This is not a drift -- the WS contract explicitly lists them as "REST-only" in the catalog description. Tracked as DV-20.
+
+#### 4.1.1.b Server-side emission audit (MYR-47)
+
+The closed Go enum lives in [`internal/wserrors/wserrors.go`](../../internal/wserrors/wserrors.go) and is the single source of truth for every error code the server emits. `sendError` (WS) and `writeError` / `WriteErrorEnvelope` (REST) take the typed `ErrorCode` as a parameter, so the compiler refuses string literals at the call site — every error construction path pulls a value from the enum. The reachability matrix in [`internal/wserrors/wserrors_test.go`](../../internal/wserrors/wserrors_test.go) walks the closed enum and asserts every code has either a constructed-scenario test or a documented blocker.
+
+Per-site audit (REST surface in `internal/telemetry/`, WS surface in `internal/ws/`):
+
+| Site | HTTP / WS | Code (typed) | Scenario |
+|------|-----------|--------------|----------|
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — invalid VIN | 400 | `ErrCodeInvalidRequest` | Malformed `{vin}` path param |
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — missing Authorization | 401 | `ErrCodeAuthFailed` | Header omitted |
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — invalid token | 401 | `ErrCodeAuthFailed` | `ValidateToken` rejects |
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — vehicle not found | 404 | `ErrCodeNotFound` | `GetVehicleOwner` returns `sdk.ErrNotFound` |
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — vehicle ownership mismatch | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's `ownerID` |
+| [`vehicle_status_handler.go`](../../internal/telemetry/vehicle_status_handler.go) — DB lookup error | 500 | `ErrCodeInternalError` | `GetVehicleOwner` returns non-`ErrNotFound` |
+| [`vehicle_status_mask.go`](../../internal/telemetry/vehicle_status_mask.go) — role resolution error | 500 | `ErrCodeInternalError` | `ResolveRole` returns error |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — wrong method | 405 | `ErrCodeInvalidRequest` | `r.Method != POST` |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — invalid VIN | 400 | `ErrCodeInvalidRequest` | Malformed `{vin}` path param |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — missing/invalid Authorization | 401 | `ErrCodeAuthFailed` | Header omitted or `ValidateToken` fails |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — vehicle ownership mismatch | 403 | `ErrCodeVehicleNotOwned` | Caller's `userID` ≠ vehicle's `ownerID` |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — Tesla token expired (no refresher) | 401 | `ErrCodeAuthFailed` | Token expired and refresh path unavailable |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — Tesla token refresh failed | 401 | `ErrCodeAuthFailed` | Tesla refresh endpoint rejects |
+| [`fleet_config_handler.go`](../../internal/telemetry/fleet_config_handler.go) — Fleet API skipped vehicle | 409 | `ErrCodeInvalidRequest` | Fleet API replies "skipped" with reason |
+| [`fleet_config_errors.go`](../../internal/telemetry/fleet_config_errors.go) — Tesla token not found | 401 | `ErrCodeAuthFailed` | User has not linked a Tesla account |
+| [`fleet_config_errors.go`](../../internal/telemetry/fleet_config_errors.go) — Tesla token lookup failure | 500 | `ErrCodeInternalError` | DB failure on `tokens.GetTeslaToken` |
+| [`fleet_config_errors.go`](../../internal/telemetry/fleet_config_errors.go) — vehicle lookup not found | 404 | `ErrCodeNotFound` | `GetVehicleOwner` returns `sdk.ErrNotFound` |
+| [`fleet_config_errors.go`](../../internal/telemetry/fleet_config_errors.go) — vehicle lookup failure | 500 | `ErrCodeInternalError` | DB failure on `GetVehicleOwner` |
+| [`fleet_config_errors.go`](../../internal/telemetry/fleet_config_errors.go) — Fleet API server / client / network error | 502 | `ErrCodeInternalError` | Upstream Fleet API issue (collapsed to one typed code in v1) |
+| [`handler.go`](../../internal/ws/handler.go) — pre-auth per-IP cap | HTTP 429 (envelope) | `ErrCodeRateLimited` | `MaxConnectionsPerIP` breached before WS upgrade |
+| [`handler.go`](../../internal/ws/handler.go) — auth failed | WS frame | `ErrCodeAuthFailed` | `ValidateToken` rejects after upgrade |
+| [`handler.go`](../../internal/ws/handler.go) — auth timeout | WS frame | `ErrCodeAuthTimeout` | Client did not send `auth` within `AuthTimeout` |
+| [`handler.go`](../../internal/ws/handler.go) — `GetUserVehicles` failure | WS frame | `ErrCodeAuthFailed` | DB failure when loading vehicle ownership |
+
+Sites NOT in this audit (intentional carve-outs):
+
+- [`receiver.go`](../../internal/telemetry/receiver.go) — Tesla mTLS endpoint. Not consumer-facing; protobuf agents only.
+- [`debug_fields_handler.go`](../../internal/telemetry/debug_fields_handler.go) — dev-only debug stream. Not part of the SDK contract surface (handler doc-comment).
+- [`server.go`](../../internal/server/server.go) `/healthz` — healthcheck, has its own response shape distinct from the typed-error contract.
 
 **`service_unavailable` is intentionally REST-only and is NOT promoted to the shared enum** in DV-20. The WS equivalent of a 503 maintenance window is a connection-refused close code (4003/1011), not a typed `service_unavailable` error frame. Keeping `service_unavailable` out of the shared enum preserves transport-appropriate error semantics: REST clients retry on 503+`service_unavailable`, WS clients retry on close 4003/1011 per `websocket-protocol.md` §7.1.
 

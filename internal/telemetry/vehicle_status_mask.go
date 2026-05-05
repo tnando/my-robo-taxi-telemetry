@@ -8,6 +8,7 @@ import (
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/auth"
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
 // roleResolver returns the caller's role for a given vehicle. The
@@ -104,7 +105,7 @@ func (h *VehicleStatusHandler) writeMaskedResponse(
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusInternalServerError, "internal error")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return
 	}
 
