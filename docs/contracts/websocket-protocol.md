@@ -668,14 +668,6 @@ The mask matrix is the **same matrix used by the REST handler layer** (`rest-api
 | `unsubscribe` | **Implemented** ([MYR-46](https://linear.app/myrobotaxi/issue/MYR-46)) | [`control_frames.go:handleUnsubscribeFrame`](../../internal/ws/control_frames.go) | Removes the vehicle from the active subscription set without closing the socket. Idempotent. |
 | `ping` | **Implemented** ([MYR-46](https://linear.app/myrobotaxi/issue/MYR-46)) | [`control_frames.go:handlePingFrame`](../../internal/ws/control_frames.go) | Server responds with `pong` echoing the nonce. RFC 6455 transport-level PING/PONG continues to be handled transparently by `coder/websocket`. |
 
-**Critical fact:** after auth completes, the server's `readPump` ([`client.go:readPump`](../../internal/ws/client.go) lines 74-90) **explicitly ignores** all incoming client frames. The read loop exists only to detect socket disconnect:
-
-```go
-// internal/ws/client.go:87-89
-// Post-auth messages are ignored; the read is only to detect
-// disconnects and keep the connection alive.
-```
-
 As of MYR-46 the server's `readPump` ([`client.go:readPump`](../../internal/ws/client.go)) dispatches `subscribe`, `unsubscribe`, and `ping` frames via [`control_frames.go:handleClientFrame`](../../internal/ws/control_frames.go). Unknown frame types are logged-and-ignored so a future SDK introducing a new client→server frame does not poison an otherwise-healthy connection.
 
 ### 5.1 `auth`
@@ -698,11 +690,12 @@ As of MYR-46 the server's `readPump` ([`client.go:readPump`](../../internal/ws/c
 
 See §2.2 for full handshake semantics.
 
-### 5.2 `subscribe` (PLANNED)
+### 5.2 `subscribe`
 
 > **Schema:** [`schemas/ws-messages.schema.json#/$defs/SubscribePayload`](schemas/ws-messages.schema.json)
+> **Implementation:** [`control_frames.go:handleSubscribeFrame`](../../internal/ws/control_frames.go)
 
-**Implemented by MYR-46** (DV-07 RESOLVED minus `sinceSeq`). At handshake time, the server seeds the active subscription set from `Authenticator.GetUserVehicles(userID)` so a client that never sends `subscribe`/`unsubscribe` keeps receiving every owned vehicle (backwards-compatible with pre-MYR-46 SDK consumers). After handshake, an explicit `subscribe` adds a vehicle to the active set after an ownership check; a non-owned target yields a typed `vehicle_not_owned` error frame plus close code 4002 (§6.1.1, §6.2). The `sinceSeq` field is parsed but ignored — the snapshot-resume path depends on DV-02 (envelope `seq`) landing first.
+Implemented by [MYR-46](https://linear.app/myrobotaxi/issue/MYR-46) (DV-07 RESOLVED minus `sinceSeq`). At handshake time, the server seeds the active subscription set from `Authenticator.GetUserVehicles(userID)` so a client that never sends `subscribe`/`unsubscribe` keeps receiving every owned vehicle (backwards-compatible with pre-MYR-46 SDK consumers). After handshake, an explicit `subscribe` adds a vehicle to the active set after an ownership check; a non-owned target yields a typed `vehicle_not_owned` error frame plus close code 4002 (§6.1.1, §6.2). The `sinceSeq` field is parsed but ignored — the snapshot-resume path depends on DV-02 (envelope `seq`) landing first.
 
 ```jsonc
 {
@@ -714,16 +707,19 @@ See §2.2 for full handshake semantics.
 }
 ```
 
-When implemented, the server response will be either:
+When DV-02 lands, the server response to a `subscribe` carrying `sinceSeq` will be either:
 
 - A normal `vehicle_update` stream starting at `sinceSeq + 1`, OR
 - An `error` frame with `code: snapshot_required` indicating the client must perform a full REST snapshot fetch (NFR-3.11) and reconnect.
 
-Both `sinceSeq` acceptance and `snapshot_required` emission depend on DV-02 (envelope `seq`) landing first.
+Today the server ignores `sinceSeq` and continues the existing live stream from the current state.
 
-### 5.3 `unsubscribe` (PLANNED)
+### 5.3 `unsubscribe`
 
-NOT yet implemented. Will release a per-vehicle subscription without closing the entire WebSocket.
+> **Schema:** [`schemas/ws-messages.schema.json#/$defs/UnsubscribePayload`](schemas/ws-messages.schema.json)
+> **Implementation:** [`control_frames.go:handleUnsubscribeFrame`](../../internal/ws/control_frames.go)
+
+Implemented by [MYR-46](https://linear.app/myrobotaxi/issue/MYR-46). Removes the vehicle from the per-client active subscription set without closing the underlying WebSocket. Idempotent: removing an already-absent vehicleId is a no-op. Does NOT require ownership — a subscribed-but-since-revoked vehicle is still removable so the client can drain the set on logout.
 
 ```jsonc
 {
@@ -734,14 +730,12 @@ NOT yet implemented. Will release a per-vehicle subscription without closing the
 }
 ```
 
-### 5.4 `ping` (PLANNED)
+### 5.4 `ping`
 
-NOT yet implemented. Today, application-level ping is unnecessary because:
+> **Schema:** [`schemas/ws-messages.schema.json#/$defs/PingPayload`](schemas/ws-messages.schema.json)
+> **Implementation:** [`control_frames.go:handlePingFrame`](../../internal/ws/control_frames.go)
 
-1. The [`coder/websocket`](https://github.com/coder/websocket) library handles RFC 6455 PING/PONG control frames transparently in both directions.
-2. The server emits `heartbeat` frames on a 15-second cadence (§7.4), giving the SDK a frequent positive liveness signal.
-
-A future application-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG -- specifically watchOS extended-runtime sessions and iOS background sockets per NFR-3.36 / NFR-3.36a-d. The TypeScript SDK runs on browser `WebSocket` and Node `ws`, both of which expose transport-level PING/PONG, so the application-level `ping` is a Swift-SDK forward-compatibility concern only.
+Implemented by [MYR-46](https://linear.app/myrobotaxi/issue/MYR-46). The server responds with a `pong` frame echoing the nonce so the client can compute round-trip latency. Application-level `ping` is reserved for platforms where the WebSocket library does not expose RFC 6455 PING/PONG — specifically watchOS extended-runtime sessions and iOS background sockets per NFR-3.36 / NFR-3.36a-d. Browser/Node clients still rely on transport-level RFC 6455 PING/PONG (handled transparently by [`coder/websocket`](https://github.com/coder/websocket)) and the server's outbound `heartbeat` frames (§7.4) for liveness.
 
 ```jsonc
 {
@@ -752,7 +746,7 @@ A future application-level `ping` is reserved for platforms where the WebSocket 
 }
 ```
 
-The server response will be a `pong` echoing the nonce. `pong` is also reserved in [`schemas/ws-messages.schema.json#/$defs/PongPayload`](schemas/ws-messages.schema.json) and in the AsyncAPI spec, but is not yet emitted.
+The server response is a `pong` frame echoing the nonce. `pong` is canonical in [`schemas/ws-messages.schema.json#/$defs/PongPayload`](schemas/ws-messages.schema.json); the server-side write path is `control_frames.go:writePong`.
 
 ---
 
@@ -924,7 +918,7 @@ The SDK contract today is mode 1. The wire surface for mode 2 is reserved so v1.
 | Direction | Cadence | Wire form | Source (Go) |
 |-----------|---------|-----------|-------------|
 | Server -> client | Default 15 seconds (configurable via `WebSocketConfig.HeartbeatInterval`; validated `> 0` in `config/validate.go` line 104) | Bare envelope `{"type":"heartbeat"}` (no `payload` key -- `omitempty`) | [`heartbeat.go:RunHeartbeat`](../../internal/ws/heartbeat.go) |
-| Client -> server | None today (PLANNED `ping` per §5.4 / DV-07) | n/a | n/a |
+| Client -> server | On-demand `ping` (no fixed cadence; reserved for watchOS extended-runtime and iOS background sessions per NFR-3.36, MYR-46) | `{"type":"ping","payload":{"nonce":"…"}}` → server `pong` echo | [`control_frames.go:handlePingFrame`](../../internal/ws/control_frames.go) |
 | Transport-level (RFC 6455 PING/PONG) | Handled transparently by `coder/websocket` library | Binary control frames | Library internals |
 
 The server pre-marshals the heartbeat message once at init (`heartbeatMessage = mustMarshal(wsMessage{Type: msgTypeHeartbeat})`) and broadcasts it via [`Hub.BroadcastAll`](../../internal/ws/hub.go) line 90 to ALL connected clients regardless of vehicle ownership.

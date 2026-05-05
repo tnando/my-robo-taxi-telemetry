@@ -99,12 +99,11 @@ func TestControlFrames_SubscribeIsIdempotent(t *testing.T) {
 	defer cancel()
 	mustWriteFrame(ctx, t, conn, msgTypeSubscribe, subscribePayload{VehicleID: "v-1"})
 
-	// Wait for the readPump to apply the subscribe-noop before
-	// broadcasting — small but necessary, so the broadcast does not
-	// race ahead of the dispatch (which logs at debug level).
-	time.Sleep(50 * time.Millisecond)
-
 	// Broadcast still reaches the (still-subscribed) client.
+	// No sync needed: v-1 was already in the seeded subscription set
+	// at handshake, so subscribe is a no-op state-wise. The broadcast
+	// path's only state read is hasVehicle, which has been true since
+	// the handshake — there is no race window the dispatch could lose.
 	msg := mustMarshalTest(t, wsMessage{
 		Type:    msgTypeDriveStarted,
 		Payload: mustMarshalRaw(t, map[string]any{"vehicleId": "v-1"}),
