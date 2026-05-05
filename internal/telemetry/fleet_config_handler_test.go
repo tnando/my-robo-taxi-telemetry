@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -321,15 +322,15 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 			}
 
 			if tt.wantError != "" {
-				var errResp fleetConfigErrorResponse
+				var errResp wserrors.ErrorEnvelope
 				if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
 					t.Fatalf("decode error response: %v", err)
 				}
-				if errResp.Error == "" {
+				if errResp.Error.Code == "" {
 					t.Error("expected error field in response, got empty")
 				}
-				if !strings.Contains(errResp.Error, tt.wantError) {
-					t.Errorf("error message: got %q, want substring %q", errResp.Error, tt.wantError)
+				if !strings.Contains(errResp.Error.Message, tt.wantError) {
+					t.Errorf("error message: got %q, want substring %q", errResp.Error.Message, tt.wantError)
 				}
 			} else {
 				var resp fleetConfigResponse
@@ -499,11 +500,11 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 		t.Errorf("status code: got %d, want %d", rec.Code, http.StatusBadGateway)
 	}
 
-	var errResp fleetConfigErrorResponse
+	var errResp wserrors.ErrorEnvelope
 	if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
 		t.Fatalf("decode error response: %v", err)
 	}
-	if errResp.Error == "" {
+	if errResp.Error.Code == "" {
 		t.Error("expected error field in response")
 	}
 }

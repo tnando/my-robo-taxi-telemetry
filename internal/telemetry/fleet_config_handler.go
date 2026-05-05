@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
 // vinLength is the standard length of a Vehicle Identification Number.
@@ -57,19 +59,19 @@ func NewFleetConfigHandler(
 // ServeHTTP handles the fleet config push request.
 func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		h.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		h.writeError(w, http.StatusMethodNotAllowed, wserrors.ErrCodeInvalidRequest, "method not allowed")
 		return
 	}
 
 	vin := r.PathValue("vin")
 	if len(vin) != vinLength {
-		h.writeError(w, http.StatusBadRequest, "invalid VIN: must be 17 characters")
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid VIN: must be 17 characters")
 		return
 	}
 
 	token := extractBearerToken(r)
 	if token == "" {
-		h.writeError(w, http.StatusUnauthorized, "missing Authorization header")
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
 		return
 	}
 
@@ -81,7 +83,7 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized, "invalid or expired token")
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
 		return
 	}
 
@@ -127,7 +129,7 @@ func (h *FleetConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if reason, skipped := result.Response.SkippedVehicles[vin]; skipped {
-		h.writeError(w, http.StatusConflict, fmt.Sprintf("vehicle skipped: %s", reason))
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest, fmt.Sprintf("vehicle skipped: %s", reason))
 		return
 	}
 
@@ -152,7 +154,7 @@ func (h *FleetConfigHandler) verifyOwnership(ctx context.Context, w http.Respons
 			slog.String("vin", redactVIN(vin)),
 			slog.String("user_id", userID),
 		)
-		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
 		return false
 	}
 
@@ -192,7 +194,7 @@ func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.Respons
 			slog.Bool("has_refresher", h.refresher != nil),
 			slog.Bool("has_refresh_token", tok.RefreshToken != ""),
 		)
-		h.writeError(w, http.StatusUnauthorized,
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed,
 			"Tesla token expired — re-link your Tesla account")
 		return TeslaToken{}, false
 	}
@@ -208,7 +210,7 @@ func (h *FleetConfigHandler) tryRefreshToken(ctx context.Context, w http.Respons
 			slog.String("user_id", userID),
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized,
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed,
 			"Tesla token expired — re-link your Tesla account")
 		return TeslaToken{}, false
 	}
@@ -245,7 +247,8 @@ func (h *FleetConfigHandler) writeJSON(w http.ResponseWriter, status int, v any)
 	}
 }
 
-// writeError writes a JSON error response.
-func (h *FleetConfigHandler) writeError(w http.ResponseWriter, status int, msg string) {
-	h.writeJSON(w, status, fleetConfigErrorResponse{Error: msg})
+// writeError writes the REST error envelope (rest-api.md §4.1) with a
+// typed wserrors.ErrorCode. Compiler-enforced no-string-literal-at-call-site.
+func (h *FleetConfigHandler) writeError(w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string) {
+	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
 }

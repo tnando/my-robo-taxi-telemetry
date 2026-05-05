@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 )
 
 // --- Refresh test doubles ---
@@ -214,12 +216,12 @@ func TestFleetConfigHandler_TokenAutoRefresh(t *testing.T) {
 			}
 
 			if tt.wantError != "" {
-				var errResp fleetConfigErrorResponse
+				var errResp wserrors.ErrorEnvelope
 				if err := json.NewDecoder(rec.Body).Decode(&errResp); err != nil {
 					t.Fatalf("decode error response: %v", err)
 				}
-				if !strings.Contains(errResp.Error, tt.wantError) {
-					t.Errorf("error: got %q, want substring %q", errResp.Error, tt.wantError)
+				if !strings.Contains(errResp.Error.Message, tt.wantError) {
+					t.Errorf("error: got %q, want substring %q", errResp.Error.Message, tt.wantError)
 				}
 			}
 

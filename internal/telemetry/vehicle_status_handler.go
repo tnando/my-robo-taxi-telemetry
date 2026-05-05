@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tnando/my-robo-taxi-telemetry/internal/mask"
+	"github.com/tnando/my-robo-taxi-telemetry/internal/wserrors"
 	"github.com/tnando/my-robo-taxi-telemetry/pkg/sdk"
 )
 
@@ -102,22 +103,17 @@ func derefOrNil[T any](p *T) any {
 	return *p
 }
 
-// vehicleStatusErrorResponse is the JSON body returned on errors.
-type vehicleStatusErrorResponse struct {
-	Error string `json:"error"`
-}
-
 // ServeHTTP handles the vehicle status request.
 func (h *VehicleStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	vin := r.PathValue("vin")
 	if len(vin) != vinLength {
-		h.writeError(w, http.StatusBadRequest, "invalid VIN: must be 17 characters")
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "invalid VIN: must be 17 characters")
 		return
 	}
 
 	token := extractBearerToken(r)
 	if token == "" {
-		h.writeError(w, http.StatusUnauthorized, "missing Authorization header")
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
 		return
 	}
 
@@ -129,7 +125,7 @@ func (h *VehicleStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized, "invalid or expired token")
+		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
 		return
 	}
 
@@ -148,14 +144,14 @@ func (h *VehicleStatusHandler) verifyOwnership(ctx context.Context, w http.Respo
 	ownerID, err := h.vehicles.GetVehicleOwner(ctx, vin)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, "vehicle not found")
+			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
 			return false
 		}
 		h.logger.Error("vehicle status: vehicle lookup failed",
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusInternalServerError, "internal error")
+		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
 		return false
 	}
 
@@ -164,7 +160,7 @@ func (h *VehicleStatusHandler) verifyOwnership(ctx context.Context, w http.Respo
 			slog.String("vin", redactVIN(vin)),
 			slog.String("user_id", userID),
 		)
-		h.writeError(w, http.StatusForbidden, "you do not own this vehicle")
+		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
 		return false
 	}
 
@@ -206,7 +202,8 @@ func (h *VehicleStatusHandler) writeJSON(w http.ResponseWriter, status int, v an
 	}
 }
 
-// writeError writes a JSON error response.
-func (h *VehicleStatusHandler) writeError(w http.ResponseWriter, status int, msg string) {
-	h.writeJSON(w, status, vehicleStatusErrorResponse{Error: msg})
+// writeError writes the REST error envelope (rest-api.md §4.1) with a
+// typed wserrors.ErrorCode. Compiler-enforced no-string-literal-at-call-site.
+func (h *VehicleStatusHandler) writeError(w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string) {
+	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
 }
