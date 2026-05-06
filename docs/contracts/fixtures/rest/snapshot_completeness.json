@@ -1,0 +1,219 @@
+{
+  "_meta": {
+    "description": "Per-field synthetic event coverage matrix for the REST /snapshot completeness conformance test (MYR-48). Catches the regression class where a wire field gets WS broadcast wiring but DB persistence is forgotten in the writer pipeline (the same class as MYR-41). The test enumerates every property in docs/contracts/schemas/vehicle-state.schema.json and, for each, applies the synthetic event declared here through the writer pipeline (or a direct seed for identity/derived fields), reads the row back via VehicleRepo.GetByVIN, and asserts the field is non-null on the read-back snapshot. Fields with category=expected_failure are KNOWN gaps tracked in dedicated Linear follow-ups (see each row's comment); the test surfaces them as t.Logf warnings so the gate stays green while the writer pipeline catches up.",
+    "anchoredFRs": ["NFR-3.5", "NFR-3.7"],
+    "scenario": "happy-path"
+  },
+  "fields": {
+    "vehicleId": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "Opaque DB cuid. Seeded on vehicle creation by the Next.js app — never written by the telemetry writer pipeline. Test asserts Vehicle.ID != \"\" on the seeded row."
+    },
+    "name": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "User-assigned vehicle name. DB-seeded with non-empty value via seedVehicleWithCatalog. Test asserts Vehicle.Name != \"\"."
+    },
+    "model": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "Vehicle model (Prisma NOT NULL). Seeded via catalog. Test asserts Vehicle.Model != \"\"."
+    },
+    "year": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "Model year (Prisma NOT NULL). Seeded via catalog. Test asserts Vehicle.Year > 0."
+    },
+    "color": {
+      "category": "identity",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "Exterior color (Prisma NOT NULL). Seeded via catalog. Test asserts Vehicle.Color != \"\"."
+    },
+    "status": {
+      "category": "derived",
+      "atomicGroup": "gear",
+      "nullableInSteadyState": false,
+      "comment": "Derived from gearPosition by deriveVehicleStatus(); persisted via UpdateStatus. DB DEFAULT 'offline'. Test asserts Vehicle.Status is one of the valid VehicleStatus enum values and not the empty string."
+    },
+    "speed": {
+      "category": "telemetry",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Speed", "value": 35 },
+      "nullableInSteadyState": false,
+      "comment": "DB INT NOT NULL DEFAULT 0. After applying speed synthetic, expected 35."
+    },
+    "heading": {
+      "category": "telemetry",
+      "atomicGroup": "gps",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Heading", "value": 90 },
+      "nullableInSteadyState": false,
+      "comment": "GPS atomic group member. DB INT NOT NULL DEFAULT 0. Active-group scenario applies all gps members together."
+    },
+    "latitude": {
+      "category": "telemetry",
+      "atomicGroup": "gps",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Latitude", "value": 37.7749 },
+      "nullableInSteadyState": false,
+      "comment": "GPS atomic group member. DB DOUBLE PRECISION NOT NULL DEFAULT 0. Test asserts non-zero (DB default 0 == 'no fix' per §2.3)."
+    },
+    "longitude": {
+      "category": "telemetry",
+      "atomicGroup": "gps",
+      "synthetic": { "kind": "vehicleUpdate", "field": "Longitude", "value": -122.4194 },
+      "nullableInSteadyState": false,
+      "comment": "GPS atomic group member. DB DOUBLE PRECISION NOT NULL DEFAULT 0. Test asserts non-zero."
+    },
+    "locationName": {
+      "category": "telemetry_alias",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "LocationName", "value": "Home" },
+      "nullableInSteadyState": false,
+      "comment": "DB TEXT NOT NULL DEFAULT ''. Populated server-side by the geocoder, not direct telemetry. VehicleUpdate.LocationName accepts the value through the writer pipeline. Empty-string-is-non-null per §1.1."
+    },
+    "locationAddress": {
+      "category": "telemetry_alias",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "LocationAddr", "value": "123 Market St, San Francisco, CA" },
+      "nullableInSteadyState": false,
+      "comment": "DB TEXT NOT NULL DEFAULT ''. Populated server-side by the geocoder via VehicleUpdate.LocationAddr. Empty-string-is-non-null per §1.1."
+    },
+    "gearPosition": {
+      "category": "telemetry",
+      "atomicGroup": "gear",
+      "synthetic": { "kind": "vehicleUpdate", "field": "GearPosition", "value": "D" },
+      "nullableInSteadyState": true,
+      "comment": "Nullable in steady state (null = vehicle asleep or gear not yet reported). Active-group scenario asserts non-null after applying. Steady-state assertion exempted via nullableInSteadyState=true."
+    },
+    "chargeLevel": {
+      "category": "telemetry",
+      "atomicGroup": "charge",
+      "synthetic": { "kind": "vehicleUpdate", "field": "ChargeLevel", "value": 78 },
+      "nullableInSteadyState": false,
+      "comment": "Charge atomic group member. DB INT NOT NULL DEFAULT 0. Test asserts non-zero (per fixture)."
+    },
+    "chargeState": {
+      "category": "telemetry",
+      "atomicGroup": "charge",
+      "synthetic": { "kind": "vehicleUpdate", "field": "ChargeState", "value": "Charging" },
+      "nullableInSteadyState": true,
+      "comment": "Nullable in steady state — null when vehicle has never charged. DB persisted as Vehicle.chargeState String? per MYR-41. Active-group charge scenario asserts non-null after applying."
+    },
+    "estimatedRange": {
+      "category": "telemetry",
+      "atomicGroup": "charge",
+      "synthetic": { "kind": "vehicleUpdate", "field": "EstimatedRange", "value": 245 },
+      "nullableInSteadyState": false,
+      "comment": "Charge atomic group member. DB INT NOT NULL DEFAULT 0. Test asserts non-zero (per fixture)."
+    },
+    "timeToFull": {
+      "category": "telemetry",
+      "atomicGroup": "charge",
+      "synthetic": { "kind": "vehicleUpdate", "field": "TimeToFull", "value": 1.5 },
+      "nullableInSteadyState": true,
+      "comment": "Nullable in steady state — null when no active charging session. DB persisted as Vehicle.timeToFull Float? per MYR-41. Active-group charge scenario asserts non-null after applying."
+    },
+    "interiorTemp": {
+      "category": "telemetry",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "InteriorTemp", "value": 68 },
+      "nullableInSteadyState": false,
+      "comment": "DB INT NOT NULL DEFAULT 0. Test asserts non-zero."
+    },
+    "exteriorTemp": {
+      "category": "telemetry",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "ExteriorTemp", "value": 55 },
+      "nullableInSteadyState": false,
+      "comment": "DB INT NOT NULL DEFAULT 0. Test asserts non-zero."
+    },
+    "odometerMiles": {
+      "category": "telemetry",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "OdometerMiles", "value": 12458 },
+      "nullableInSteadyState": false,
+      "comment": "DB INT NOT NULL DEFAULT 0. Test asserts non-zero."
+    },
+    "fsdMilesSinceReset": {
+      "category": "expected_failure",
+      "atomicGroup": "",
+      "synthetic": { "kind": "vehicleUpdate", "field": "FsdMilesSinceReset", "value": 412.7 },
+      "nullableInSteadyState": false,
+      "comment": "DOCUMENTED GAP: schema declares fsdMilesSinceReset as a non-nullable telemetry field; ws/field_mapping.go passes it through to the WS broadcast (telemetry.FieldFSDMiles = \"fsdMilesSinceReset\"); but VehicleUpdate has NO FsdMilesSinceReset pointer and field_mapper.go has NO applier for telemetry.FieldFSDMiles. Result: WS clients see the value live, but the DB row keeps the seeded value forever. Cold page reload via REST /snapshot will not reflect FSD-miles-since-reset changes that occurred while the user was offline. Tracked in MYR-67 (https://linear.app/myrobotaxi/issue/MYR-67); category=expected_failure surfaces the gap as a t.Logf warning so the test stays green. The closing PR for MYR-67 re-categorizes this row to category=telemetry and the assertion becomes hard. The test seeds a non-zero baseline so the steady-state DB read returns it."
+    },
+    "destinationName": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "DestinationName", "value": "Whole Foods Market" },
+      "nullableInSteadyState": true,
+      "comment": "Nullable navigation group member. Active-navigation scenario asserts non-null after applying."
+    },
+    "destinationAddress": {
+      "category": "expected_failure",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "DestinationAddress", "value": "2001 Market St, San Francisco, CA 94114" },
+      "nullableInSteadyState": true,
+      "comment": "DOCUMENTED GAP: schema declares destinationAddress as a navigation atomic group member, but VehicleUpdate has NO DestinationAddress pointer and field_mapper.go has no applier — destinationAddress is currently only writable via direct INSERT/seeding (likely intended to be reverse-geocoded server-side from destinationLatitude/destinationLongitude, but no writer path exists). Tracked in MYR-68 (https://linear.app/myrobotaxi/issue/MYR-68); category=expected_failure surfaces the gap as a t.Logf warning so the test stays green. The closing PR for MYR-68 re-categorizes this row to category=telemetry|telemetry_alias and the assertion becomes hard. The synthetic uses kind=vehicleUpdate with the expected Go field name (DestinationAddress) so the missing-field reflect lookup surfaces a clear message."
+    },
+    "destinationLatitude": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "DestinationLatitude", "value": 37.7849 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "destinationLongitude": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "DestinationLongitude", "value": -122.4094 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "originLatitude": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "OriginLatitude", "value": 37.7749 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "originLongitude": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "OriginLongitude", "value": -122.4194 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "etaMinutes": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "EtaMinutes", "value": 12 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "tripDistanceRemaining": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "TripDistRemaining", "value": 4.2 },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. Active-navigation scenario asserts non-null."
+    },
+    "navRouteCoordinates": {
+      "category": "telemetry",
+      "atomicGroup": "navigation",
+      "synthetic": { "kind": "vehicleUpdate", "field": "NavRouteCoordinates", "value": [[-122.4194, 37.7749], [-122.4193, 37.7750]] },
+      "nullableInSteadyState": true,
+      "comment": "Navigation group member. JSONB column persisted as a [lng, lat] array. Active-navigation scenario asserts non-null."
+    },
+    "lastUpdated": {
+      "category": "writer_metadata",
+      "atomicGroup": "",
+      "nullableInSteadyState": false,
+      "comment": "TIMESTAMPTZ NOT NULL DEFAULT NOW() — set by the writer on every UpdateTelemetry. Test asserts Vehicle.LastUpdated is non-zero AND was advanced by an UpdateTelemetry call (i.e., greater than the seed timestamp)."
+    }
+  }
+}
