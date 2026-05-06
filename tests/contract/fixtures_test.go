@@ -259,6 +259,11 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 				case baseName == "snapshot.json":
 					validate(t, vehicleStateSchema, stripped, "VehicleState snapshot")
 
+				case baseName == "snapshot_completeness.json":
+					// Coverage matrix used by the MYR-48 conformance test
+					// (internal/store.TestSnapshotCompleteness). Not a
+					// VehicleState shape — structural validation lives there.
+
 				case baseName == "drives.json":
 					validateDrivesList(t, stripped)
 
