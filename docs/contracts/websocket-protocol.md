@@ -67,12 +67,18 @@ Every FR/NFR listed here is anchored in at least one section of this doc. The ta
 
 ### 1.2 Origin enforcement
 
-The server passes `HandlerConfig.OriginPatterns` (populated from `WebSocketConfig.AllowedOrigins`) to `websocket.AcceptOptions.OriginPatterns`. Requests from origins not in the allow-list are rejected with `HTTP 403` **before** the WebSocket upgrade completes. There is no in-band error frame for this case -- the client receives an HTTP error response on the upgrade attempt.
+The server passes `HandlerConfig.OriginPatterns` (populated from `WebSocketConfig.AllowedOrigins`) to `websocket.AcceptOptions.OriginPatterns`. Requests from origins not in the allow-list are rejected with `HTTP 403` **before** the WebSocket upgrade completes. There is no in-band error frame for this case -- the client receives an HTTP error response on the upgrade attempt; the server logs a `slog.Warn` with the rejected `Origin`, the `remote_addr`, and the request `host` so an operator chasing "why is my browser blocked?" sees the failure inline.
 
-| Mode | Default | Source |
-|------|---------|--------|
-| Production | Configured allow-list (e.g. `https://app.myrobotaxi.com`) | `cfg.WebSocket().AllowedOrigins` via env / `config.json` |
-| Dev | `["*"]` (allow all) | [`cmd/telemetry-server/main.go`](../../cmd/telemetry-server/main.go) fallback when `AllowedOrigins` is empty |
+The allow-list resolves at startup per [`cmd/telemetry-server/adapters.go:resolveWSOriginPatterns`](../../cmd/telemetry-server/adapters.go) — operator-configured patterns always take precedence; the dev/prod split only governs the empty-config fallback (per NFR-3.22 and MYR-17):
+
+| Mode | When `AllowedOrigins` is set | Empty-config fallback |
+|------|------------------------------|------------------------|
+| Production (no `--dev`) | Use the configured slice verbatim. Production ships `["https://myrobotaxi.app", "https://www.myrobotaxi.app"]` in [`configs/fly.json`](../../configs/fly.json). | Empty slice — **fail-closed**. `coder/websocket` admits same-origin and empty-`Origin` requests; every cross-origin dial is rejected with HTTP 403. A `slog.Warn` at startup reminds the operator to set `websocket.allowed_origins` or `WEBSOCKET_ALLOWED_ORIGINS`. |
+| Dev (`--dev` flag) | Use the configured slice verbatim. | Localhost defaults: `localhost`, `localhost:*`, `127.0.0.1`, `127.0.0.1:*`, `[::1]`, `[::1]:*` (any scheme, any port). |
+
+`WEBSOCKET_ALLOWED_ORIGINS` is the env-var override for `websocket.allowed_origins`. It accepts a comma-separated list (whitespace around each entry is trimmed; entirely-empty input signals fail-closed). The env var, when set, fully replaces the JSON-config allow-list rather than appending to it.
+
+Pattern matching follows the `coder/websocket` `authenticateOrigin` rules: a pattern containing `://` is matched against `<scheme>://<host>` of the `Origin` header (so `https://myrobotaxi.app` rejects an `http://myrobotaxi.app` Origin); a pattern without `://` is matched against `<host>` only (so `localhost:*` admits any scheme on any port). Patterns use `path.Match` glob semantics — `*.myrobotaxi.app` admits one subdomain level. Same-origin requests (Origin host == request host) and requests without an `Origin` header are always admitted.
 
 ### 1.3 Connection limits
 
