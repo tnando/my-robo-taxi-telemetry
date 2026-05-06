@@ -80,6 +80,8 @@ The allow-list resolves at startup per [`cmd/telemetry-server/adapters.go:resolv
 
 Pattern matching follows the `coder/websocket` `authenticateOrigin` rules: a pattern containing `://` is matched against `<scheme>://<host>` of the `Origin` header (so `https://myrobotaxi.app` rejects an `http://myrobotaxi.app` Origin); a pattern without `://` is matched against `<host>` only (so `localhost:*` admits any scheme on any port). Patterns use `path.Match` glob semantics — `*.myrobotaxi.app` admits one subdomain level. Same-origin requests (Origin host == request host) and requests without an `Origin` header are always admitted.
 
+Operator escape hatches for non-localhost dev workflows: `WEBSOCKET_ALLOWED_ORIGINS=https://*.ngrok.io` admits ngrok tunnels; `https://*.trycloudflare.com` admits Cloudflare tunnels. The env var fully replaces the JSON-config allow-list so the operator must include any other origins (e.g. `https://*.ngrok.io,https://myrobotaxi.app`) in the same value.
+
 ### 1.3 Connection limits
 
 v1 enforces **two** concurrent-connection caps with asymmetric policies:
