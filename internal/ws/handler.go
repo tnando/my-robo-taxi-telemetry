@@ -72,9 +72,16 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 		OriginPatterns: cfg.OriginPatterns,
 	})
 	if err != nil {
-		h.logger.Error("websocket accept failed",
+		// Origin rejections (NFR-3.22) are the most common cause here —
+		// coder/websocket has already written HTTP 403 to w with the
+		// failure reason in the body. Log Origin + remote IP at Warn so
+		// an operator chasing "why is my browser blocked?" sees both
+		// without grepping for the library's verbose error string.
+		h.logger.Warn("websocket accept failed",
 			slog.Any("error", err),
 			slog.String("remote_addr", clientIP),
+			slog.String("origin", r.Header.Get("Origin")),
+			slog.String("host", r.Host),
 		)
 		return
 	}
