@@ -119,6 +119,7 @@ func updateColumns(u VehicleUpdate) []updateColumn {
 		{"locationName", derefString(u.LocationName), ""},
 		{"locationAddress", derefString(u.LocationAddr), ""},
 		{"destinationName", derefString(u.DestinationName), ""},
+		{"destinationAddress", derefString(u.DestinationAddress), ""},
 		{"destinationLatitude", derefFloat(u.DestinationLatitude), ""},
 		{"destinationLongitude", derefFloat(u.DestinationLongitude), ""},
 		{"originLatitude", derefFloat(u.OriginLatitude), ""},
