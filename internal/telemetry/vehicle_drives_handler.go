@@ -1,9 +1,7 @@
 package telemetry
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,7 +9,6 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/mask"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
-	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // VehicleDrivesHandler handles GET /api/vehicles/{vehicleId}/drives.
@@ -142,71 +139,6 @@ func (h *VehicleDrivesHandler) parseQuery(w http.ResponseWriter, r *http.Request
 	}
 
 	return limit, cursor, true
-}
-
-// authorize resolves the caller's access to the vehicle identified by
-// vehicleID: the OWNER (MYR-369 — no share of any shape opens the drives
-// surfaces), or, since MYR-602, a TRIP PARTICIPANT limited to their own
-// windows. Returns the trip admission — empty for an owner, who needs no
-// narrowing — and false after writing an HTTP error. The 404 / 403 split
-// mirrors the snapshot handler: an unknown vehicle is never distinguishable
-// from one the caller cannot see.
-func (h *VehicleDrivesHandler) authorize(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) (tripDriveAdmission, bool) {
-	row, err := h.vehicles.GetByID(ctx, vehicleID)
-	if err != nil {
-		if errors.Is(err, sdk.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return tripDriveAdmission{}, false
-		}
-		h.logger.Error("vehicle drives: vehicle lookup failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return tripDriveAdmission{}, false
-	}
-
-	// MYR-369: THE DRIVES SURFACES ARE OWNER-ONLY AGAIN, unconditionally.
-	//
-	// MYR-184 opened them to a viewer holding `live_history` or better. That
-	// tier is RETIRED and the capability is removed from the product, so the
-	// gate is back to what it was before sharing shipped: owner or nobody.
-	// This is a DELIBERATE NARROWING — a legacy grant created at
-	// `live_history` can no longer read drives, and there is no flag that
-	// re-opens them. Suspension is irrelevant here for the same reason: no
-	// grant of any shape passes.
-	//
-	// Expressed as capBase-against-the-owner rather than a bare
-	// `row.UserID != userID` comparison so the denial still flows through the
-	// one access helper — same 403, same log shape, same non-oracle message
-	// as every other refusal — and so re-opening the surface later is a
-	// one-argument change rather than a re-derivation.
-	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
-		if errors.Is(err, errNoVehicleAccess) {
-			// MYR-602 ADDS EXACTLY ONE WAY PAST THAT DENIAL, and it is not a
-			// share: an OPEN OR CLOSED TRIP WINDOW this caller was a
-			// participant of. It buys them the drives of that window and
-			// nothing else about the car's history — see trip_drive_access.go.
-			//
-			// The probe runs only AFTER the owner check has already failed, so
-			// the owner path costs nothing, and it fails closed: no windows,
-			// or a lookup error, and the original 403 stands.
-			admission := resolveTripDriveAdmission(ctx, h.trips, h.logger, "vehicle drives", userID, vehicleID)
-			if admission.participant() {
-				return admission, true
-			}
-			denyVehicleAccess(w, h.logger, "vehicle drives", vehicleID, userID)
-			return tripDriveAdmission{}, false
-		}
-		h.logger.Error("vehicle drives: access resolution failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return tripDriveAdmission{}, false
-	}
-
-	return tripDriveAdmission{}, true
 }
 
 // writeMaskedPage projects each drive through the role mask, computes
