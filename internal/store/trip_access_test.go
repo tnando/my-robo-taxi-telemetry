@@ -406,3 +406,92 @@ func seedDriveAt(t *testing.T, driveID, vehicleID string, at time.Time) {
 		t.Fatalf("seed drive: %v", err)
 	}
 }
+
+// TestTripStatusFilterAgreesWithStatusAt is the assertion trip_queries.go names
+// above queryTripsForUser, and it is not decoration.
+//
+// THE WINDOW RULE IS WRITTEN THREE TIMES ON THIS PLATFORM: in Go
+// (Trip.StatusAt), in the wire projection (telemetry.tripStatusOf) and in SQL
+// (queryTripsForUser's three status arms, which restate it a third time so a
+// `limit` can mean "N trips of that status" rather than "N trips, some of which
+// match"). Filtering after the LIMIT would return a short page while more
+// matching trips sat behind it, so the restatement is necessary — and a
+// restatement is exactly the thing that drifts.
+//
+// This runs the filter against a real database over one trip in each of the
+// three states and requires the SQL's answer and Go's answer to be the same
+// answer, in both directions: the trip appears under its own status and under
+// no other.
+func TestTripStatusFilterAgreesWithStatusAt(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehA1, vehA2, _ := seedShareFixtures(t)
+	cleanTrips(t)
+	repo := newTripRepo(t)
+	now := time.Now().UTC()
+
+	// Three trips in three states. TWO VEHICLES, because the overlap probe
+	// forbids two live windows on one car — the scheduled and the active one
+	// have to sit on different vehicles, and the ended one may share either.
+	scheduled := mustCreateTrip(t, repo, vehA1, now.Add(48*time.Hour), now.Add(96*time.Hour), nil)
+	active := mustCreateTrip(t, repo, vehA2, now.Add(-time.Hour), now.Add(24*time.Hour), nil)
+	endedTrip := mustCreateTrip(t, repo, vehA1, now.Add(-72*time.Hour), now.Add(-48*time.Hour), nil)
+
+	byStatus := map[store.TripStatus]string{
+		store.TripStatusScheduled: scheduled.ID,
+		store.TripStatusActive:    active.ID,
+		store.TripStatusEnded:     endedTrip.ID,
+	}
+
+	t.Run("Go agrees with the fixture's intent", func(t *testing.T) {
+		// If this arm fails the test below proves nothing — it would be
+		// comparing two derivations of the same wrong thing.
+		for want, id := range byStatus {
+			view, err := repo.GetForUser(ctx, id, shareOwnerA)
+			if err != nil {
+				t.Fatalf("GetForUser(%s): %v", id, err)
+			}
+			if got := view.StatusAt(time.Now()); got != want {
+				t.Fatalf("StatusAt(%s) = %q, want %q", id, got, want)
+			}
+		}
+	})
+
+	for status, wantID := range byStatus {
+		t.Run("the SQL filter returns exactly the "+string(status)+" trip", func(t *testing.T) {
+			views, err := repo.ListForUser(ctx, shareOwnerA, status, 0)
+			if err != nil {
+				t.Fatalf("ListForUser(%s): %v", status, err)
+			}
+			if len(views) != 1 {
+				t.Fatalf("filter %q returned %d trips, want exactly 1", status, len(views))
+			}
+			if views[0].ID != wantID {
+				t.Fatalf("filter %q returned %s, want %s", status, views[0].ID, wantID)
+			}
+			// AND the row the SQL picked must call itself the same thing in Go.
+			// A filter that selected the right row for the wrong reason would
+			// pass the id check alone.
+			if got := views[0].StatusAt(time.Now()); got != status {
+				t.Fatalf("the SQL filter %q returned a trip Go calls %q", status, got)
+			}
+		})
+	}
+
+	t.Run("no filter returns all three, newest first", func(t *testing.T) {
+		views, err := repo.ListForUser(ctx, shareOwnerA, "", 0)
+		if err != nil {
+			t.Fatalf("ListForUser(all): %v", err)
+		}
+		if len(views) != 3 {
+			t.Fatalf("unfiltered list returned %d trips, want 3", len(views))
+		}
+		for i := 1; i < len(views); i++ {
+			if views[i].CreatedAt.After(views[i-1].CreatedAt) {
+				t.Fatalf("row %d is newer than row %d — the list must be newest-first", i, i-1)
+			}
+		}
+	})
+}
