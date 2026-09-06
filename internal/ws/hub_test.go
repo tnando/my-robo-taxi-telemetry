@@ -1042,8 +1042,17 @@ func TestHub_BroadcastMasked_ViewerStripsVIN(t *testing.T) {
 	if _, present := pl.Fields["vin"]; present {
 		t.Errorf("viewer received the full vin; mask did not strip it: %v", pl.Fields)
 	}
-	if pl.Fields["speed"] != float64(65) {
-		t.Errorf("speed missing or wrong: %v", pl.Fields["speed"])
+	if pl.Fields["chargeLevel"] != float64(82) {
+		t.Errorf("chargeLevel missing or wrong: %v", pl.Fields["chargeLevel"])
+	}
+	// MYR-602 narrowed `viewer` off the Speed/GPS group, and `speed` is
+	// schema-REQUIRED — so it must still be PRESENT and must be the (0,0)-family
+	// no-fix sentinel, never the real 65. Dropping the key outright would make
+	// the object fail vehicle-state.schema.json and a conformant SDK is
+	// entitled to discard the whole frame, taking `chargeLevel` with it.
+	if pl.Fields["speed"] != float64(0) {
+		t.Errorf("speed = %v, want the 0 sentinel: a viewer must not read the car's "+
+			"real speed, and must not lose a required key either", pl.Fields["speed"])
 	}
 }
 

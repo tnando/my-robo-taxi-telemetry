@@ -37,17 +37,33 @@ type Client struct {
 	// production this field stays false and an empty vehicleIDs slice
 	// means deny-all per NFR-3.21.
 	allVehicles bool
-	// vehicleRoles maps vehicleID -> role for this client. Populated at
-	// handshake time alongside vehicleIDs (handler.go authenticateClient).
-	// Per websocket-protocol.md §4.6, the hub looks up the role here to
-	// pick the role-appropriate pre-marshaled frame to enqueue. A
-	// missing entry resolves to the empty Role("") sentinel and the
-	// hub treats it as deny-all (fail-closed). See DV-09 for the
-	// known mid-connection refresh gap (role downgrade requires
-	// reconnect).
-	vehicleRoles map[string]auth.Role
+	// roles is this client's vehicleID -> role table, published as an
+	// IMMUTABLE MAP behind an atomic pointer. Seeded at handshake time
+	// alongside vehicleIDs (handler.go authenticateClient) and REPLACED
+	// WHOLE — never mutated in place — by the access revalidator when a
+	// window edge changes what a caller may see (MYR-602).
+	//
+	// Per websocket-protocol.md §4.6 the hub looks the role up here to pick
+	// the role-appropriate pre-marshaled frame to enqueue. A missing entry
+	// resolves to the empty Role("") sentinel and the hub treats it as
+	// deny-all (fail-closed).
+	//
+	// WHY AN ATOMIC SWAP AND NOT A MUTEX. This is read on the broadcast hot
+	// path — twice per BroadcastMasked call per client, at up to one frame
+	// per second per car — and it was previously a plain map written once at
+	// handshake and thereafter read with no synchronisation at all. That was
+	// safe only while nothing ever wrote to it again, which is exactly the
+	// property MYR-602 had to give up: a trip window opens and closes on the
+	// CLOCK, so a role can change under a live connection with no mutation
+	// anywhere to hang a handshake off. Replacing the whole map under an
+	// atomic pointer keeps the read lock-free (one atomic load) while making
+	// the write a publish rather than a data race, and readers see either the
+	// whole old table or the whole new one — never a half-updated one, which
+	// for a role table would mean a caller masked as two different tiers on
+	// two vehicles in the same frame.
+	roles atomic.Pointer[roleTable]
 	// defaultRole is the fallback role consulted ONLY when allVehicles=true
-	// and the per-vehicle vehicleRoles map has no entry for the requested
+	// and the per-vehicle roles table has no entry for the requested
 	// vehicleID. Set by the handshake to auth.RoleOwner for the dev-mode
 	// NoopAuthenticator path (whose ResolveRole returns RoleOwner
 	// unconditionally) so dev-mode clients receive role-projected frames
@@ -55,7 +71,7 @@ type Client struct {
 	// empty Role("") deny-all sentinel that left them silently filtered
 	// out (MYR-66). Production clients have allVehicles=false; defaultRole
 	// is never consulted, so the fail-closed deny-all posture for clients
-	// without an explicit vehicleRoles entry is preserved.
+	// without an explicit roles entry is preserved.
 	defaultRole auth.Role
 	// subscribed tracks which of the client's owned vehicles are
 	// currently active subscriptions. Initialized at handshake from
@@ -102,15 +118,44 @@ type Client struct {
 // newClient creates a Client that is not yet authenticated. The userID and
 // vehicleIDs are populated after the auth handshake completes.
 func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
-	return &Client{
-		conn:         conn,
-		send:         make(chan []byte, sendBufSize),
-		done:         make(chan struct{}),
-		vehicleRoles: make(map[string]auth.Role),
-		subscribed:   make(map[string]struct{}),
-		hub:          hub,
-		logger:       logger,
+	c := &Client{
+		conn:       conn,
+		send:       make(chan []byte, sendBufSize),
+		done:       make(chan struct{}),
+		subscribed: make(map[string]struct{}),
+		hub:        hub,
+		logger:     logger,
 	}
+	c.setRoles(nil)
+	return c
+}
+
+// roleTable is one immutable published snapshot of a client's per-vehicle
+// roles. Named rather than left as a bare map so the atomic pointer's type
+// reads as "a table", and so the immutability rule has somewhere to be
+// written down: NOTHING may write into a roleTable after setRoles has
+// published it. Changing a role means building a new map and swapping.
+type roleTable map[string]auth.Role
+
+// setRoles publishes a new role table, replacing whatever was there.
+//
+// The caller must not retain or mutate m afterwards — see roleTable. A nil m
+// publishes an empty table rather than a nil pointer, so roleFor never has to
+// nil-check the load.
+func (c *Client) setRoles(m map[string]auth.Role) {
+	table := make(roleTable, len(m))
+	for vid, role := range m {
+		table[vid] = role
+	}
+	c.roles.Store(&table)
+}
+
+// rolesSnapshot returns the currently published table. Never nil.
+func (c *Client) rolesSnapshot() roleTable {
+	if table := c.roles.Load(); table != nil {
+		return *table
+	}
+	return roleTable{}
 }
 
 // markRevoked cuts this session off and wakes its writePump, in that order.
@@ -129,7 +174,8 @@ func (c *Client) markRevoked() {
 }
 
 // roleFor returns the role this client holds against vehicleID. Resolution
-// order: (1) the per-vehicle vehicleRoles map populated at handshake; (2)
+// order: (1) the per-vehicle roles table (seeded at handshake, replaced by the
+// revalidator on a window edge); (2)
 // for clients with allVehicles=true that lack a per-vehicle entry, the
 // defaultRole set at handshake (the dev-mode NoopAuthenticator path);
 // (3) the empty Role("") fail-closed sentinel, which the mask layer in
@@ -139,7 +185,7 @@ func (c *Client) roleFor(vehicleID string) auth.Role {
 	if c == nil {
 		return auth.Role("")
 	}
-	if role, ok := c.vehicleRoles[vehicleID]; ok {
+	if role, ok := c.rolesSnapshot()[vehicleID]; ok {
 		return role
 	}
 	if c.allVehicles {
