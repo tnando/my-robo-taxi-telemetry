@@ -57,6 +57,15 @@ type delivery struct {
 	// the banner", so a new fan-out site that forgets this cannot accidentally
 	// silence itself. See notifier_activity_gate.go.
 	islandAlerts bool
+	// tripPush is the MYR-602 subject: the trip, the car, the event and the
+	// deep link that together replace `rideID` on a notification that is not
+	// about a ride. Nil on every ride delivery, which is what keeps their
+	// payloads byte-identical (see buildPayload).
+	//
+	// A POINTER rather than a value so that "this is not a trip push" is one
+	// nil check rather than a comparison against a zero struct — the same
+	// reason ActivityNotification.Alert is one.
+	tripPush *TripPush
 }
 
 // fanOut resolves one ride party's devices and sends the alert to each. Every
@@ -133,8 +142,8 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	}
 
 	var delivered int
-	for _, d := range devices {
-		if n.send(ctx, d, rideID, topic, a) {
+	for _, dev := range devices {
+		if n.send(ctx, dev, d, a) {
 			delivered++
 		}
 	}
@@ -144,6 +153,7 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	n.logger.Info("push sent",
 		slog.String("topic", topic),
 		slog.String("ride_id", rideID),
+		slog.String("trip_id", d.tripID()),
 		slog.String("user_id", userID),
 		slog.Int("devices", len(devices)),
 		slog.Int("delivered", delivered),
@@ -197,35 +207,57 @@ func (n *Notifier) allowed(ctx context.Context, userID string, category Category
 // send delivers to one device and applies the APNs feedback: a permanently
 // rejected token is removed from the registry so the next ride does not retry
 // a phone that no longer exists. Reports whether the send succeeded.
-func (n *Notifier) send(ctx context.Context, d Device, rideID, topic string, a alert) bool {
-	err := n.sender.Send(ctx, Notification{
-		DeviceToken: d.Token,
-		Sandbox:     d.Sandbox,
+func (n *Notifier) send(ctx context.Context, dev Device, d delivery, a alert) bool {
+	notification := Notification{
+		DeviceToken: dev.Token,
+		Sandbox:     dev.Sandbox,
 		Title:       a.title,
 		Body:        a.body,
-		RideID:      rideID,
-		// MYR-554: the (ride, topic) pair the collapse id is built from. It is
-		// the fan-out's OWN topic string — the same one every log line here
+		RideID:      d.rideID,
+		// MYR-554: the (subject, topic) pair the collapse id is built from. It
+		// is the fan-out's OWN topic string — the same one every log line here
 		// carries — so the id names the notification's intent and nothing about
 		// the attempt that carries it.
-		EventTopic: topic,
-	})
+		EventTopic: d.topic,
+	}
+	// MYR-602: a trips push names no ride, so it carries its own userInfo and
+	// its own collapse subject. Applied here, at the one place a Notification
+	// is built, rather than at the trips fan-out site — everything else about
+	// the delivery (the preference gate, the 410 correction, the log
+	// discipline) is shared, and building the notification in two places is how
+	// one of them stops carrying a header.
+	if d.tripPush != nil {
+		notification.UserInfo = d.tripPush.userInfo()
+		notification.CollapseSubject = d.tripPush.collapseSubject()
+	}
+
+	err := n.sender.Send(ctx, notification)
 	if err == nil {
 		return true
 	}
 
 	if errors.Is(err, ErrUnregistered) {
-		n.dropDevice(ctx, d.Token, topic)
+		n.dropDevice(ctx, dev.Token, d.topic)
 		return false
 	}
 
 	n.logger.Warn("push: send failed",
-		slog.String("topic", topic),
-		slog.String("ride_id", rideID),
-		slog.String("device_token_prefix", tokenPrefix(d.Token)),
+		slog.String("topic", d.topic),
+		slog.String("ride_id", d.rideID),
+		slog.String("trip_id", d.tripID()),
+		slog.String("device_token_prefix", tokenPrefix(dev.Token)),
 		slog.String("error", err.Error()),
 	)
 	return false
+}
+
+// tripID renders the trip this delivery is about for a log line, or "" when it
+// is an ordinary ride push. Both ids are P0 opaque cuids.
+func (d delivery) tripID() string {
+	if d.tripPush == nil {
+		return ""
+	}
+	return d.tripPush.TripID
 }
 
 // dropDevice removes a token APNs reported as permanently dead. The delete

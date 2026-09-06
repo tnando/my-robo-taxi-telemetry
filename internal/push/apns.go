@@ -105,7 +105,7 @@ func (c *Client) Send(ctx context.Context, n Notification) error {
 		priority:    priorityImmediate,
 		// MYR-554: computed HERE, once, outside deliver's retry loop. Computing
 		// it per attempt would defeat the entire mechanism.
-		collapseID: collapseID(n.RideID, n.EventTopic),
+		collapseID: collapseID(n.collapseSubject(), n.EventTopic),
 		body:       body,
 	})
 }
@@ -306,17 +306,36 @@ func (c *Client) host(sandbox bool) string {
 }
 
 // buildPayload renders the APNs JSON body. Everything outside the `aps` object
-// reaches the app as userInfo, and by policy that is exactly one key: rideId.
+// reaches the app as userInfo: `rideId` for a ride notification, and since
+// MYR-602 whatever the sender put in UserInfo for one that is about something
+// else.
+//
+// A RIDE PUSH IS BYTE-IDENTICAL to what it was before UserInfo existed, and the
+// condition below is what guarantees it: `rideId` is written whenever the
+// notification names a ride OR carries no UserInfo at all — which is every
+// notification this package sent before MYR-602, including the ones a test
+// builds with an empty RideID. A notification that carries UserInfo and names
+// no ride omits the key rather than sending `"rideId": ""`, because an empty
+// string is a value the app would have to special-case, and a trips push has
+// no ride to name.
+//
+// UserInfo CANNOT SHADOW `aps` OR `rideId`: it is merged first and the two
+// reserved keys are written over it. A caller that puts "aps" in UserInfo gets
+// it ignored rather than getting a malformed push Apple answers 400 to.
 func buildPayload(n Notification) ([]byte, error) {
-	payload := map[string]any{
-		"aps": map[string]any{
-			"alert": map[string]any{
-				"title": n.Title,
-				"body":  n.Body,
-			},
-			"sound": "default",
+	payload := make(map[string]any, len(n.UserInfo)+2)
+	for k, v := range n.UserInfo {
+		payload[k] = v
+	}
+	payload["aps"] = map[string]any{
+		"alert": map[string]any{
+			"title": n.Title,
+			"body":  n.Body,
 		},
-		"rideId": n.RideID,
+		"sound": "default",
+	}
+	if n.RideID != "" || len(n.UserInfo) == 0 {
+		payload["rideId"] = n.RideID
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
