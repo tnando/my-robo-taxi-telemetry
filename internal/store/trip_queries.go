@@ -294,7 +294,7 @@ WHERE "vehicleId" = $1
 // CURRENT eta so the card's "arrives in N min" is read at REST-read time rather
 // than frozen at leg start.
 //
-// The leg table is written by the sibling lane's detector; this repository only
+// The leg table is written by internal/trips' leg detector; this repository only
 // reads it. `etaMinutes` comes off the vehicle row because that is where live
 // navigation lands — the leg row records what the car SAID it was driving to,
 // not how far away it is now.

@@ -571,7 +571,8 @@ func TestUnknownBodyFieldsAreRefused(t *testing.T) {
 
 // ── The TripNotifier seam ────────────────────────────────────────────────────
 //
-// The sibling lane wires the real `trips` push category behind this interface.
+// cmd/telemetry-server wires the real `trips` push category behind this
+// interface, through an adapter over internal/trips' Service.
 // These pin the CONTRACT it will be called under: who is told, when, and — just
 // as load-bearing — who is NOT.
 

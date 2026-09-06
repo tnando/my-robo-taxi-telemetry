@@ -18,10 +18,11 @@ import "context"
 //     the composition root wires the two together, as it does for every other
 //     notifier on this surface.
 //   - The `trips` push CATEGORY — its prefs toggle, its payload shape, its
-//     delivery flags, its deep link — is being built by a SIBLING LANE against
-//     the same base. Declaring the seam and calling it lets both halves land
-//     independently, and the day the category exists the only change here is
-//     one wiring line.
+//     delivery flags, its deep link — lives in internal/push and is driven by
+//     internal/trips, which also owns the sweeper and the leg detector.
+//     Declaring the seam and calling it let the two halves land independently;
+//     it is satisfied at composition by cmd/telemetry-server's
+//     tripNotifierAdapter, which is also where the live side's errors stop.
 //
 // NIL IS A NO-OP, NOT A FAILURE, and that is the load-bearing property: a
 // deployment with no notifier wired creates trips that work perfectly and tell
@@ -78,7 +79,7 @@ func (noopTripNotifier) TripEnded(context.Context, TripData, []string)   {}
 // did, and a phone that buzzes to tell its owner about their own tap is the
 // most common way a notification category gets turned off. The owner IS
 // included in the per-leg Live Activity, which is a different mechanism
-// answering a different question, and the sibling lane owns that.
+// answering a different question, and internal/trips owns that.
 func participantUserIDs(trip TripData) []string {
 	out := make([]string, 0, len(trip.Participants))
 	for _, p := range trip.Participants {

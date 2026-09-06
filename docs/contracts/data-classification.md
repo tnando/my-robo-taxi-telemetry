@@ -816,7 +816,7 @@ The ActivityKit **PUSH-TO-START** token registry — one row per `(trip, party)`
 
 ### 1.28 go_trip_legs table (Go-owned, MYR-602)
 
-**One row per driving leg inside a window** — the car set off with a destination and either arrived or stopped. The rows are written by the **leg detector** (a sibling lane); the §7.30 store only READS them, for `Trip.currentLeg`. Anchored: NFR-3.9, NFR-3.21, NFR-3.23.
+**One row per driving leg inside a window** — the car set off with a destination and either arrived or stopped. The rows are written by the **leg detector** (`internal/trips`); the §7.30 store only READS them, for `Trip.currentLeg`. Anchored: NFR-3.9, NFR-3.21, NFR-3.23.
 
 **The one table here that could plausibly have been left out** — a leg is derived from telemetry and is over in an hour — and it exists for two reasons that are both about **EXACTLY-ONCE**: the `trip_leg_started` / `trip_leg_arrived` pushes must fire once per leg per participant, and the only way to make a push idempotent across a restart, a redeploy or two arrival signals in the same second is a durable stamp that needs a row to live on; and the per-leg Live Activity needs a durable **anchor** (see the `trip_leg_id` row added to §1.18).
 
