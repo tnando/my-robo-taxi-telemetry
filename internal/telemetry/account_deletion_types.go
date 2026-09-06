@@ -115,6 +115,17 @@ type AccountDataDeleter interface {
 	// the per-vehicle teardown deletes these rows with the car, so this must
 	// run after it.
 	DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error)
+	// DeleteTripsOwned drops the TRIPS THIS PERSON CREATED (MYR-602, §3.1
+	// step 8g). One statement for four tables: the roster, the push-to-start
+	// tokens and the legs cascade off go_trips(id).
+	DeleteTripsOwned(ctx context.Context, userID string) (int, error)
+	// DeleteTripParticipations removes this person from OTHER people's trips
+	// (MYR-602, §3.1 step 8g).
+	DeleteTripParticipations(ctx context.Context, userID string) (int, error)
+	// DeleteTripActivityTokens removes this person's ActivityKit
+	// push-to-start registrations on trips the cascade above did not reach
+	// (MYR-602, §3.1 step 8g).
+	DeleteTripActivityTokens(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -179,7 +190,18 @@ type AccountDeletionCounts struct {
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.
 	RideMembershipsDeleted int
-	RefreshTokensRevoked   int
+	// TripsDeleted counts the trips this person CREATED (MYR-602), whose
+	// roster, push-to-start tokens and legs went with them through the FK
+	// cascade.
+	TripsDeleted int
+	// TripParticipationsDeleted counts the memberships this person held on
+	// OTHER people's trips (MYR-602).
+	TripParticipationsDeleted int
+	// TripActivityTokensDeleted counts the push-to-start registrations
+	// removed (MYR-602). A COUNT and never a token — the value is a P1
+	// capability and the audit row is P0-only.
+	TripActivityTokensDeleted int
+	RefreshTokensRevoked      int
 }
 
 // AccountIdentityOutcome mirrors store.AccountIdentityResult.

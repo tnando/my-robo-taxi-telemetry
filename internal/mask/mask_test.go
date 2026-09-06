@@ -124,8 +124,28 @@ func TestApply_Idempotent(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("Apply not idempotent: first=%v, second=%v", first, second)
 	}
-	if len(secondMasked) != 0 {
-		t.Errorf("second pass should mask nothing, got %v", secondMasked)
+
+	// MYR-602 SPLIT THE TWO HALVES OF THIS ASSERTION APART, and only one of
+	// them was ever the contract.
+	//
+	// IDEMPOTENCE IS ABOUT `out`, and it still holds exactly: the second pass
+	// produces the same map, key for key and value for value, which is what a
+	// re-projecting caller (the hub, on replay) depends on.
+	//
+	// `fieldsMasked` is NOT idempotent any more, and must not be. A
+	// sentinel-substituted field leaves its KEY behind carrying a no-value
+	// spelling (sentinels.go), so the second pass meets it again and reports
+	// the same withholding again — which is the honest audit answer, because
+	// the value really was withheld on both passes. Requiring silence here
+	// would force Apply to either forget the substitution or read the value
+	// back to guess whether it had already happened.
+	//
+	// What must still be empty is the set of fields that were REMOVED: `vin`
+	// is gone after the first pass, so nothing can strip it twice.
+	for _, field := range secondMasked {
+		if _, substituted := mask.Sentinels[field]; !substituted {
+			t.Errorf("second pass removed %q, which the first pass should already have taken", field)
+		}
 	}
 }
 

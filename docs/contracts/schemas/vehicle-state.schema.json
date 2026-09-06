@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://myrobotaxi.com/schemas/vehicle-state.schema.json",
   "title": "VehicleState",
-  "description": "Canonical vehicle state as consumed by MyRoboTaxi SDKs. Defines every field name, type, unit, nullability, atomic group membership, and data classification. Both the WebSocket vehicle_update messages and the REST snapshot endpoint return subsets of this schema.",
+  "description": "Canonical vehicle state as consumed by MyRoboTaxi SDKs. Defines every field name, type, unit, nullability, atomic group membership, and data classification. Both the WebSocket vehicle_update messages and the REST snapshot endpoint return subsets of this schema. WHO SEES THIS SNAPSHOT, REWRITTEN BY MYR-602 (contracts v0.41.0). THE RULE: A NON-OWNER SEES THE CAR'S LIVE LOCATION ONLY DURING AN ACTIVE RIDE OR AN ACTIVE TRIP. That produces THREE NON-OWNER MASK ROLES, each a superset of the one before, with the STRONGEST APPLICABLE ROLE WINNING for a given (person, vehicle, instant). `viewer` — an accepted share and nothing else (MYR-184): the catalog and status fields, and NEITHER the LOCATION GROUP (`latitude`, `longitude`, `heading`, `speed`, `locationName`, `locationAddress`) NOR the NAVIGATION GROUP (`destinationName`, `destinationAddress`, `destinationLatitude`, `destinationLongitude`, `originLatitude`, `originLongitude`, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates`). `ride_member` — a party to an accepted, LIVE ride on this vehicle (MYR-540): viewer PLUS both groups, for the life of that ride. `trip_participant` — a non-left participant of an ACTIVE trip on this vehicle (MYR-602, trip.schema.json): IDENTICAL to `ride_member`, field for field, for the length of the trip's window and at ALL times inside it — parked, driving, with a destination or without one. THIS SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers; MYR-602 withdraws it along with position. THE THREE ROLES ARE THE SERVER-SIDE MASK MODEL AND ARE NOT WIRE VALUES — `VehicleSummary.role` stays exactly `owner | viewer` and is NOT widened, because installed builds switch on it; a client learns it holds the stronger access from an accepted live ride it is party to, or from a non-null `VehicleSummary.activeTripId`. HOW THE NARROWING REACHES THE WIRE: the six location-group fields are in this schema's `required` set, so the plain-viewer projection emits each one's DOCUMENTED NO-VALUE SENTINEL rather than dropping the key — `latitude`/`longitude` as 0,0 (the '0,0 = no fix' convention, §2.3), `locationName`/`locationAddress` as '' (the 'no geocode yet' convention), and `speed`/`heading` as 0 — because omitting a required key would mint a frame this package calls invalid, and truly relaxing `required` is major-bump territory. The navigation fields are all nullable and are simply null, which the `navigation` group already defines as 'no active navigation'. ONE HONEST CONSEQUENCE: `speed: 0` and `heading: 0` are REAL readings for a stopped car pointing north, so a consumer MUST decide what to draw from THE ROLE IT HOLDS, never by sniffing the values. The authoritative role/mask table lives in the telemetry repo's `docs/contracts/rest-api.md` §5 and `docs/contracts/data-classification.md`.",
   "type": "object",
   "required": [
     "vehicleId",
@@ -79,14 +79,14 @@
     },
     "speed": {
       "type": "integer",
-      "description": "Current vehicle speed. Rounded to nearest integer from Tesla's float emission.",
+      "description": "Current vehicle speed. Rounded to nearest integer from Tesla's float emission. MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-unit": "mph",
       "x-classification": "P0",
       "minimum": 0
     },
     "heading": {
       "type": "integer",
-      "description": "Compass heading. 0 = North, 90 = East, 180 = South, 270 = West.",
+      "description": "Compass heading. 0 = North, 90 = East, 180 = South, 270 = West. MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-unit": "degrees",
       "x-classification": "P0",
       "minimum": 0,
@@ -95,7 +95,7 @@
     },
     "latitude": {
       "type": "number",
-      "description": "Current GPS latitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
+      "description": "Current GPS latitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea. MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -105,7 +105,7 @@
     },
     "longitude": {
       "type": "number",
-      "description": "Current GPS longitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea.",
+      "description": "Current GPS longitude. Encrypted at rest (AES-256-GCM). Non-nullable: on initial connect before the first GPS fix, latitude/longitude default to 0. Per the '0,0 = no fix' convention (§2.3), SDK consumers MUST treat latitude == 0 && longitude == 0 as 'no position available' rather than a valid location in the Gulf of Guinea. MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -115,12 +115,12 @@
     },
     "locationName": {
       "type": "string",
-      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationName (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "description": "Reverse-geocoded place name for current location (e.g., 'Home', 'Whole Foods Market'). Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationName (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23). MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-classification": "P1"
     },
     "locationAddress": {
       "type": "string",
-      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationAddress (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "description": "Reverse-geocoded street address for current location. Derived from GPS coordinates server-side. Non-nullable per DB Vehicle.locationAddress (NOT NULL DEFAULT ''); an empty string means no geocode is yet available. Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23). MYR-602 VISIBILITY (contracts v0.41.0): part of the LOCATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` — an accepted share with neither — receives this field's documented no-value sentinel instead of a reading; see this schema's root description for the sentinel per field and for why the key is not dropped.",
       "x-classification": "P1"
     },
     "gearPosition": {
@@ -192,20 +192,20 @@
     },
     "destinationName": {
       "type": ["string", "null"],
-      "description": "Name of the active navigation destination. Null when no navigation is active. When navigation is cancelled, this field and all other navigation group fields are atomically cleared to null.",
+      "description": "Name of the active navigation destination. Null when no navigation is active. When navigation is cancelled, this field and all other navigation group fields are atomically cleared to null. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-classification": "P1",
       "x-atomic-group": "navigation",
       "examples": ["Whole Foods Market"]
     },
     "destinationAddress": {
       "type": ["string", "null"],
-      "description": "Street address of the active navigation destination. Null when no navigation is active. Sourced from DB Vehicle.destinationAddress (Prisma String?, nullable). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23).",
+      "description": "Street address of the active navigation destination. Null when no navigation is active. Sourced from DB Vehicle.destinationAddress (Prisma String?, nullable). Loaded by the Go Vehicle struct and populated on snapshot as of MYR-24 (2026-04-23). MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-classification": "P1",
       "x-atomic-group": "navigation"
     },
     "destinationLatitude": {
       "type": ["number", "null"],
-      "description": "Latitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "description": "Latitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -215,7 +215,7 @@
     },
     "destinationLongitude": {
       "type": ["number", "null"],
-      "description": "Longitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "description": "Longitude of the navigation destination. Encrypted at rest (AES-256-GCM). Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -225,7 +225,7 @@
     },
     "originLatitude": {
       "type": ["number", "null"],
-      "description": "Latitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "description": "Latitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -235,7 +235,7 @@
     },
     "originLongitude": {
       "type": ["number", "null"],
-      "description": "Longitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "description": "Longitude of the navigation trip origin. Encrypted at rest (AES-256-GCM). Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "degrees",
       "x-classification": "P1",
       "x-encrypted": true,
@@ -245,7 +245,7 @@
     },
     "etaMinutes": {
       "type": ["integer", "null"],
-      "description": "Estimated time of arrival in minutes remaining. Null when no navigation is active. Rounded to nearest integer.",
+      "description": "Estimated time of arrival in minutes remaining. Null when no navigation is active. Rounded to nearest integer. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "minutes",
       "x-classification": "P0",
       "minimum": 0,
@@ -253,7 +253,7 @@
     },
     "tripDistanceRemaining": {
       "type": ["number", "null"],
-      "description": "Remaining distance to navigation destination. Null when no navigation is active.",
+      "description": "Remaining distance to navigation destination. Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-unit": "miles",
       "x-classification": "P0",
       "minimum": 0,
@@ -261,7 +261,7 @@
     },
     "navRouteCoordinates": {
       "type": ["array", "null"],
-      "description": "Active navigation route as an array of [longitude, latitude] coordinate pairs (GeoJSON/Mapbox order). Decoded from Tesla's RouteLine (Base64-encoded protobuf wrapping a Google Encoded Polyline at 1e6 precision). Encrypted at rest (AES-256-GCM). Null when no navigation is active.",
+      "description": "Active navigation route as an array of [longitude, latitude] coordinate pairs (GeoJSON/Mapbox order). Decoded from Tesla's RouteLine (Base64-encoded protobuf wrapping a Google Encoded Polyline at 1e6 precision). Encrypted at rest (AES-256-GCM). Null when no navigation is active. MYR-602 VISIBILITY (contracts v0.41.0): part of the NAVIGATION GROUP, which a NON-OWNER receives only during an active ride (`ride_member`) or an active trip (`trip_participant`). A plain `viewer` receives null. This SUPERSEDES MYR-435, which kept the navigation group visible to plain viewers. See this schema's root description for the full three-role model.",
       "x-classification": "P1",
       "x-encrypted": true,
       "x-atomic-group": "navigation",
@@ -557,7 +557,7 @@
   },
   "x-atomic-groups": {
     "navigation": {
-      "description": "Navigation state delivered as a single atomic unit. When any navigation field changes, the server accumulates all sibling nav fields within a 500ms debounce window (NFR-3.2) and delivers them together. When navigation is cancelled, ALL fields in this group are atomically cleared to null (FR-2.3).",
+      "description": "Navigation state delivered as a single atomic unit. When any navigation field changes, the server accumulates all sibling nav fields within a 500ms debounce window (NFR-3.2) and delivers them together. When navigation is cancelled, ALL fields in this group are atomically cleared to null (FR-2.3). MYR-602: the whole group is withheld from a plain `viewer` (superseding MYR-435) and granted to `ride_member` and `trip_participant`. A masked-away field is NOT a nav clear: the all-or-nothing predicate below governs DELIVERY to a role that holds the group, not the mask itself.",
       "fields": [
         "destinationName",
         "destinationAddress",
@@ -594,7 +594,7 @@
       "nullability": "chargeLevel and estimatedRange are non-nullable (default 0 on initial vehicle creation). chargeState and timeToFull are nullable on both wire and REST /snapshot — the Prisma-owned Vehicle columns are String?/Float? (post-MYR-41) and steady-state null is the expected shape for vehicles that have never charged."
     },
     "gps": {
-      "description": "GPS position and orientation delivered together. On initial connect before the first GPS fix, latitude and longitude may be 0 (DB default).",
+      "description": "GPS position and orientation delivered together. On initial connect before the first GPS fix, latitude and longitude may be 0 (DB default). MYR-602: the whole group, together with `speed`, `locationName` and `locationAddress`, is withheld from a plain `viewer` and granted to `ride_member` and `trip_participant` — see the schema root description.",
       "fields": [
         "latitude",
         "longitude",

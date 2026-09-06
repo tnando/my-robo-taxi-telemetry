@@ -35,7 +35,7 @@ func (s *stubDriveLister) ListByVehicleID(_ context.Context, _ string, cursor Dr
 // row carries reverse-geocoded start/end Location + Address strings so
 // the MYR-145 wire assertions can confirm the fields propagate from the
 // store-adapter boundary all the way to the JSON payload.
-func fixtureDriveItems(vehicleID string, n int) []DriveListItem {
+func fixtureDriveItems(vehicleID string, n int) []DriveListItem { //nolint:unparam // the vehicleId is spelled at every call site on purpose: these rows are compared against a snapshot row that must be the SAME car, and an implicit one would hide the coupling
 	base := time.Date(2026, 4, 13, 18, 22, 0, 0, time.UTC)
 	out := make([]DriveListItem, 0, n)
 	for i := 0; i < n; i++ {

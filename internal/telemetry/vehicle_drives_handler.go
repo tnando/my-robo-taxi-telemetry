@@ -25,6 +25,11 @@ type VehicleDrivesHandler struct {
 	drives   DriveLister
 	roles    roleResolver // optional: nil disables role-based mask plumbing
 
+	// trips is the MYR-602 window gate. OPTIONAL and nil by default, which
+	// leaves this endpoint owner-only exactly as MYR-369 left it — the
+	// fail-closed direction for a deployment that has not wired trips.
+	trips TripDriveAdmitter
+
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
 	auditEmitter  mask.AuditEmitter
@@ -85,11 +90,21 @@ func (h *VehicleDrivesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, vehicleID, userID) {
+	admission, ok := h.authorize(ctx, w, vehicleID, userID)
+	if !ok {
 		return
 	}
 
-	page, err := h.drives.ListByVehicleID(ctx, vehicleID, cursor, limit)
+	// TWO LIST PATHS, and which one runs is decided by the access resolution
+	// rather than by a flag. An owner reads their whole history; a trip
+	// participant reads the union of their windows and nothing else, narrowed
+	// IN THE STATEMENT so the page size means what it says.
+	var page DriveListPage
+	if admission.participant() {
+		page, err = h.trips.VehicleDrivesInTripWindows(ctx, userID, vehicleID, cursor, limit)
+	} else {
+		page, err = h.drives.ListByVehicleID(ctx, vehicleID, cursor, limit)
+	}
 	if err != nil {
 		h.logger.Error("vehicle drives: list failed",
 			slog.String("vehicle_id", vehicleID),
@@ -129,25 +144,26 @@ func (h *VehicleDrivesHandler) parseQuery(w http.ResponseWriter, r *http.Request
 	return limit, cursor, true
 }
 
-// verifyOwnership resolves the caller's access to the vehicle identified by
-// vehicleID: the OWNER, and nobody else (MYR-369 — no share of any shape opens
-// the drives surfaces). Returns true if the check passes; on failure
-// writes an HTTP error response and returns false. The 404 / 403 split mirrors
-// the snapshot handler — an unknown vehicle is never distinguishable from one
-// the caller cannot see.
-func (h *VehicleDrivesHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) bool {
+// authorize resolves the caller's access to the vehicle identified by
+// vehicleID: the OWNER (MYR-369 — no share of any shape opens the drives
+// surfaces), or, since MYR-602, a TRIP PARTICIPANT limited to their own
+// windows. Returns the trip admission — empty for an owner, who needs no
+// narrowing — and false after writing an HTTP error. The 404 / 403 split
+// mirrors the snapshot handler: an unknown vehicle is never distinguishable
+// from one the caller cannot see.
+func (h *VehicleDrivesHandler) authorize(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) (tripDriveAdmission, bool) {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
 			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return false
+			return tripDriveAdmission{}, false
 		}
 		h.logger.Error("vehicle drives: vehicle lookup failed",
 			slog.String("vehicle_id", vehicleID),
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
+		return tripDriveAdmission{}, false
 	}
 
 	// MYR-369: THE DRIVES SURFACES ARE OWNER-ONLY AGAIN, unconditionally.
@@ -167,18 +183,30 @@ func (h *VehicleDrivesHandler) verifyOwnership(ctx context.Context, w http.Respo
 	// one-argument change rather than a re-derivation.
 	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
 		if errors.Is(err, errNoVehicleAccess) {
+			// MYR-602 ADDS EXACTLY ONE WAY PAST THAT DENIAL, and it is not a
+			// share: an OPEN OR CLOSED TRIP WINDOW this caller was a
+			// participant of. It buys them the drives of that window and
+			// nothing else about the car's history — see trip_drive_access.go.
+			//
+			// The probe runs only AFTER the owner check has already failed, so
+			// the owner path costs nothing, and it fails closed: no windows,
+			// or a lookup error, and the original 403 stands.
+			admission := resolveTripDriveAdmission(ctx, h.trips, h.logger, "vehicle drives", userID, vehicleID)
+			if admission.participant() {
+				return admission, true
+			}
 			denyVehicleAccess(w, h.logger, "vehicle drives", vehicleID, userID)
-			return false
+			return tripDriveAdmission{}, false
 		}
 		h.logger.Error("vehicle drives: access resolution failed",
 			slog.String("vehicle_id", vehicleID),
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
+		return tripDriveAdmission{}, false
 	}
 
-	return true
+	return tripDriveAdmission{}, true
 }
 
 // writeMaskedPage projects each drive through the role mask, computes

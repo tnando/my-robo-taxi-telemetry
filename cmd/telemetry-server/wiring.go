@@ -256,12 +256,18 @@ type httpRouteDeps struct {
 	// access set, so an unexpired access token stops validating immediately
 	// rather than at the TTL. Same nil-in-dev-mode policy as accessInvalidator.
 	sessionInvalidator telemetry.AccountSessionInvalidator
-	pool               *pgxpool.Pool
-	encryptor          cryptox.Encryptor
-	auditEmitter       mask.AuditEmitter
-	auditMetrics       mask.AuditMetrics
-	debugGate          debugFieldsGate
-	originPatterns     []string
+	// storeMetrics is the shared Prometheus recorder every repository writes
+	// its query timings and errors to. Threaded here by MYR-602 because the
+	// trips repository is the first one CONSTRUCTED inside a route-setup
+	// function rather than in main — see setupTripEndpoints for why it is
+	// built there and returned.
+	storeMetrics   store.Metrics
+	pool           *pgxpool.Pool
+	encryptor      cryptox.Encryptor
+	auditEmitter   mask.AuditEmitter
+	auditMetrics   mask.AuditMetrics
+	debugGate      debugFieldsGate
+	originPatterns []string
 	// serviceStatus is the running in-service monitor. It also owns the
 	// per-VIN stream-recency state (MYR-300) and the vehicle_data backfill
 	// mapping (MYR-260) that the MYR-315 refresh endpoint reuses.
@@ -304,6 +310,18 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	// SELECT columns the response body doesn't emit (AGENTS.md
 	// "Performance invariants"). Wide reads belong only on detail/edit
 	// handlers.
+	// ── MYR-602 TRIPS — mounted FIRST because three later handlers need the
+	// repository it builds. BEGIN ──────────────────────────────────────────
+	//
+	// The trips surface itself is self-contained, but the SAME TripRepo is
+	// also the drives handlers' window gate (§7.2/§7.3/§7.4) and the catalog's
+	// third merge leg. One instance rather than three, so the surfaces resolve
+	// a window through one statement set and cannot come to disagree about who
+	// is on a trip.
+	tripRepo := setupTripEndpoints(deps, &vehicleSnapshotAdapter{repo: deps.vehicleRepo})
+	tripAdmitter := &tripDriveAdmitterAdapter{repo: tripRepo}
+	// ── MYR-602 TRIPS. END ─────────────────────────────────────────────────
+
 	vehiclesListHandler := telemetry.NewVehiclesListHandler(
 		deps.authenticator,
 		&vehicleListerAdapter{repo: deps.vehicleRepo},
@@ -316,6 +334,14 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		// halves above — so the catalog names the same cars the WS access
 		// set's membership leg admits.
 		telemetry.WithMemberVehicles(&memberVehicleListerAdapter{repo: deps.vehicleRepo}),
+		// MYR-602 trip merge: the vehicles of the caller's OPEN trip windows,
+		// as trip_participant-masked viewer rows, deduplicated after the three
+		// legs above — and, in the same pass, `activeTripId` stamped onto every
+		// row a window is open on, including the caller's own cars.
+		telemetry.WithTripVehicles(&tripVehicleListerAdapter{
+			repo:   tripRepo,
+			shared: &sharedVehicleListerAdapter{repo: deps.vehicleRepo},
+		}),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles", vehiclesListHandler.ServeHTTP)
 
@@ -348,10 +374,15 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 		// through, so re-opening them is a deliberate change rather than
 		// one wiring line.
 		telemetry.WithDrivesMaskAudit(deps.auditEmitter, deps.auditMetrics, "/api/vehicles/{vehicleId}/drives"),
+		// MYR-602: the ONE seam past the owner-only rule, and it is not a
+		// share. A trip participant reads the drives of a window they were
+		// part of — a bounded set of instants the owner named — and nothing
+		// else about the car's history.
+		telemetry.WithDrivesTripAdmitter(tripAdmitter),
 	)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/drives", drivesHandler.ServeHTTP)
 
-	setupDriveReadEndpoints(deps, snapshotAdapter)
+	setupDriveReadEndpoints(deps, snapshotAdapter, tripAdmitter)
 
 	setupRideRequestEndpoints(deps, snapshotAdapter)
 

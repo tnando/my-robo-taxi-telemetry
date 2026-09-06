@@ -470,6 +470,150 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		-- catalog LEFT JOIN, so a nullable created_at would make a driver car
 		-- indistinguishable from an owner's on every read.
 		"created_at"             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	-- go_trips: the owner-defined WINDOW on one vehicle during which a chosen
+	-- subset of its accepted share-holders sees the car live (migration 0047,
+	-- MYR-602).
+	--
+	-- IT IS REACHED FROM THE DRIVES ENDPOINTS THIS HARNESS ALREADY TESTS, which
+	-- is what makes it this file's business rather than the trip suite's. All
+	-- three viewer reads — vehicle drives, drive detail, drive route — now call
+	-- resolveTripDriveAdmission (internal/telemetry/trip_drive_access.go), which
+	-- probes go_trip_participants JOIN go_trips for the caller's windows before
+	-- deciding what a non-owner may see.
+	--
+	-- NOTE THE FAILURE MODE, because it is NOT the 500 its neighbours above
+	-- announce themselves with, and that is precisely why the table is easy to
+	-- forget and expensive to omit. That probe FAILS CLOSED: a missing relation
+	-- is logged and returned as "no windows", so the request does not error —
+	-- it just denies. A harness lacking these tables therefore keeps every
+	-- drives test GREEN while making the participant-admission assertions pass
+	-- for the WRONG REASON: they would be observing a denial manufactured by an
+	-- absent table rather than by the access rule under test. A green test that
+	-- proves nothing is worse than a red one, so the relation has to be here.
+	--
+	-- The same pair is also the FOURTH UNION leg of queryUserVehicleIDs
+	-- (internal/auth/queries.go), the WebSocket handshake's access set. That
+	-- path is not mounted by this REST harness and could not run here anyway —
+	-- see the go_vehicle_shares note below — but the tables are shaped for it.
+	--
+	-- Full shape rather than the two columns leg 4 reads, for the reason its
+	-- neighbours carry theirs: the window pair, the early-end stamp and the
+	-- sweeper's two idempotency stamps are what a §7.30 conformance test would
+	-- need to plant to move a trip through its lifecycle, and a harness missing
+	-- them would refuse the seed. The two CHECKs come along for the same reason
+	-- migration 0047 put them in the schema rather than the handler: a test that
+	-- can seed a zero-length or decade-long window is a test that can assert
+	-- behaviour the server will never produce.
+	CREATE TABLE go_trips (
+		"id"                  TEXT        PRIMARY KEY,
+		-- Opaque Prisma cuids, NO foreign key, exactly as 0047 declares them
+		-- (CG-DL-9 forbids naming a Prisma table here).
+		"vehicle_id"          TEXT        NOT NULL,
+		"owner_user_id"       TEXT        NOT NULL,
+		-- P1 user content, AES-256-GCM sealed. NOT NULL: the create endpoint
+		-- requires 1..60 characters after trimming, so there is no nameless
+		-- trip and therefore no absent sentinel to express.
+		"name_enc"            TEXT        NOT NULL,
+		-- starts_at MAY be in the past: that is how the legs of a road trip
+		-- already driven join the trip retroactively.
+		"starts_at"           TIMESTAMPTZ NOT NULL,
+		"ends_at"             TIMESTAMPTZ NOT NULL,
+		-- Set when the OWNER ENDS THE TRIP EARLY. Readers compute the effective
+		-- end as LEAST(ends_at, ended_at) rather than writing back over ends_at.
+		"ended_at"            TIMESTAMPTZ,
+		-- The sweeper's at-most-once stamps. Nullable instants, not booleans.
+		"started_notified_at" TIMESTAMPTZ,
+		"ended_notified_at"   TIMESTAMPTZ,
+		"created_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"updated_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		CONSTRAINT go_trips_window_ordered CHECK ("ends_at" > "starts_at"),
+		CONSTRAINT go_trips_window_capped
+			CHECK ("ends_at" <= "starts_at" + INTERVAL '30 days')
+	);
+
+	-- go_trip_participants: who is in the window, and when they left. The other
+	-- half of every query described above, and therefore the other half of the
+	-- silent deny that an absent relation produces.
+	--
+	-- KNOWN REMAINING GAP, recorded here because it bounds what these two tables
+	-- buy: the trip-admission queries also JOIN go_vehicle_shares, and this
+	-- harness has never provisioned it (nor go_ride_members). So the probe still
+	-- fails closed here, and a participant-admission test cannot yet be written
+	-- against this schema — it would need both. The trips tables are necessary
+	-- and not sufficient; adding the shares table is its own change, with its
+	-- own reasons, and is deliberately not smuggled in here.
+	--
+	-- Full shape: share_id is not read by the access query — which deliberately
+	-- re-joins go_vehicle_shares on (vehicle, user) rather than trusting this
+	-- column — but it IS the wire contract's participantId, so a roster
+	-- conformance test cannot round-trip without it. left_at is the tombstone
+	-- the access query filters on, so it is load-bearing here and not decoration.
+	CREATE TABLE go_trip_participants (
+		"trip_id"  TEXT NOT NULL REFERENCES go_trips ("id") ON DELETE CASCADE,
+		"user_id"  TEXT NOT NULL,
+		"share_id" TEXT NOT NULL,
+		"added_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		-- Tombstone rather than DELETE: re-adding is an UPDATE of one row.
+		"left_at"  TIMESTAMPTZ,
+		PRIMARY KEY ("trip_id", "user_id")
+	);
+
+	-- go_trip_activity_tokens: ActivityKit PUSH-TO-START tokens, one per
+	-- (trip, user). Not on the access path, so it does not carry leg 4's
+	-- blast radius — it is provisioned because the trip endpoints the harness
+	-- mounts write it, and a §7.30 registration test has nowhere to land
+	-- without it. It is also a CASCADE target of go_trips: creating go_trips
+	-- without it would leave the cascade half-declared and a trip deletion test
+	-- asserting against a table that does not exist.
+	CREATE TABLE go_trip_activity_tokens (
+		"trip_id"             TEXT        NOT NULL REFERENCES go_trips ("id") ON DELETE CASCADE,
+		-- The OWNER may hold a row here too — the owner is on the per-leg
+		-- Activity by explicit product decision — so this is deliberately not
+		-- constrained to participants.
+		"user_id"             TEXT        NOT NULL,
+		-- P1 CAPABILITY. Never logged beyond an 8-character prefix, never
+		-- echoed in a response, never in an error envelope.
+		"push_to_start_token" TEXT        NOT NULL,
+		"sandbox"             BOOLEAN     NOT NULL DEFAULT FALSE,
+		"created_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"updated_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		-- UPSERT target: ActivityKit rotates the token, so a re-registration
+		-- REPLACES the value in place rather than accumulating rows.
+		PRIMARY KEY ("trip_id", "user_id")
+	);
+
+	-- go_trip_legs: one row per driving leg the car takes inside a window. Like
+	-- the tokens table it is off the access path, and it is here because the
+	-- trip detail response renders the current leg — so a §7.30 read of a trip
+	-- with a live leg has nothing to project without it — and because it is the
+	-- second CASCADE target of go_trips.
+	--
+	-- Full shape including the four delivery stamps. They are four and not two
+	-- on purpose: the alert pushes and the Live Activity fan-out are separate
+	-- deliveries with separate failure modes, and a harness that collapsed them
+	-- could not seed the state where one succeeded and the other must retry.
+	CREATE TABLE go_trip_legs (
+		"id"                   TEXT        PRIMARY KEY,
+		"trip_id"              TEXT        NOT NULL REFERENCES go_trips ("id") ON DELETE CASCADE,
+		-- Denormalised from the trip so the detector's hot path needs no join.
+		-- Opaque cuid, no FK (CG-DL-9).
+		"vehicle_id"           TEXT        NOT NULL,
+		-- P1 place name, AES-256-GCM sealed. NOT NULL: a leg is DEFINED as
+		-- driving WITH a destination, so there is no destinationless leg.
+		"destination_name_enc" TEXT        NOT NULL,
+		"started_at"           TIMESTAMPTZ NOT NULL,
+		-- NULL while the leg is underway.
+		"ended_at"             TIMESTAMPTZ,
+		-- TRUE only on real ARRIVAL EVIDENCE (80 m / 20 s dwell). Load-bearing:
+		-- it decides trip_leg_arrived and the final content-state's status.
+		"arrived"              BOOLEAN     NOT NULL DEFAULT FALSE,
+		"started_notified_at"  TIMESTAMPTZ,
+		"arrived_notified_at"  TIMESTAMPTZ,
+		"activity_started_at"  TIMESTAMPTZ,
+		"activity_ended_at"    TIMESTAMPTZ,
+		"created_at"           TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)

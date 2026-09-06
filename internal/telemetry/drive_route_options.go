@@ -36,3 +36,15 @@ func WithDriveRouteMaskAudit(emitter mask.AuditEmitter, metrics mask.AuditMetric
 		h.auditEndpoint = endpoint
 	}
 }
+
+// WithDriveRouteTripAdmitter opens §7.4 to a TRIP PARTICIPANT (MYR-602) for
+// drives inside a window they were part of. See WithDrivesTripAdmitter for why
+// a trip is a seam the drives surfaces may have and a share is not.
+//
+// Inert unless the composition root passes it; the handler stays owner-only
+// without it.
+func WithDriveRouteTripAdmitter(trips TripDriveAdmitter) DriveRouteOption {
+	return func(h *DriveRouteHandler) {
+		h.trips = trips
+	}
+}

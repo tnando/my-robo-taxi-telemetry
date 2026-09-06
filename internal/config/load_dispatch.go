@@ -129,6 +129,16 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.telemetryInactivitySuspensionEnabled = suspension
 
+	// MYR-602 trips. Same fail-fast parse as its neighbours: unset is ON, and
+	// anything ParseBool rejects stops the process at boot rather than being
+	// read as "off" — a typo that silently disabled a feature would be
+	// indistinguishable from an intentional shutdown.
+	trips, err := parseKillSwitchEnv("TRIPS_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.tripsEnabled = trips
+
 	return nil
 }
 

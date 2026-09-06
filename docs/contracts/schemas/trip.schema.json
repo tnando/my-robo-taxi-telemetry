@@ -1,0 +1,486 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://myrobotaxi.com/schemas/trip.schema.json",
+  "title": "TripListResponse",
+  "description": "Envelope returned by GET /api/trips — the caller's trips, as OWNER or as PARTICIPANT, newest first (MYR-602, contracts v0.41.0). A TRIP IS A TIME WINDOW, and that single sentence is the whole feature: for its duration the shared users the owner picked may see the car's live location, its navigation (destination, ETA, route line), a per-driving-leg Live Activity, and the drives the car recorded inside the window — WITHOUT an accepted ride. Until v0.41.0 a non-owner could see a car move only while a ride they were party to was live (MYR-540's member leg); an accepted share (MYR-184) bought a catalog row and, at the top tier, the right to REQUEST a ride, and nothing bought standing live access. This surface is that missing grant, and it is bounded by an instant rather than by a role, which is why every rule on it is about the window. Wraps an array of Trip rows under `items`. Deliberately NOT the `items` + `nextCursor` + `hasMore` envelope of the cursor-paginated lists (drives-list.schema.json, ride-request.schema.json): this surface is unpaginated — a person has a handful of trips, not a feed — and an SDK pagination helper MUST NOT mistake it for a page and go looking for a cursor that will never be there. The envelope is part of the wire contract: consumers MUST NOT strip it silently.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "items"
+  ],
+  "properties": {
+    "items": {
+      "type": "array",
+      "description": "The caller's trips, newest first (ORDER BY startsAt DESC, id DESC), filtered by the optional `?status=scheduled|active|ended` query and capped by `?limit=`. ONE LIST FOR BOTH ROLES: a trip the caller owns and a trip they were added to arrive in the same array in the same shape, and the sibling `role` on each row is the only thing that tells them apart — a client renders one row template and decides its affordances from `role`, exactly as the vehicle catalog does. An empty array means the caller has no trips matching the filter; it is never an error and never a permission answer.",
+      "items": {
+        "$ref": "#/$defs/Trip"
+      },
+      "x-classification": "P1"
+    }
+  },
+  "$defs": {
+    "TripStatus": {
+      "type": "string",
+      "enum": [
+        "scheduled",
+        "active",
+        "ended"
+      ],
+      "description": "WHERE THE TRIP SITS RELATIVE TO ITS OWN WINDOW, computed server-side at read time from the clock and never stored as a column. Exactly three members and they are exhaustive: `scheduled` — now < `startsAt`; the participants are chosen and notified but nothing is visible yet. `active` — `startsAt` <= now < the EFFECTIVE END; this is the only state in which live location, navigation and the leg Live Activity reach a participant. `ended` — now >= the effective end, whether the window ran out or the owner ended it early. THE EFFECTIVE END IS `min(endsAt, endedAt)`, not `endsAt`: an owner who ends a trip early sets `endedAt` and the window closes at that instant, so a consumer computing the state itself MUST take the minimum and MUST NOT read `endsAt` alone (see Trip.endedAt). TOLERANCE, and it is deliberately asymmetric: a client MUST treat an UNRECOGNISED member as `ended` — the safe direction, because a stale build that renders an unknown state as live would promise a person live telemetry the server is about to refuse, whereas rendering it as over merely under-offers and self-corrects on the next read. Append-only; the members never reorder. NOT AN ACCESS DECISION: the server independently gates every live frame and every drive on the window, so a client that mis-computes this cannot escalate — it can only mis-draw.",
+      "x-classification": "P0"
+    },
+    "TripRole": {
+      "type": "string",
+      "enum": [
+        "owner",
+        "participant"
+      ],
+      "description": "THE CALLER'S RELATIONSHIP TO THIS TRIP, and the only field on the row that distinguishes the two audiences. `owner` — the caller owns the vehicle and created the trip: they may PATCH it (rename, extend, shorten, add and remove people), end it early, and they are included in the per-leg Live Activity like everybody else. `participant` — the caller was added from the vehicle's ACCEPTED share grants: they may read the trip, read its drives, hold a Live Activity, and leave (DELETE /api/trips/{tripId}/participants/me). They may NOT edit or end it. DELIBERATELY NOT THE SAME ENUM AS VehicleSummary.role ('owner' | 'viewer'), and the divergence is the point: a person can be a trip participant on a car and NOT hold a viewer row for it in the ordinary sense, and the words 'viewer' and 'participant' answer different questions ('what do you hold on the car' vs 'what do you hold on this window'). Consumers MUST NOT alias the two enums to one type. A UI-AFFORDANCE HINT: every mutation is independently authorized server-side, so hiding a button is presentation, never enforcement. Append-only.",
+      "x-classification": "P0"
+    },
+    "TripVehicle": {
+      "title": "TripVehicle",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vehicleId",
+        "name",
+        "model",
+        "year",
+        "color",
+        "vinLast4",
+        "trimLabel"
+      ],
+      "description": "THE CATALOG SUBSET OF THE CAR THE TRIP IS ABOUT, embedded on every Trip row so a participant's trip card needs no second call. THAT IS THE WHOLE REASON IT EXISTS: a participant may have been added to a trip on a car they hold no ordinary row for, so GET /api/vehicles is not guaranteed to carry it, and a card that cannot say WHICH car is not the feature. Field-for-field the identity half of VehicleSummary (vehicle-summary.schema.json) with the same names, the same types and the same conventions — an empty `model`, a `year` of 0 and a null `trimLabel` all mean 'not determined' here exactly as they do there, and a descriptor builder MUST drop the fragment rather than render 'Year 0' or a stray separator. NOT a $ref to VehicleSummary: that row carries live state (status, chargeLevel, estimatedRange, lastUpdated) plus authorization values (role, sharePermission, setupState) which are answers about the CALLER'S catalog and would be either stale or meaningless on a trip row. This is a static descriptor, refreshed whenever the trip is read. Live state for a trip vehicle comes from the WebSocket while the trip is active, never from here.",
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "The vehicle's cuid — the SAME identifier as VehicleSummary.vehicleId and VehicleState.vehicleId, so a client keys its live-state store by it and a trip's frames land in the same place a catalog row's do. Also what the WebSocket `subscribe` names and what the trips push payload carries.",
+          "x-classification": "P0",
+          "examples": [
+            "clxyz1234567890abcdef"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "The OWNER'S nickname for the car ('Optimus', 'The Bus'). Same value and same empty-string convention as VehicleSummary.name. Identifies the vehicle, never the person — see Trip.ownerFirstName for whose car it is.",
+          "x-classification": "P0",
+          "examples": [
+            "Optimus"
+          ]
+        },
+        "model": {
+          "type": "string",
+          "description": "Vehicle model ('Model 3', 'Model Y'). Same source and same EMPTY-STRING convention as VehicleSummary.model: the key is always present and '' means 'not determined'. Consumers MUST keep a fallback label and MUST NOT render an empty fragment.",
+          "x-classification": "P0",
+          "examples": [
+            "Model Y"
+          ]
+        },
+        "year": {
+          "type": "integer",
+          "description": "Model year. Same source and same ZERO-VALUE convention as VehicleSummary.year: 0 means 'not determined' and is NEVER a real model year — drop the fragment rather than rendering 'Year 0'.",
+          "x-classification": "P0",
+          "examples": [
+            2024
+          ]
+        },
+        "color": {
+          "type": "string",
+          "description": "Vehicle exterior colour. Same value as VehicleSummary.color.",
+          "x-classification": "P0",
+          "examples": [
+            "Midnight Silver Metallic"
+          ]
+        },
+        "vinLast4": {
+          "type": "string",
+          "description": "Last 4 characters of the 17-character VIN — enough for a human to tell two identical cars apart, and the full VIN is NEVER emitted here any more than it is on the catalog. Empty string when the VIN is unknown. P1, exactly as on VehicleSummary.",
+          "x-classification": "P1",
+          "examples": [
+            "3F5A"
+          ]
+        },
+        "trimLabel": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "The DISPLAY-READY trim ('Plaid', 'Performance', 'Long Range') — the same column and the same semantics as VehicleSummary.trimLabel, read rather than derived, so the trip card and the catalog cannot name one car two different things. NULL IS NOT THE EMPTY STRING and is the ordinary state for a car Tesla has not been asked about: drop the fragment entirely. NEVER the raw badge code (VehicleState.trim, 'p74d'), which is not display-safe and is absent from this surface as it is from the catalog. Always present as a key on this shape — a trip row is minted by a v0.41.0-or-later server, so there is no version skew to tolerate here and null is the only 'unknown'.",
+          "x-classification": "P0",
+          "examples": [
+            "Plaid"
+          ]
+        }
+      }
+    },
+    "TripParticipant": {
+      "title": "TripParticipant",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "participantId",
+        "name",
+        "userIsSelf"
+      ],
+      "description": "ONE PERSON ON THE TRIP. Participants are chosen from the vehicle's ACCEPTED share grants and from nowhere else: a trip cannot reach somebody the car is not already shared with, so adding a stranger is a share invite first and a trip edit second. EVERYBODY SEES THE WHOLE LIST — an owner sees all participants and a participant sees all participants, deliberately, because they are on a trip together and a card showing 'and 3 others' would make a shared window feel like a broadcast. The OWNER IS NOT IN THIS ARRAY: they are named by the sibling Trip.ownerFirstName and identified by Trip.role, so a client renders the owner separately rather than hunting for them among the participants. A REVOKED SHARE REMOVES THE PARTICIPANT — trip access can never outlive the grant it was drawn from — and a participant who leaves disappears from the array on the next read. Neither departure is distinguishable here from 'was never added', by design: this is a membership snapshot, not an audit log.",
+      "properties": {
+        "participantId": {
+          "type": "string",
+          "description": "The SHARE GRANT'S id — the same value as ShareInvite.inviteId (vehicle-sharing.schema.json) for the accepted grant this participant was drawn from. DELIBERATELY THE SHARE ID AND NOT A USER ID: the platform does not put account identifiers on the wire (see Trip.ownerFirstName and ShareInvite.acceptedByName for the first-names-only rule), and the share id is the handle the owner already holds for this person from the Share tab. It is therefore also the value a client sends in CreateTripRequest.participantIds and UpdateTripRequest.addParticipantIds / removeParticipantIds — one identifier for choosing, adding and removing, with no mapping table on the client. Opaque: consumers MUST NOT parse it, and MUST NOT assume it is stable across a revoke-and-reinvite of the same person.",
+          "x-classification": "P0",
+          "examples": [
+            "clsha1234567890abcdef"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "WHO TO SHOW FOR THIS PERSON, already resolved by the server under the roster's rule (MYR-581): the ACCEPTING ACCOUNT'S first name (ShareInvite.acceptedByName) when there is one, falling back to the OWNER-TYPED label (ShareInvite.label) when there is not. The server applies that precedence, so a client renders this string as given and MUST NOT re-derive the ladder, split a surname off it, or reach for the share row. FIRST NAMES ONLY per the platform's P1 policy (MYR-229) — no surname, no email, no phone, no user id — and non-empty by construction: `label` is required at invite time, so there is always something to print. P1: this names a PERSON. Redact it in logs, never place it in a URL or a query string, and never emit it outside the trip's own party.",
+          "x-classification": "P1",
+          "examples": [
+            "Mira"
+          ]
+        },
+        "userIsSelf": {
+          "type": "boolean",
+          "description": "TRUE ON THE ROW THAT IS THE CALLER, resolved server-side so a client never has to compare identifiers it does not have. It exists because everybody sees the whole list: without it a participant reading five names cannot tell which one is them, and a 'Leave trip' affordance drawn against the wrong row is the worst possible mistake on this surface. Exactly zero or one row carries true — zero when the caller is the OWNER (the owner is not a participant; see this shape's description). Consumers MUST NOT match on `name`: two people on one trip can share a first name.",
+          "x-classification": "P0",
+          "examples": [
+            true
+          ]
+        }
+      }
+    },
+    "TripCurrentLeg": {
+      "title": "TripCurrentLeg",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "destinationName",
+        "etaMinutes",
+        "startedAt"
+      ],
+      "description": "THE LEG UNDERWAY RIGHT NOW, or NOTHING. OMITTED ENTIRELY when there is no leg — never null, never a hollow object with empty strings in it — following the same rule LiveActivityContentState.eta and .progress already set on this platform: an absent key is an admission, whereas a placeholder is a claim. Present ONLY when the trip is `active` AND the car is driving with a destination; a parked car mid-trip, a car driving with no navigation set, a scheduled trip and an ended trip ALL yield no key, and those four situations are deliberately indistinguishable here — the card either has a leg to draw or it does not. It is therefore the ONE optional property on this shape, and its absence from `required` is load-bearing rather than an oversight. Computed at read time and refreshed on the next GET; nothing pushes it, and the socket is what moves a leg between reads. THE DRIVING LEG UNDERWAY RIGHT NOW, or nothing at all. A LEG is the unit a trip is actually experienced in: the car sets off with a destination and arrives or parks, and a multi-day road trip is a sequence of them. It begins when, during an ACTIVE trip, the vehicle transitions into driving carrying a non-empty navigation destination; it ends when the car parks, the destination clears, or the auto-arrival detector fires. SERVER-DERIVED AND EPHEMERAL: no client computes it, and it is present on Trip.currentLeg ONLY while the trip is `active` AND a leg is underway — a parked car mid-trip and a scheduled or ended trip all yield no key (see Trip.currentLeg). PURELY INFORMATIONAL AND NEVER A GATE: a participant's live access is decided by the WINDOW alone, so while the trip is active they see the car's location and telemetry at ALL times — parked, driving, with a destination or without one — and the absence of a leg means only that the card has no 'headed to X' headline to draw. A consumer MUST NOT hide the map, drop the socket subscription, or show an 'offline' state because this is absent. REST-READ-TIME: this is a snapshot as of the read, refreshed on the next GET. Nothing pushes it, and it is NOT how a card stays current — the WebSocket carries the live navigation fields to a trip participant while the window is open, and the per-leg Live Activity carries them to the lock screen (live-activity.schema.json LiveActivityContentState with `kind` = 'trip'). Use this to draw a trip card on first paint, then let the socket move it.",
+      "properties": {
+        "destinationName": {
+          "type": "string",
+          "description": "WHERE THE CAR IS HEADED ON THIS LEG — the short place label from the vehicle's OWN navigation (VehicleState.destinationName, the `navigation` atomic group), non-empty by construction because a leg does not begin without one. All navigation is set in the Tesla itself; the platform never sets a destination and never invents one. THE NAME, NOT THE ADDRESS: `destinationAddress` is owner-only and is deliberately absent from every trip surface — a participant learns where the car is going, not the street it is going to. P1, same tier as its source field: redact it in logs and keep it inside the trip's party.",
+          "x-classification": "P1",
+          "examples": [
+            "Grand Canyon Village"
+          ]
+        },
+        "etaMinutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "x-unit": "minutes",
+          "description": "MINUTES UNTIL ARRIVAL as the CAR ITSELF reports them (VehicleState.etaMinutes, Tesla `minutesToArrival`, whole minutes, persisted verbatim). There is no server-side route solver, so a car with no live ETA reading yields NULL and the client renders the leg without one — never a computed guess, never a zero standing in for 'unknown'. NULL IS EXPECTED and is not an error: it happens whenever the reading is missing or has gone stale. A DURATION, NOT AN INSTANT, and that is a deliberate divergence from LiveActivityContentState.eta, which carries an absolute unix instant because a lock screen the server cannot repaint would let a duration decay silently. This value is read fresh on every GET, so the decay window is the length of one screen refresh; a client that CACHES a trip row MUST NOT keep counting down from it.",
+          "x-classification": "P0",
+          "examples": [
+            42
+          ]
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When this leg began, RFC 3339 in UTC — the instant the car was first seen driving with this destination. Used for 'driving for 2h 15m' copy and to order legs within a day. Always present: a leg that has not started is not a current leg, it is null on the trip row.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-07T14:32:00Z"
+          ]
+        }
+      }
+    },
+    "Trip": {
+      "title": "Trip",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "vehicleId",
+        "name",
+        "startsAt",
+        "endsAt",
+        "endedAt",
+        "status",
+        "createdAt",
+        "role",
+        "ownerFirstName",
+        "vehicle",
+        "participants",
+        "driveCount"
+      ],
+      "description": "ONE TRIP — an owner-defined window on ONE vehicle during which the participants they chose see the car's live location, its navigation, a Live Activity per driving leg, and the drives recorded inside the window (MYR-602, rest-api.md, contracts v0.41.0). Returned by POST /api/vehicles/{vehicleId}/trips, GET /api/trips (inside TripListResponse.items), GET /api/trips/{tripId}, PATCH /api/trips/{tripId} and POST /api/trips/{tripId}/end — ONE SHAPE ON EVERY SURFACE, so a client decodes one type and adopts every answer, including the echo a mutation returns.\n\nTHE WINDOW RULES, in one place, because every other rule on this surface derives from them. (1) `endsAt` MUST be strictly greater than `startsAt` — a zero-length trip is 400 `invalid_request`, never a silently-corrected instant. (2) The window MUST NOT exceed 30 DAYS end to end; a longer one is refused rather than clamped, because a clamped window is a person believing they shared their car for six weeks when the server agreed to four. (3) A WINDOW MAY START IN THE PAST, and that is a designed capability rather than a tolerated edge: the feature was asked for mid-road-trip, so a window opened on Tuesday for a drive that began on Sunday must pick up the legs already driven — which it does, because trip drives are selected by the window and not tagged at drive time (see `driveCount`). A window that starts in the past is `active` (or `ended`) the moment it is created and its `trip_started` push goes out with the `trip_added` one. (4) THE EFFECTIVE END IS `min(endsAt, endedAt)`: an owner may end a trip early, and the earlier of the two instants closes the window for live access, for the drive selection and for `status` alike. Consumers computing anything from the window MUST take that minimum.\n\nTHE THREE NON-OWNER ROLES (client decision, MYR-602, and it CHANGES WHAT A PLAIN SHARE RECEIVES). The rule the platform now holds to is one sentence: A NON-OWNER SEES THE CAR'S LIVE LOCATION ONLY DURING AN ACTIVE RIDE OR AN ACTIVE TRIP. That produces three non-owner roles, each a superset of the one before it, and the STRONGEST APPLICABLE ROLE WINS for a given (person, vehicle, instant). `viewer` — an accepted share and nothing else (MYR-184): the catalog and status fields, and NEITHER the LOCATION GROUP (`latitude`, `longitude`, `heading`, `speed`, `locationName`, `locationAddress`) NOR the NAVIGATION GROUP (`destinationName`, `destinationAddress`, the destination and origin coordinates, `etaMinutes`, `tripDistanceRemaining`, `navRouteCoordinates`). A share says WHICH CAR and WHETHER IT IS AVAILABLE; it no longer says WHERE IT IS. `ride_member` — a party to an ACCEPTED, LIVE ride on that vehicle (MYR-540): viewer PLUS the location group PLUS the navigation group, for the life of that ride. `trip_participant` — a non-left participant of an ACTIVE trip on that vehicle: IDENTICAL TO `ride_member`, field for field, deliberately — one field set for 'you may watch this car right now', reached by two different doors, so a client renders one live screen and the server maintains one allow-list. THESE THREE ARE THE SERVER-SIDE MASK MODEL AND ARE NOT WIRE VALUES: `VehicleSummary.role` remains exactly `owner | viewer` and is NOT widened by v0.41.0, because installed builds switch on it and a third member would change what an un-updated client does with a row it already understands. A client learns it holds the stronger access from the FACTS IT ALREADY HAS — an accepted live ride it is party to, or a non-null `VehicleSummary.activeTripId` — never from a new role member. THIS SUPERSEDES MYR-435 for the nav group: that decision kept navigation visible to plain viewers, and MYR-602 withdraws it along with position. It is a NARROWING of what an existing accepted share receives, and the only narrowing in v0.41.0.\n\nHOW THE NARROWING REACHES THE WIRE, because six of those fields are in VehicleState's `required` set and a mask CANNOT simply drop them without minting a frame this package would call invalid. For a plain `viewer` the projection emits each one's DOCUMENTED NO-VALUE SENTINEL rather than omitting the key: `latitude`/`longitude` as `0,0` (the '0,0 = no fix' convention already in vehicle-state.schema.json §2.3, which every consumer is already required to read as 'no position available'), `locationName`/`locationAddress` as `''` (the existing 'no geocode yet' convention), and `speed`/`heading` as `0`. The navigation fields are all nullable and are simply null, which the `navigation` atomic group's own predicate already defines as 'no active navigation'. ONE HONEST CONSEQUENCE A CLIENT MUST HANDLE: `speed: 0` and `heading: 0` are REAL readings for a stopped car pointing north, so those two are indistinguishable from withheld, and a consumer MUST decide what to draw from THE ROLE IT HOLDS — its VehicleSummary.role, whether it is party to a live ride, and whether it holds an active trip (VehicleSummary.activeTripId) — never by sniffing the values. Truly omitting the keys would relax VehicleState's `required` set, which is major-bump territory and is deliberately not done here.\n\nWHAT A TRIP ADDS OVER AN ACCEPTED SHARE, then, is FIVE THINGS. (1) LIVE LOCATION AND NAVIGATION for the window's duration — the `trip_participant` role above, which a plain share no longer carries. (2) THE WINDOW'S DRIVES: history is OWNER-ONLY for an ordinary viewer since MYR-369 — refused on the drives list, the drive detail and the route — and a trip participant IS ADMITTED to all three for drives that fall inside their window, with full detail and the route map. (3) THE PER-LEG LIVE ACTIVITY on their lock screen, started by the server when the car sets off (see RegisterTripActivityRequest). (4) THE FIVE `trips` PUSHES, which say a trip began, ended, and that the car set off for somewhere and got there — nothing on a share is push-driven. (5) THE TRIP ITSELF AS AN OBJECT: a named window with a participant list, a card, a drive count and a start and an end, which is what turns 'I can see Nabil's car' into 'I am on Nabil's road trip'.\n\nACCESS IS PURELY WINDOW-BASED, AT ALL TIMES INSIDE THE WINDOW (client clarification, Thomas). For as long as the trip is `active` a participant sees the car's live location and telemetry CONTINUOUSLY — parked at a motel overnight, driving with a destination set, driving with no destination set, charging, idling: all of it, with no further condition. THE LEG IS NOT A GATE. `currentLeg` and the per-leg Live Activity are INFORMATIONAL — they say 'the car is on its way to somewhere right now' and they drive the two leg pushes — and they NEVER decide visibility. A consumer MUST NOT gate its live screen, its map, or its socket subscription on `currentLeg` being present: a card that goes dark when the car parks would break the feature exactly where a road trip spends most of its hours.\n\nTHE WINDOW IS WHAT GATES THE ROLE. Outside it the caller falls back to whatever they hold on the car independently — ordinarily `viewer`, and NO ACCESS AT ALL if the share was revoked — and the socket revalidator re-evaluates at both edges of the window exactly as it does on a revoked share, mid-connection rather than at the next reconnect. THIS REPO CARRIES NO ROLE/MASK TABLE OF ITS OWN: the authoritative one lives in the telemetry repo's `docs/contracts/rest-api.md` §5 and `docs/contracts/data-classification.md`, where all three non-owner roles are documented alongside `owner`; this paragraph is the contracts-side pointer to it. THE MASK IS THE ENFORCEMENT, never this description.\n\nPUSH: the trips category. Five events reach a trip's party — `trip_added` (you were added, on create and on a PATCH that adds you), `trip_started` (the window opened), `trip_ended` (it closed, whether by clock or by the owner ending early), `trip_leg_started` (the car set off for somewhere) and `trip_leg_arrived` (it got there). Payload data is `{tripId, vehicleId, event, destinationName?}` — `destinationName` only on the two leg events — and the deep link is `myrobotaxi://trips/{tripId}` for all five. ALL FIVE ARE `transactional: false`: they are informational, they are gated by the recipient's `trips` preference (default ON) exactly like every other category, and none of them is a ride the person must answer. See the pointer under CreateTripRequest for where the preference itself is documented.\n\nTRIP DRIVES REUSE `drives-list.schema.json` AND MINT NO NEW TYPE: GET /api/trips/{tripId}/drives returns the same `DrivesListResponse` envelope of `DriveSummary` rows that §7.2 returns, cursor-paginated the same way and newest first, and a trip participant may open a drive's detail and its route (drive-detail.schema.json, drive-route.schema.json) for drives inside their window. A client REUSES its drive list, its detail screen and its route map unchanged — that reuse is the reason no trip-shaped drive type exists, and a future one would be a contract regression, not a feature.\n\nDELIVERY: REST-READ-TIME ONLY. No `vehicle_update` frame ever carries a Trip, no field on this shape is pushed as a delta, and `status`, `currentLeg` and `driveCount` are all computed at read time — so a trip card refreshes on the next GET, on a push-triggered refresh, or when the client re-enters the screen. What DOES move continuously is the car: the socket carries its position and navigation to a participant for as long as the window is open.\n\nCLASSIFICATION: `name` is P1 and encrypted at rest (user content, exactly like a ride's label); `ownerFirstName` and `participants[].name` are P1 because they name people, and `vehicle.vinLast4` and `currentLeg.destinationName` are P1 as their source fields already are. EVERYTHING ELSE ON THIS SHAPE IS P0 — identifiers, instants, an enum and a count.",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "The trip's cuid. Opaque — consumers MUST NOT parse it. It is the path segment on every /api/trips/{tripId} route, the `tripId` in the trips push payload, the target of the `myrobotaxi://trips/{tripId}` deep link, and the key a client stores a registered push-to-start token under (see RegisterTripActivityRequest).",
+          "x-classification": "P0",
+          "examples": [
+            "cltrp1234567890abcdef"
+          ]
+        },
+        "vehicleId": {
+          "type": "string",
+          "description": "The vehicle this trip is about — the same cuid as the embedded `vehicle.vehicleId`, carried at the top level as well so a client can key its live-state store without descending into the descriptor. Two facts on the wire twice is a risk this shape accepts knowingly: they are minted from one row and cannot disagree.",
+          "x-classification": "P0",
+          "examples": [
+            "clxyz1234567890abcdef"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "THE OWNER'S NAME FOR THE TRIP — 'DFW to LA', 'Spring break', 'Dad's move'. USER CONTENT: P1 and ENCRYPTED AT REST with the same label encryptor that protects ride labels, so it is never readable in the database, never logged in full, and never placed in a URL, a query string or a push title's telemetry. 1 to 60 characters AFTER TRIMMING, enforced server-side on create and on rename; a whitespace-only name is empty and is refused (400 `invalid_request`), never stored as blanks. Free-form and never resolved to anything: it is a label the owner and their participants both read, not an identifier and not a place.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "examples": [
+            "DFW to LA"
+          ]
+        },
+        "startsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "WHEN THE WINDOW OPENS, RFC 3339 in UTC. MAY BE IN THE PAST — see the window rules on this shape: that is how a road trip already underway sweeps up the legs it has already driven. Fixed at creation: there is no `startsAt` on UpdateTripRequest, deliberately, because moving the start of a window would silently change WHICH DRIVES the participants can see, both forwards and backwards, and an edit that reaches into history is not an edit anybody expects. An owner who wants a different start ends this trip and creates another.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-06T15:00:00Z"
+          ]
+        },
+        "endsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "WHEN THE WINDOW IS SCHEDULED TO CLOSE, RFC 3339 in UTC. Strictly after `startsAt`, and at most 30 days after it. EDITABLE via UpdateTripRequest.endsAt: an owner may EXTEND it (still within the 30-day cap measured from `startsAt`) or SHORTEN it to any instant at or after NOW — never to an instant already past, which would retroactively un-share drives a participant has already been shown. NOT NECESSARILY THE END OF THE TRIP: if the owner ends the trip early, `endedAt` is earlier and IT decides. Always read the pair, never this field alone.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-13T15:00:00Z"
+          ]
+        },
+        "endedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time",
+          "description": "WHEN THE OWNER ENDED THE TRIP EARLY, RFC 3339 in UTC, or NULL when they did not — which is the ordinary state for every scheduled and active trip and for every trip that simply ran out its clock. Set by POST /api/trips/{tripId}/end (idempotent: ending an ended trip is a 200 carrying the instant already recorded, not an error). ITS ONLY JOB IS THE EFFECTIVE END, `min(endsAt, endedAt)`: live access stops there, the drive window closes there, and `status` reads `ended` from there. NULL IS NOT 'still running' on its own — a trip whose `endsAt` has passed is over with `endedAt` null — so a consumer MUST compute the minimum rather than test this field for presence. The key is ALWAYS present; null is the value, never an absent key.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-11T02:14:00Z"
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/TripStatus",
+          "description": "Where the trip sits relative to its window RIGHT NOW, computed at read time. The server sends the enum and never prose: all copy is the client's, so wording changes in an app update without a server deploy."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the trip row was created, RFC 3339 in UTC. NOT `startsAt` and not a substitute for it — a trip created on Tuesday for a window that opened on Sunday has a `createdAt` after its `startsAt`, which is legal and common. For ordering a list of trips created in one sitting, and for support questions; never for the window.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-06T14:58:12Z"
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/TripRole",
+          "description": "What the CALLER holds on this trip. The one field that decides which card a client draws — an owner's card offers rename, extend, add people and End trip; a participant's offers Leave trip. Every one of those is independently authorized server-side."
+        },
+        "ownerFirstName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "THE TRIP OWNER'S DISPLAY FIRST NAME — whose car and whose trip this is ('Nabil's road trip'). Resolved by the platform's THREE-SOURCE NAME LADDER walked server-side, IDENTICALLY to VehicleSummary.ownerFirstName: (1) the Prisma web account's `User.name`, which MYR-581's mandatory `PATCH /api/users/me` prompt writes; (2) failing that, the Apple-consent identity captured at Sign in with Apple; (3) failing that, the Go-native user row. The first rung that yields a name wins and the result is REDUCED TO ITS FIRST TOKEN before emission — 'Alex Rivera' emits 'Alex'. FIRST NAMES ONLY per the P1 policy (MYR-229): no surname, no email, no phone, no user id. ABSENT-OR-NULL MEANS THE OWNER HAS NO CONFIRMED NAME (MYR-583) — the ladder came back empty, or a resolvable name exists that nobody has confirmed through the prompt — and it means NOTHING ELSE: never a fetch failure, never a privacy suppression. CONSUMERS MUST NOT FABRICATE ONE: no 'Owner', no 'A friend', no initial from an email, and never the car's nickname (the sibling `vehicle.name` identifies a car, not a person). A trip card with no owner name says 'Shared trip' or falls back to the vehicle descriptor. EMITTED UNDER BOTH ROLES, owner rows included, because the list is one shape and a client renders one template. The key is ALWAYS present; null is the value. P1: redact in logs, never in a URL.",
+          "x-classification": "P1",
+          "examples": [
+            "Nabil"
+          ]
+        },
+        "vehicle": {
+          "$ref": "#/$defs/TripVehicle",
+          "description": "THE CAR THE TRIP IS ON, as the catalog subset — see TripVehicle. Carried inline on every trip row so a participant's trip card renders without a second call, which matters because a trip-only participant may hold no other row for this vehicle at all. STATIC FOR THE LIFE OF THE TRIP and deliberately carries NOTHING LIVE: no position, no charge, no status. The live state arrives on the socket while the window is open, under the mask the caller's role resolves to."
+        },
+        "participants": {
+          "type": "array",
+          "description": "EVERYBODY ON THE TRIP EXCEPT THE OWNER, in server-defined order (currently by the instant they were added). Visible in full to owner and participants alike — see TripParticipant. MAY BE EMPTY: a trip created with no participants is legal (an owner may set the window up first and add people after), and an empty array is not an error and not a permission answer. Refreshed at read time, so a person removed by the owner, a person who left, and a person whose share was revoked have all simply gone from the array on the next GET.",
+          "items": {
+            "$ref": "#/$defs/TripParticipant"
+          },
+          "x-classification": "P1"
+        },
+        "driveCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "HOW MANY DRIVES FALL INSIDE THE WINDOW as of this read — the count behind 'Trip ended · 14 drives'. SELECTED BY THE WINDOW, NOT TAGGED AT DRIVE TIME: it counts the vehicle's drives whose start instant lies within [`startsAt`, the effective end], which is what makes a back-dated window pick up legs already driven with no write at drive time and no backfill job. IT THEREFORE MOVES ON ITS OWN — up as an active trip's car keeps driving, and DOWN if the owner shortens the window or ends the trip early — so a client MUST re-read it rather than incrementing its own copy from a `drive_ended` frame. It is a COUNT, not a page: the drives themselves come from GET /api/trips/{tripId}/drives as an ordinary cursor-paginated `DrivesListResponse` (drives-list.schema.json). 0 is a real answer and the common one for a scheduled trip.",
+          "x-classification": "P0",
+          "examples": [
+            14
+          ]
+        },
+        "currentLeg": {
+          "$ref": "#/$defs/TripCurrentLeg",
+          "description": "THE DRIVING LEG UNDERWAY RIGHT NOW, or ABSENT when there is none — see TripCurrentLeg. Present only while `status` is `active` AND the car is driving with a destination set. INFORMATIONAL, NEVER A GATE: access is purely window-based, so a consumer MUST NOT gate its live screen, its map or its socket subscription on this being present. An active trip with no leg is the ordinary overnight state, and a card that goes dark when the car parks breaks the feature exactly where a road trip spends most of its hours."
+        }
+      }
+    },
+    "CreateTripRequest": {
+      "title": "CreateTripRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "vehicleId",
+        "name",
+        "startsAt",
+        "endsAt",
+        "participantIds"
+      ],
+      "description": "Request body for POST /api/vehicles/{vehicleId}/trips — the owner opening a window on their own car (MYR-602). OWNER-ONLY: a viewer, however high their share tier, is refused 403 `vehicle_not_owned`; a driver-linked car counts as owned, because a driver-linked row IS an owner row on this platform. THE WINDOW RULES ARE ENFORCED HERE AND REFUSED, NEVER CORRECTED: `endsAt` <= `startsAt` and a span over 30 days are both 400 `invalid_request`, and a window that starts in the past is ACCEPTED by design (see Trip). A second scheduled-or-active trip whose window OVERLAPS an existing one on the same vehicle is 409 `trip_overlaps` — one car, one live window, because two overlapping windows would give two different participant sets standing access to the same car with no way for the owner to see which grant a person's live view came from. Every id in `participantIds` MUST be an ACCEPTED share grant of THIS vehicle; anything else is 400 `participant_not_shared`, which is also the answer for a grant on a different car and for one that was revoked — the endpoint is not an oracle for other people's share ids. ON SUCCESS the 201 body is the full `Trip`, `trip_added` goes out to every participant, and if `startsAt` <= now the trip is `active` immediately and `trip_started` goes out with it.\n\nPUSH PREFERENCES: the five trips events are gated by a new `trips` category, DEFAULT ON, alongside `rideLifecycle`, `driveStarted`, `driveCompleted`, `chargingComplete` and `viewerJoined`. THE PREFERENCE SHAPE IS NOT MODELLED IN THIS PACKAGE — `GET`/`PUT /api/users/me/push-prefs` is documented in the telemetry repo's `docs/contracts/rest-api.md` §7.19 and has never been vendored here as a schema — so the `trips` key is added there, not in `schemas/`, and this paragraph is the contracts-side pointer to it. The §7.19 rules apply unchanged: ALL keys always present on the read, the PUT is PARTIAL (an omitted key means LEAVE ALONE), an account with no stored row reads as every category true, and a preference is a SILENCE and never an authorization — switching `trips` off stops the phone ringing and changes nothing about what the account may read.",
+      "properties": {
+        "vehicleId": {
+          "type": "string",
+          "description": "The vehicle to open the window on. REDUNDANT WITH THE PATH SEGMENT and required anyway: a body that names a different vehicle than the path is 400 `invalid_request`, never silently resolved in favour of one of them, so a client that builds a URL and a body from two different places fails loudly instead of opening a window on the wrong car.",
+          "x-classification": "P0",
+          "examples": [
+            "clxyz1234567890abcdef"
+          ]
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "The owner's name for the trip — see Trip.name for the storage and classification rules. 1 to 60 characters AFTER TRIMMING: the server trims before measuring, so a padded string is not a way past the minimum, and a whitespace-only name is 400 `invalid_request`. Clients SHOULD mirror the trim-then-measure rule in the create sheet so the refusal is a disabled button rather than a round trip.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "examples": [
+            "DFW to LA"
+          ]
+        },
+        "startsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the window opens, RFC 3339 in UTC. MAY BE IN THE PAST — the designed capability, not a tolerated edge (see Trip). A client's date-and-time picker MUST NOT floor this to 'now'. Clients SHOULD send a true UTC instant rather than a local wall time with no offset; the server reads the offset it is given and does not guess a timezone.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-06T15:00:00Z"
+          ]
+        },
+        "endsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When the window is scheduled to close, RFC 3339 in UTC. Strictly after `startsAt` and at most 30 days after it; both bounds are REFUSED rather than clamped (400 `invalid_request`).",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-13T15:00:00Z"
+          ]
+        },
+        "participantIds": {
+          "type": "array",
+          "description": "The SHARE GRANT IDS of the people to add — ShareInvite.inviteId values for ACCEPTED grants on this vehicle, the same identifier TripParticipant.participantId carries back. MAY BE EMPTY (`[]`) and the key is REQUIRED: an owner may open the window first and add people after, but they say so explicitly rather than by omission, so a client that forgot to serialise the picker's selection is a decode error and not a silently people-less trip. Duplicates are collapsed. Every id must be an accepted grant of THIS vehicle — otherwise 400 `participant_not_shared`, which is also the answer for a revoked or foreign grant.",
+          "items": {
+            "type": "string",
+            "description": "One accepted share grant's id.",
+            "x-classification": "P0"
+          },
+          "x-classification": "P0",
+          "examples": [
+            [
+              "clsha1234567890abcdef",
+              "clshb1234567890abcdef"
+            ]
+          ]
+        }
+      }
+    },
+    "UpdateTripRequest": {
+      "title": "UpdateTripRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "description": "Request body for PATCH /api/trips/{tripId} — the owner editing a trip in place (MYR-602). OWNER-ONLY; a participant is answered 404 `not_found`, never 403, so the endpoint cannot be used to probe for trip ids. PARTIAL BY DESIGN: every property is optional and only the properties PRESENT are written, so an absent `name` leaves the name alone and is NOT the same as sending an empty one. At least one property is required (`minProperties: 1`) — an empty body is 400 `invalid_request` rather than a no-op, so a client bug cannot look like a successful edit. THE START IS NOT EDITABLE and there is deliberately no `startsAt` here: moving it would change which drives the participants can already see, in both directions (see Trip.startsAt). The 200 response is the updated `Trip`, and CLIENTS MUST ADOPT THAT ECHO rather than their own optimistic values — the same rule the push-prefs PUT states — because the echo carries the recomputed `status`, `driveCount` and participant list, any of which a concurrent change may have moved. Adding a participant emits `trip_added` to them; REMOVING one revokes their live access IMMEDIATELY — the socket revalidator kicks them exactly as a revoked share does, mid-frame, rather than at the end of the window.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Rename the trip. Same 1-to-60-after-trim rule and same P1 encrypted-at-rest storage as Trip.name. Omit to leave it unchanged; a whitespace-only value is 400 `invalid_request`, never a way to clear the name — a trip always has one.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "examples": [
+            "DFW to LA and back"
+          ]
+        },
+        "endsAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Move the scheduled close. MAY EXTEND, still within the 30-day cap MEASURED FROM `startsAt` (not from now — an owner cannot walk a window forward indefinitely by extending it a day at a time), and MAY SHORTEN to any instant at or after NOW. An instant already past is 400 `invalid_request`: shortening into history would retroactively un-share drives a participant has already been shown, which is a promise this surface will not break. Shortening to an instant at or after now is legal and CLOSES THE WINDOW at that moment — including immediately, which is a shorter road to the same place as POST /end. Omit to leave it unchanged.",
+          "x-classification": "P0",
+          "examples": [
+            "2026-09-15T15:00:00Z"
+          ]
+        },
+        "addParticipantIds": {
+          "type": "array",
+          "description": "Share grant ids to ADD — the same accepted-grant ids CreateTripRequest.participantIds takes, with the same 400 `participant_not_shared` refusal for anything that is not an accepted grant on THIS vehicle. Adding somebody already on the trip is a no-op, not an error, and does NOT re-send `trip_added`. Legal while the trip is `scheduled` or `active`; adding to an `ended` trip is 409 `conflict` — there is no live access left to grant. Omit to change nothing.",
+          "items": {
+            "type": "string",
+            "description": "One accepted share grant's id.",
+            "x-classification": "P0"
+          },
+          "x-classification": "P0",
+          "examples": [
+            [
+              "clshc1234567890abcdef"
+            ]
+          ]
+        },
+        "removeParticipantIds": {
+          "type": "array",
+          "description": "Share grant ids to REMOVE. TAKES EFFECT IMMEDIATELY, not at the end of the window: the removed person's live access is revoked, the socket revalidator kicks their connection, and any leg Live Activity they hold is ended. Removing somebody who is not on the trip is a no-op, not an error — the endpoint is not an oracle for who is. Applied AFTER `addParticipantIds` when both are present, so an id in both lists ends up removed; a client should not send both for one person, but the order is defined rather than left to chance. Omit to change nothing.",
+          "items": {
+            "type": "string",
+            "description": "One accepted share grant's id.",
+            "x-classification": "P0"
+          },
+          "x-classification": "P0",
+          "examples": [
+            [
+              "clshb1234567890abcdef"
+            ]
+          ]
+        }
+      }
+    },
+    "RegisterTripActivityRequest": {
+      "title": "RegisterTripActivityRequest",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pushToStartToken"
+      ],
+      "description": "Request body for POST /api/trips/{tripId}/activity-start-token — a client handing the server the ActivityKit PUSH-TO-START token for this trip (MYR-602). WHY PUSH-TO-START AND NOT THE RIDE'S PER-ACTIVITY REGISTRATION: a trip's Live Activity begins when the CAR sets off, which is an event the app learns about while it is in the background or not running at all, and an app cannot start an Activity from there. ActivityKit's push-to-start token (iOS 17.2+, `Activity<Attributes>.pushToStartTokenUpdates`) is minted per ACTIVITY TYPE per DEVICE, ahead of any activity, and lets the server START one with an APNs `event: start` push carrying the attributes and the first content state. The ride surface needs none of this because a rider is holding the phone when they book. THE TWO REGISTRATIONS COEXIST AND ARE BOTH REQUIRED: this token starts the leg's Activity, and once started the Activity mints its OWN update token which the client registers through the existing per-activity path (live-activity.schema.json RegisterLiveActivityRequest) so the server can update and end it. A client that registers only one of the two gets either an Activity that never starts or one that never moves.\n\nPER USER PER TRIP, and the OWNER REGISTERS TOO — the owner is included in the leg Activity, so 'owner' is not an exception here the way it is on the ride surface (§7.21 answers 403 to an owner). IDEMPOTENT AND UPSERTING on (trip, user): ActivityKit ROTATES this token, so a re-post REPLACES the stored value rather than accumulating rows. `DELETE /api/trips/{tripId}/activity-start-token` withdraws it (a participant leaving, or a person turning the card off). A caller who is neither the owner nor a participant of the trip receives 404, never 403.",
+      "properties": {
+        "pushToStartToken": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "The ActivityKit push-to-start token for the trip Activity type on this device. P1 — A CAPABILITY: whoever holds it, together with the team's APNs signing key, can START a Live Activity on that phone. NEVER log it in full (an 8-character prefix at most), never echo it in a response, and never place it in an error message — exactly the handling RegisterLiveActivityRequest.activityToken already requires. The maxLength is a generous sanity bound rather than a format assertion: rejecting a valid future shape would silently break the feature for every device on that iOS release.",
+          "x-classification": "P1",
+          "examples": [
+            "8a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f"
+          ]
+        },
+        "sandbox": {
+          "type": "boolean",
+          "description": "Whether the token was minted by a development or TestFlight build, selecting the APNs sandbox gateway. OPTIONAL on the wire and defaults to false (production). Carried per-registration rather than read from the device registry for the same reason the ride surface carries it: starting a Live Activity requires no notification prompt, so a person who declined notifications may have no device row at all — and pushing a start to the wrong gateway is rejected as BadDeviceToken with nothing on the lock screen to show for it.",
+          "x-classification": "P0",
+          "examples": [
+            true
+          ]
+        }
+      }
+    }
+  }
+}

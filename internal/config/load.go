@@ -53,6 +53,7 @@ type fileConfig struct {
 	// telemetryInactivitySuspensionEnabled is the MYR-592 owner-inactivity
 	// telemetry-suspension kill-switch (TELEMETRY_INACTIVITY_SUSPENSION_ENABLED).
 	telemetryInactivitySuspensionEnabled bool
+	tripsEnabled                         bool
 
 	// MYR-320 periodic in-service re-poll knobs (SERVICE_REPOLL_ENABLED /
 	// SERVICE_REPOLL_INTERVAL). See load_service_repoll.go.
@@ -421,5 +422,6 @@ func buildConfig(fc *fileConfig) *Config {
 		arrivalFlashEnabled:        fc.arrivalFlashEnabled,
 
 		telemetryInactivitySuspensionEnabled: fc.telemetryInactivitySuspensionEnabled,
+		tripsEnabled:                         fc.tripsEnabled,
 	}
 }

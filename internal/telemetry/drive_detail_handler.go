@@ -20,6 +20,11 @@ import (
 // routePoints) per rest-api.md §7.3 / §5.2.3. Mirrors DriveRouteHandler's
 // auth/ownership/mask flow.
 type DriveDetailHandler struct {
+	// trips is the MYR-602 window gate. OPTIONAL and nil by default, which
+	// leaves this endpoint owner-only exactly as MYR-369 left it — the
+	// fail-closed direction for a deployment that has not wired trips.
+	trips TripDriveAdmitter
+
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveDetailFetcher
@@ -42,6 +47,18 @@ type DriveDetailOption func(*DriveDetailHandler)
 // handler. Owners and viewers share the DriveDetail allow-list per
 // rest-api.md §5.2.3, so this is plumbed for FR-5.1 sharing readiness —
 // the mask is a no-op for both roles today.
+// WithDriveDetailTripAdmitter opens §7.3 to a TRIP PARTICIPANT (MYR-602) for
+// drives inside a window they were part of. See WithDrivesTripAdmitter for why
+// a trip is a seam the drives surfaces may have and a share is not.
+//
+// Inert unless the composition root passes it; the handler stays owner-only
+// without it.
+func WithDriveDetailTripAdmitter(trips TripDriveAdmitter) DriveDetailOption {
+	return func(h *DriveDetailHandler) {
+		h.trips = trips
+	}
+}
+
 func WithDriveDetailRoleResolver(roles roleResolver) DriveDetailOption {
 	return func(h *DriveDetailHandler) {
 		h.roles = roles
@@ -125,7 +142,7 @@ func (h *DriveDetailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, userID) {
+	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
 		return
 	}
 
@@ -138,7 +155,7 @@ func (h *DriveDetailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // true on success; on failure writes an HTTP error and returns false.
 // A drive that points at a missing vehicle is a data-integrity fault
 // (500), distinct from an ownership mismatch (403, vehicle_not_owned).
-func (h *DriveDetailHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, driveID, vehicleID, userID string) bool {
+func (h *DriveDetailHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, driveID, vehicleID, startTime, userID string) bool {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
@@ -176,8 +193,31 @@ func (h *DriveDetailHandler) verifyOwnership(ctx context.Context, w http.Respons
 	// one-argument change rather than a re-derivation.
 	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
 		if errors.Is(err, errNoVehicleAccess) {
-			denyVehicleAccess(w, h.logger, "drive detail", vehicleID, userID)
-			return false
+			// MYR-602 ADDS EXACTLY ONE WAY PAST THAT DENIAL, and it is not a
+			// share: a trip window this caller was a participant of, covering
+			// the instant THIS drive began.
+			//
+			// THE TWO REFUSALS ARE DIFFERENT ANSWERS TO DIFFERENT QUESTIONS.
+			// A caller with no trip window at all is asking "may I read this
+			// car's history", and the answer stays 403 — the pre-MYR-602
+			// behaviour, unchanged. A caller who IS a participant and asked
+			// for a drive outside their window gets 404: the window is the
+			// entire extent of what they were told about this car, and a 403
+			// would confirm it made a journey on a day they were not part of.
+			admission := resolveTripDriveAdmission(ctx, h.trips, h.logger, "drive detail", userID, vehicleID)
+			if !admission.participant() {
+				denyVehicleAccess(w, h.logger, "drive detail", vehicleID, userID)
+				return false
+			}
+			startedAt, parsed := parseDriveStartTime(startTime)
+			if !parsed || !admission.covers(startedAt) {
+				// An unparseable startTime is admitted to NOBODY through a
+				// trip: the window test cannot be evaluated, and the safe
+				// answer for an unevaluable access check is denial.
+				denyDriveOutsideTripWindow(w, h.logger, "drive detail", driveID, userID)
+				return false
+			}
+			return true
 		}
 		h.logger.Error("drive detail: access resolution failed",
 			slog.String("vehicle_id", vehicleID),

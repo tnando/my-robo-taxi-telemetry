@@ -18,9 +18,12 @@ package store
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // DriveSummaryRow is the slim catalog shape returned by
@@ -142,7 +145,20 @@ func (r *DriveRepo) ListByVehicleID(ctx context.Context, vehicleID string, curso
 // plain strings it always did. The wire shape of
 // GET /api/vehicles/{id}/drives is unchanged; what changed is that this
 // path now needs a key, exactly as GetByID already did for the trail.
+// MYR-602 made the BODY a free function. The trips surface lists the same
+// projection over the same columns for a different window (§7.30.7), and a
+// second scanner would have been a second place to get the fail-soft label
+// rules right — which is how one of them ends up returning ciphertext to a
+// user. The method survives as the one-line delegation so every existing call
+// site is untouched.
 func (r *DriveRepo) scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error) {
+	return scanDriveSummary(row, r.encryptor, r.logger, r.metrics)
+}
+
+// scanDriveSummary is the shared implementation. `enc` may be nil, which leaves
+// the four labels empty — the pre-MYR-447 shape, and the only honest answer
+// from a repository with no key.
+func scanDriveSummary(row rowScanner, enc cryptox.Encryptor, logger *slog.Logger, metrics Metrics) (DriveSummaryRow, error) {
 	var d DriveSummaryRow
 	var startLocEnc, startAddrEnc, endLocEnc, endAddrEnc *string
 	if err := row.Scan(
@@ -167,11 +183,11 @@ func (r *DriveRepo) scanDriveSummaryRow(row rowScanner) (DriveSummaryRow, error)
 	); err != nil {
 		return DriveSummaryRow{}, fmt.Errorf("scan drive summary: %w", err)
 	}
-	if r.encryptor != nil {
-		d.StartLocation = r.openDriveLabel(startLocEnc, "startLocationEnc")
-		d.StartAddress = r.openDriveLabel(startAddrEnc, "startAddressEnc")
-		d.EndLocation = r.openDriveLabel(endLocEnc, "endLocationEnc")
-		d.EndAddress = r.openDriveLabel(endAddrEnc, "endAddressEnc")
+	if enc != nil {
+		d.StartLocation = encStringToLabel(startLocEnc, enc, logger, metrics, "startLocationEnc")
+		d.StartAddress = encStringToLabel(startAddrEnc, enc, logger, metrics, "startAddressEnc")
+		d.EndLocation = encStringToLabel(endLocEnc, enc, logger, metrics, "endLocationEnc")
+		d.EndAddress = encStringToLabel(endAddrEnc, enc, logger, metrics, "endAddressEnc")
 	}
 	return d, nil
 }

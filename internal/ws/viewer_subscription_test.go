@@ -77,13 +77,35 @@ func TestHub_ViewerReceivesSharedVehicleUpdates(t *testing.T) {
 		if pl.VehicleID != sharedVehicle {
 			t.Errorf("vehicleId = %q, want %q", pl.VehicleID, sharedVehicle)
 		}
-		// Live location is the product being shared — the floor tier is
-		// literally named "Live location", so a viewer MUST see it.
-		if pl.Fields["speed"] != float64(42) {
-			t.Errorf("the viewer did not receive `speed`: %v", pl.Fields)
-		}
-		if pl.Fields["latitude"] == nil || pl.Fields["longitude"] == nil {
-			t.Errorf("the viewer did not receive live GPS; that is the whole feature: %v", pl.Fields)
+		// MYR-602 REVERSED THIS ASSERTION, on an explicit client decision
+		// (Thomas, 2026-09-05): "you should really only see live location
+		// during an active trip shared with a user" — or an active ride. A
+		// standing share is neither. It is durable and remote, and most of the
+		// time the grantee is at home while the owner drives alone.
+		//
+		// So a plain viewer no longer receives the VALUES. They still receive
+		// the KEYS, carrying the schema's own no-value spellings, because all
+		// three are in vehicle-state.schema.json's `required` array and
+		// dropping them would make the frame undecodable for every installed
+		// client rather than merely narrower (internal/mask/sentinels.go).
+		//
+		// The live map this test was written about now belongs to the two
+		// window-scoped roles: `ride_member` (MYR-540) and `trip_participant`
+		// (MYR-602), which share one field list that is byte-for-byte the
+		// pre-MYR-602 viewer set.
+		for field, want := range map[string]any{
+			"speed":     float64(0),
+			"latitude":  float64(0),
+			"longitude": float64(0),
+		} {
+			got, present := pl.Fields[field]
+			if !present {
+				t.Errorf("%s was dropped from the viewer frame; the schema declares it required: %v", field, pl.Fields)
+				continue
+			}
+			if got != want {
+				t.Errorf("%s = %v, want the no-value sentinel %v for a plain viewer", field, got, want)
+			}
 		}
 		if pl.Fields["licensePlate"] != "8ABC123" {
 			t.Errorf("the viewer did not receive licensePlate: %v", pl.Fields)
