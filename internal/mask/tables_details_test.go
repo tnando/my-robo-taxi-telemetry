@@ -120,7 +120,11 @@ func TestMYR320DetailFieldsSplitOnTheVehiclesList(t *testing.T) {
 // conversation the audit found had never happened.
 func TestVehicleStateRoleListsPartitionOwnerFields(t *testing.T) {
 	owner := For(ResourceVehicleState, auth.RoleOwner)
-	viewer := For(ResourceVehicleState, auth.RoleViewer)
+	// MYR-602: the widest NON-OWNER arm. vehicleStateOwnerOnlyFields means
+	// "no non-owner role sees this", so the partition has to be taken against
+	// the role that sees the most — otherwise the location group would have to
+	// be declared owner-only, which would be false.
+	viewer := For(ResourceVehicleState, auth.RoleTripParticipant)
 
 	ownerOnly := make(map[string]struct{}, len(vehicleStateOwnerOnlyFields))
 	for _, f := range vehicleStateOwnerOnlyFields {
@@ -139,10 +143,12 @@ func TestVehicleStateRoleListsPartitionOwnerFields(t *testing.T) {
 			t.Errorf("%q is in BOTH the viewer allow-list and the owner-only list — "+
 				"the classification is contradictory", field)
 		case !isViewer && !isOwnerOnly:
-			t.Errorf("%q is owner-visible but classified NEITHER viewer-visible nor "+
-				"owner-only. Add it to vehicleStateViewerFields or to "+
-				"vehicleStateOwnerOnlyFields — MYR-435 requires every field to be "+
-				"consciously classified, not defaulted", field)
+			t.Errorf("%q is owner-visible but classified NEITHER non-owner-visible nor "+
+				"owner-only. Add it to vehicleStateViewerFields, to "+
+				"vehicleStateLiveLocationFields, or to vehicleStateOwnerOnlyFields — "+
+				"MYR-435 requires every field to be consciously classified, not "+
+				"defaulted, and MYR-602 gave it a third bucket to be classified into",
+				field)
 		}
 	}
 

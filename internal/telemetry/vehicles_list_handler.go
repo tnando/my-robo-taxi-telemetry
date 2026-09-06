@@ -158,7 +158,10 @@ type VehiclesListHandler struct {
 	// members supplies the MYR-540 group-ride member merge. Nil leaves the
 	// endpoint owner+shared (see vehicles_list_member.go).
 	members RideMemberVehicleLister
-	logger  *slog.Logger
+	// tripVehicles is MYR-602's third non-owner leg. Optional; nil leaves the
+	// endpoint owner+shared+member, which is the fail-closed direction.
+	tripVehicles TripVehicleLister
+	logger       *slog.Logger
 }
 
 // NewVehiclesListHandler creates a handler that serves the
@@ -226,6 +229,13 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	// MYR-540: the vehicles of live group rides the caller JOINED, viewer
 	// rows, deduplicated against the two halves above (vehicles_list_member.go).
 	resp = h.appendMemberRows(ctx, userID, resp)
+	// MYR-602's THIRD non-owner leg, LAST because the dedupe keeps the first
+	// row for a vehicle and a trip membership says strictly less about a car
+	// than an owner row, a share grant or a live ride does. It also STAMPS
+	// `activeTripId` on rows the earlier legs produced — see
+	// vehicles_list_trip.go for why adding rows and annotating rows are two
+	// jobs in one pass.
+	resp = h.appendTripRows(ctx, userID, resp)
 	h.writeJSON(w, http.StatusOK, resp)
 }
 

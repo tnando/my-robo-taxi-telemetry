@@ -40,6 +40,12 @@ type Config struct {
 	ridePrunerEnabled bool
 	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch.
 	autoArrivalEnabled bool
+	// tripsEnabled is the MYR-602 trips kill-switch (TRIPS_ENABLED). It gates
+	// the §7.30 endpoints, the trip sweeper and the leg detector together — a
+	// feature that can be switched off has to be switched off WHOLE, because
+	// leaving the reads alive would show an owner a live trip card whose every
+	// button returns an error.
+	tripsEnabled bool
 	// arrivalFlashEnabled is the MYR-542 arrival light-flash kill-switch.
 	arrivalFlashEnabled bool
 	// telemetryInactivitySuspensionEnabled is the MYR-592 owner-inactivity
@@ -361,6 +367,36 @@ func (c *Config) RidePrunerEnabled() bool { return c.ridePrunerEnabled }
 // needs a way to stop it that does not wait for a deploy. Defaults to true; set
 // AUTO_ARRIVAL_ENABLED=false to disable.
 func (c *Config) AutoArrivalEnabled() bool { return c.autoArrivalEnabled }
+
+// TripsEnabled is the MYR-602 trips kill-switch. When false the trip sweeper
+// and the leg detector are not constructed at all — no ticker, no telemetry
+// subscription, no candidate reads — and the trip endpoints answer 503.
+//
+// WHAT TURNING IT OFF DOES AND DOES NOT DO. It stops the platform ACTING on
+// trips: no window opens or closes, no leg begins, no card is raised. It does
+// NOT revoke access that is already resolved, because access is derived from
+// the trip rows by a query this switch does not reach — a participant inside an
+// open window keeps seeing the car until the window's own end, which is the
+// safe direction for a switch whose purpose is to stop the machinery rather
+// than to punish the people using it.
+//
+// It exists because trips are the second feature in this service that pushes a
+// phone on a TIMER rather than in answer to a tap, and the first that starts a
+// Live Activity nobody asked for at that instant. If the leg detector ever
+// begins firing wrongly in the field — a car whose destination flaps, a
+// telemetry regression — the damage is a lock screen full of cards on somebody
+// else's phone, and the operator needs a way to stop it that does not wait for
+// a deploy. Defaults to true; set TRIPS_ENABLED=false to disable.
+//
+// FALSE MAKES THE §7.30 ENDPOINTS 503, NOT 404: the routes exist and will work
+// again, and a 404 would tell a client to stop asking — a decision some clients
+// cache. Existing trips are not deleted and their windows are not closed; the
+// switch stops the feature being USED, and turning it back on resumes it. The
+// access legs in internal/auth read the trip tables directly and are
+// deliberately NOT gated, for the reason stated above: a kill switch that
+// silently dropped a participant mid-drive would be a data-availability
+// incident dressed as a safety control. To end access, end the trips.
+func (c *Config) TripsEnabled() bool { return c.tripsEnabled }
 
 // ArrivalFlashEnabled is the MYR-542 arrival-greeting kill-switch: three
 // headlight flashes when a ride's car is observed at a waypoint (the

@@ -137,6 +137,38 @@ func seedRemovedVehicleTombstone(t *testing.T, userID, teslaVehicleID, vin strin
 // record that a person linked a car Tesla says they only DRIVE, and (when
 // acknowledged is true) their acknowledgment that the owner approved it.
 // Step 8f takes it with the account.
+// seedTrip installs one MYR-602 window. The name column is NOT NULL and holds
+// ciphertext in production; a fixed literal is fine here because nothing in
+// this test decrypts it — these assertions are about row COUNTS, which is also
+// all the audit row is ever allowed to carry.
+func seedTrip(t *testing.T, tripID, vehicleID, ownerUserID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_trips (id, vehicle_id, owner_user_id, name_enc, starts_at, ends_at)
+		 VALUES ($1, $2, $3, 'ciphertext', NOW() - INTERVAL '1 hour', NOW() + INTERVAL '1 day')`,
+		tripID, vehicleID, ownerUserID); err != nil {
+		t.Fatalf("seed trip: %v", err)
+	}
+}
+
+func seedTripParticipant(t *testing.T, tripID, userID, shareID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_trip_participants (trip_id, user_id, share_id) VALUES ($1, $2, $3)`,
+		tripID, userID, shareID); err != nil {
+		t.Fatalf("seed trip participant: %v", err)
+	}
+}
+
+func seedTripActivityToken(t *testing.T, tripID, userID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token) VALUES ($1, $2, 'pts-token')`,
+		tripID, userID); err != nil {
+		t.Fatalf("seed trip activity token: %v", err)
+	}
+}
+
 func seedDriverAccess(t *testing.T, vehicleID, userID string, acknowledged bool) {
 	t.Helper()
 	var ackAt, version any
@@ -322,6 +354,29 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// (the owner) who never consented to appear in this person's audit
 		// trail. The number says nothing about whose cars they were.
 		"vehicleDriverAccessRowsDeleted": true,
+		// MYR-602, step 8g. FOUR counts, one per relation a person can stand
+		// in to a trip, and all four needed the argument for the same reason
+		// the tombstone count above did: the ROWS they count are not P0 by
+		// shape. go_trips holds a trip NAME, which is P1 user content sealed
+		// at rest; go_trip_activity_tokens holds an APNs push-to-start token,
+		// which is a P1 CAPABILITY. The counts are P0 — "how many windows this
+		// person opened", "how many they were invited into", "how many phones
+		// were registered" — and say nothing about where anybody went, with
+		// whom, or on which device. A name, a fragment of one, or a token
+		// prefix here would be the violation.
+		//
+		// They are four keys and not one because a deletion has to be shown
+		// to have reached both directions: trips this person OWNED (whose
+		// roster, tokens and legs went with them through the FK cascade) and
+		// trips they were merely ON, which are somebody else's and survive.
+		// The fourth is the leg-anchored Live Activity — a different kind of
+		// address from the push-to-start token beside it (one running card
+		// versus a standing permission slip), and a deletion that reached one
+		// and not the other is exactly the state two counts make visible.
+		"tripsDeleted":              true,
+		"tripParticipationsDeleted": true,
+		"tripActivityTokensDeleted": true,
+		"tripLegActivitiesDeleted":  true,
 	}
 	for k, v := range got {
 		if !allowed[k] {
@@ -406,6 +461,18 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 	seedDriverAccess(t, "cveh_drv1", delUserApple, true)
 	seedDriverAccess(t, "cveh_drv2", delUserApple, false)
 	seedDriverAccess(t, "cveh_drv3", delUserOther, true)
+	// MYR-602 step 8g. THREE relations to a trip, seeded so all three can be
+	// told apart: a trip this person OWNS (with a roster row and a
+	// push-to-start token hanging off it), a membership + token they hold on
+	// SOMEBODY ELSE'S trip, and a third party's trip that must survive
+	// untouched.
+	seedTrip(t, "ctrip_mine", "cveh_x", delUserApple)
+	seedTripParticipant(t, "ctrip_mine", delUserOther, "cshare_c")
+	seedTripActivityToken(t, "ctrip_mine", delUserApple)
+	seedTrip(t, "ctrip_theirs", "cveh_z", delUserOther)
+	seedTripParticipant(t, "ctrip_theirs", delUserApple, "cshare_a")
+	seedTripActivityToken(t, "ctrip_theirs", delUserApple)
+	seedTripActivityToken(t, "ctrip_theirs", delUserOther)
 
 	steps := []struct {
 		name    string
@@ -471,6 +538,65 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 				if n := countQuery(t,
 					`SELECT count(*) FROM go_vehicle_driver_access WHERE user_id = $1`, delUserOther); n != 1 {
 					t.Fatalf("another driver's row was deleted (%d left, want 1)", n)
+				}
+			},
+		},
+		{
+			// MYR-602 step 8g, first statement. ONE DELETE FOR FOUR TABLES: the
+			// roster, the push-to-start tokens and the legs cascade off
+			// go_trips(id), which is why the count is 1 (the trip) and not 3
+			// (the trip plus its children).
+			name: "delete trips owned",
+			run:  func() (int, error) { return deleter.DeleteTripsOwned(ctx, delUserApple) },
+			want: 1,
+			survive: func(t *testing.T) {
+				if n := countQuery(t, `SELECT count(*) FROM go_trips WHERE owner_user_id = $1`, delUserOther); n != 1 {
+					t.Fatalf("another owner's trip was deleted (%d left, want 1)", n)
+				}
+				// THE CASCADE IS THE ASSERTION. A roster row or a token left
+				// pointing at a deleted trip would be a dangling row in an
+				// access gate, which is precisely the ambiguity migration
+				// 0047's foreign keys exist to make impossible.
+				if n := countQuery(t, `SELECT count(*) FROM go_trip_participants WHERE trip_id = 'ctrip_mine'`); n != 0 {
+					t.Fatalf("%d roster rows survived their trip", n)
+				}
+				if n := countQuery(t, `SELECT count(*) FROM go_trip_activity_tokens WHERE trip_id = 'ctrip_mine'`); n != 0 {
+					t.Fatalf("%d push-to-start tokens survived their trip", n)
+				}
+			},
+		},
+		{
+			// Second statement: the memberships this person holds on OTHER
+			// people's trips. DELETED rather than tombstoned — this is the one
+			// place that is right, because after an account deletion there is
+			// no person left for "was they ever on this trip" to be about.
+			name: "delete trip participations",
+			run:  func() (int, error) { return deleter.DeleteTripParticipations(ctx, delUserApple) },
+			want: 1,
+			survive: func(t *testing.T) {
+				if n := countQuery(t, `SELECT count(*) FROM go_trip_participants WHERE user_id = $1`, delUserOther); n != 0 {
+					t.Fatalf("another person's membership was deleted (%d left)", n)
+				}
+			},
+		},
+		{
+			// Third statement, and it earns its own step: a push-to-start
+			// token is a LIVE CAPABILITY ON A PHONE, not a membership record.
+			// A person may hold one for a trip they have already left, so a
+			// deletion that only walked the roster would leave behind a token
+			// that could still start a Live Activity for an account that no
+			// longer exists.
+			//
+			// want is 1, not 2: the token on their own trip already went with
+			// the cascade in the first step. Finding fewer rows than were
+			// seeded is the cascade working, and is exactly why the three
+			// statements run in this order.
+			name: "delete trip activity tokens",
+			run:  func() (int, error) { return deleter.DeleteTripActivityTokens(ctx, delUserApple) },
+			want: 1,
+			survive: func(t *testing.T) {
+				if n := countQuery(t, `SELECT count(*) FROM go_trip_activity_tokens WHERE user_id = $1`, delUserOther); n != 1 {
+					t.Fatalf("another person's token was deleted (%d left, want 1)", n)
 				}
 			},
 		},

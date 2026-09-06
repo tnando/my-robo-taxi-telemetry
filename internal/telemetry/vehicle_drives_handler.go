@@ -1,9 +1,7 @@
 package telemetry
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,7 +9,6 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/mask"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
-	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // VehicleDrivesHandler handles GET /api/vehicles/{vehicleId}/drives.
@@ -24,6 +21,11 @@ type VehicleDrivesHandler struct {
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveLister
 	roles    roleResolver // optional: nil disables role-based mask plumbing
+
+	// trips is the MYR-602 window gate. OPTIONAL and nil by default, which
+	// leaves this endpoint owner-only exactly as MYR-369 left it — the
+	// fail-closed direction for a deployment that has not wired trips.
+	trips TripDriveAdmitter
 
 	// Mask-audit fields (MYR-71, rest-api.md §5.3). All optional —
 	// nil auditEmitter disables emit.
@@ -85,11 +87,21 @@ func (h *VehicleDrivesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, vehicleID, userID) {
+	admission, ok := h.authorize(ctx, w, vehicleID, userID)
+	if !ok {
 		return
 	}
 
-	page, err := h.drives.ListByVehicleID(ctx, vehicleID, cursor, limit)
+	// TWO LIST PATHS, and which one runs is decided by the access resolution
+	// rather than by a flag. An owner reads their whole history; a trip
+	// participant reads the union of their windows and nothing else, narrowed
+	// IN THE STATEMENT so the page size means what it says.
+	var page DriveListPage
+	if admission.participant() {
+		page, err = h.trips.VehicleDrivesInTripWindows(ctx, userID, vehicleID, cursor, limit)
+	} else {
+		page, err = h.drives.ListByVehicleID(ctx, vehicleID, cursor, limit)
+	}
 	if err != nil {
 		h.logger.Error("vehicle drives: list failed",
 			slog.String("vehicle_id", vehicleID),
@@ -127,58 +139,6 @@ func (h *VehicleDrivesHandler) parseQuery(w http.ResponseWriter, r *http.Request
 	}
 
 	return limit, cursor, true
-}
-
-// verifyOwnership resolves the caller's access to the vehicle identified by
-// vehicleID: the OWNER, and nobody else (MYR-369 — no share of any shape opens
-// the drives surfaces). Returns true if the check passes; on failure
-// writes an HTTP error response and returns false. The 404 / 403 split mirrors
-// the snapshot handler — an unknown vehicle is never distinguishable from one
-// the caller cannot see.
-func (h *VehicleDrivesHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) bool {
-	row, err := h.vehicles.GetByID(ctx, vehicleID)
-	if err != nil {
-		if errors.Is(err, sdk.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return false
-		}
-		h.logger.Error("vehicle drives: vehicle lookup failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
-	}
-
-	// MYR-369: THE DRIVES SURFACES ARE OWNER-ONLY AGAIN, unconditionally.
-	//
-	// MYR-184 opened them to a viewer holding `live_history` or better. That
-	// tier is RETIRED and the capability is removed from the product, so the
-	// gate is back to what it was before sharing shipped: owner or nobody.
-	// This is a DELIBERATE NARROWING — a legacy grant created at
-	// `live_history` can no longer read drives, and there is no flag that
-	// re-opens them. Suspension is irrelevant here for the same reason: no
-	// grant of any shape passes.
-	//
-	// Expressed as capBase-against-the-owner rather than a bare
-	// `row.UserID != userID` comparison so the denial still flows through the
-	// one access helper — same 403, same log shape, same non-oracle message
-	// as every other refusal — and so re-opening the surface later is a
-	// one-argument change rather than a re-derivation.
-	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
-		if errors.Is(err, errNoVehicleAccess) {
-			denyVehicleAccess(w, h.logger, "vehicle drives", vehicleID, userID)
-			return false
-		}
-		h.logger.Error("vehicle drives: access resolution failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
-	}
-
-	return true
 }
 
 // writeMaskedPage projects each drive through the role mask, computes

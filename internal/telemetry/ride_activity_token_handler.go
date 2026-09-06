@@ -11,12 +11,16 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// ErrLiveActivityRideClosed is returned by LiveActivityRegistry.RegisterActivity
-// when the ride is past registration — a terminal status, or a reservation the
-// sweeper gave up on. The cmd adapter translates store.ErrLiveActivityRideClosed
-// into this sentinel so the handler layer stays decoupled from internal/store,
-// exactly as ErrRideStatusConflict does.
-var ErrLiveActivityRideClosed = errors.New("live activity: ride is closed to registration")
+// ErrLiveActivityClosed is returned by a registration seam when its anchor is
+// past registration — for a RIDE, a terminal status or a reservation the
+// sweeper gave up on; for a TRIP LEG (MYR-602), a leg that has ended. The cmd
+// adapter translates store.ErrLiveActivityClosed into this sentinel so the
+// handler layer stays decoupled from internal/store, exactly as
+// ErrRideStatusConflict does.
+//
+// ANCHOR-NEUTRAL BY NAME, because both anchors return it and the HTTP answer is
+// identical: 409, "end your Activity locally".
+var ErrLiveActivityClosed = errors.New("live activity: anchor is closed to registration")
 
 // Live Activity token registration (MYR-172, rest-api.md §7.21).
 //
@@ -166,7 +170,7 @@ func (h *RideRequestHandler) ServeRegisterActivityToken(w http.ResponseWriter, r
 	// stealing the requester's registration, and the ticker pushing the
 	// requester's card to the last member's phone.
 	if err := h.activities.RegisterActivity(ctx, rec.ID, userID, token, body.Sandbox); err != nil {
-		if errors.Is(err, ErrLiveActivityRideClosed) {
+		if errors.Is(err, ErrLiveActivityClosed) {
 			// The write's own guard refused. The checks above already covered
 			// every state we could SEE, so reaching here means the ride closed
 			// between that read and this write — the race the SQL guard exists

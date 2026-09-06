@@ -287,3 +287,53 @@ func TestFanOutCarriesTheEventTopic(t *testing.T) {
 		})
 	}
 }
+
+// TestCollapseID_LegPushesStayDistinct is finding 8, with REAL-LENGTH ids.
+//
+// A trip leg's subject is `{tripID}|{legID}` — two cuids, because two
+// consecutive legs of one trip must not merge their banners. With real ids that
+// is past the 64-byte cap before the topic is even appended, and truncation cut
+// exactly the tail that distinguishes `trip_leg_started` from
+// `trip_leg_arrived`: Apple merged them, so a participant who missed the
+// departure found only the arrival and one who read the departure had it
+// replaced.
+func TestCollapseID_LegPushesStayDistinct(t *testing.T) {
+	// Real shapes: the prefixed cuid2 this platform mints.
+	const tripID = "ctrip_01j9x8h2k4m6n8p0q2r4s6t8"
+	const legID = "cleg_01j9x8h2k4m6n8p0q2r4s6t9"
+	subject := tripID + "|" + legID
+
+	started := collapseID(subject, "trip.trip_leg_started")
+	arrived := collapseID(subject, "trip.trip_leg_arrived")
+
+	if started == arrived {
+		t.Fatalf("the two leg pushes share a collapse id (%q); Apple merges them into one "+
+			"banner and a participant sees only whichever landed last", started)
+	}
+	for name, got := range map[string]string{"started": started, "arrived": arrived} {
+		if len(got) > maxCollapseIDBytes {
+			t.Errorf("%s collapse id is %d bytes, over Apple's %d-byte cap — the header is "+
+				"rejected as BadCollapseId and the push is silenced", name, len(got), maxCollapseIDBytes)
+		}
+		if !strings.HasPrefix(got, collapseDigestPrefix) {
+			t.Errorf("%s collapse id = %q, want the digest prefix %q so an oversized "+
+				"subject is explicable in a capture", name, got, collapseDigestPrefix)
+		}
+	}
+
+	// A SECOND LEG OF THE SAME TRIP still collapses separately, which is the
+	// whole reason the leg id is in the subject.
+	const legID2 = "cleg_01j9x8h2k4m6n8p0q2r4s6u0"
+	next := collapseID(tripID+"|"+legID2, "trip.trip_leg_started")
+	if next == started {
+		t.Error("two legs of one trip share a collapse id; the second leg's departure " +
+			"banner would replace the first's")
+	}
+
+	// AND THE ORDINARY CASE IS UNCHANGED: a subject that fits is sent
+	// verbatim, so a capture still reads as the thing it is about.
+	ride := collapseID("crr_01j9x8h2k4m6n8p0q2r4s6t8", "ride.status.changed")
+	if ride != "crr_01j9x8h2k4m6n8p0q2r4s6t8:ride.status.changed" {
+		t.Errorf("a fitting collapse id was rewritten: %q", ride)
+	}
+}

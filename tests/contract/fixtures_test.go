@@ -9,6 +9,7 @@ package contract_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -185,6 +186,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	// matters most here, a `streaming` leaking onto a read surface or a null
 	// leaking onto this one.
 	setupCompletionSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-setup-completion.schema.json")
+	// MYR-602 §7.30.2. The TripListResponse envelope, and through its `items`
+	// $ref the whole Trip shape — the same object every other §7.30 route
+	// returns, so validating the list fixture validates the detail, the create
+	// echo, the patch echo and the end echo at once. Compiled here rather than
+	// asserted field by field for the reason the vehicles-list schema is: a
+	// hand-written required-field list only catches what somebody remembered.
+	tripListSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/trip.schema.json")
 
 	// Pre-compile all WS message payload schemas.
 	payloadSchemas := map[string]*jsonschema.Schema{
@@ -306,6 +314,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 					// `sharePermission` (§5.2.0).
 					validateVehiclesList(t, stripped, baseName)
 					validate(t, vehicleSummaryListSchema, stripped, "VehicleListResponse")
+
+				case baseName == "trips_list.json":
+					// MYR-602: TripListResponse — `{ items: Trip[] }` per
+					// rest-api.md §7.30.2. The fixture carries all three
+					// TripStatus members deliberately; see its _meta.
+					validate(t, tripListSchema, stripped, "TripListResponse")
+					assertTripEndedAtMatchesStatus(t, stripped)
 
 				case baseName == "complete_setup.json":
 					// MYR-505: the §7.23 action response.
@@ -819,4 +834,107 @@ func mustGlobJSONRecursive(t *testing.T, dir string) []string {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
 	return files
+}
+
+// assertTripEndedAtMatchesStatus pins the ONE cross-field rule on Trip that a
+// JSON Schema cannot state (MYR-602): `endedAt` is non-null if and only if
+// `status` is `ended`.
+//
+// It is worth a hand-written assertion because the rule is what makes the field
+// safe to read. `endedAt` records that an action ALREADY HAPPENED — its only
+// writer is `SET ended_at = NOW()` — so a consumer treats a non-null value as
+// terminal and never compares it against a clock. That reading is only sound
+// while the two fields agree, and a fixture that drifted (an `active` row with
+// an `endedAt`, or an `ended` row without one) would document the opposite.
+//
+// The `scheduled`/`active` direction is the one with a live bug behind it: the
+// status was once derived in Go against the SERVER'S clock rather than the
+// database's, and a testcontainers Postgres running 76 ms ahead made an
+// owner's own end-trip response say the trip was still active.
+func assertTripEndedAtMatchesStatus(t *testing.T, m map[string]any) {
+	t.Helper()
+
+	items, ok := m["items"].([]any)
+	if !ok {
+		t.Fatalf("trips fixture has no items array")
+	}
+	for i, raw := range items {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("items[%d] is not an object", i)
+		}
+		status, _ := row["status"].(string)
+		endedAt, hasKey := row["endedAt"]
+		if !hasKey {
+			t.Errorf("items[%d] (status=%q): endedAt is REQUIRED and must be present as null when the trip has not ended", i, status)
+			continue
+		}
+		ended := endedAt != nil
+
+		if ended != (status == "ended") {
+			t.Errorf("items[%d]: status=%q but endedAt=%v — the two must agree; a non-null endedAt is what makes the trip terminal",
+				i, status, endedAt)
+		}
+		// A closed window has no open leg. The converse is NOT asserted: an
+		// active trip with no currentLeg is the ordinary overnight state, which
+		// is exactly why the field is informational and never a gate.
+		if status == "ended" {
+			if _, hasLeg := row["currentLeg"]; hasLeg {
+				t.Errorf("items[%d]: an ended trip carries a currentLeg; a closed window has no open leg", i)
+			}
+		}
+	}
+}
+
+// TestLiveActivitySchema_VendorDeviationIsClosed pins that the vendored
+// live-activity schema is the UPSTREAM one again (contracts v0.41.1).
+//
+// THE HISTORY THIS GUARDS. `destinationIsStop` and the multi-stop rewrite of
+// `destination` shipped in MYR-587 by editing this file directly, and the paired
+// contracts PR CONTRIBUTING.md requires was never opened — so the property
+// existed on no contracts tag at all, and `LiveActivityContentState` is
+// `additionalProperties: false`, which made every real multi-stop payload the
+// server emits INVALID against its own published contract. MYR-602 vendored the
+// union and recorded the divergence in the schema's own description; v0.41.1
+// upstreamed the missing half, and this file is v0.41.1 verbatim again.
+//
+// Two assertions, and they fail in opposite directions. The property must be
+// PRESENT, because the server sends it on every mid-journey multi-stop leg and a
+// re-vendor that dropped it would silently invalidate those payloads again. And
+// the deviation NOTE must be ABSENT, because a note describing a divergence that
+// no longer exists is worse than no note: the next person to re-vendor would
+// preserve it, and the file would drift from upstream to keep a paragraph true.
+func TestLiveActivitySchema_VendorDeviationIsClosed(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "docs/contracts/schemas/live-activity.schema.json"))
+	if err != nil {
+		t.Fatalf("read live-activity.schema.json: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse live-activity.schema.json: %v", err)
+	}
+	defs, ok := doc["$defs"].(map[string]any)
+	if !ok {
+		t.Fatal("live-activity.schema.json has no $defs")
+	}
+	state, ok := defs["LiveActivityContentState"].(map[string]any)
+	if !ok {
+		t.Fatal("LiveActivityContentState is missing")
+	}
+	props, ok := state["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("LiveActivityContentState has no properties")
+	}
+	if _, present := props["destinationIsStop"]; !present {
+		t.Error("`destinationIsStop` is absent. internal/push sends it on every mid-journey " +
+			"multi-stop leg and the content state is additionalProperties:false, so every " +
+			"one of those pushes is now invalid against its own schema")
+	}
+	if strings.Contains(string(raw), "VENDOR DEVIATION") {
+		t.Error("the vendor-deviation note is still in the file. contracts v0.41.1 upstreamed " +
+			"`destinationIsStop`, so this file is the tag verbatim and the note now describes " +
+			"a divergence that does not exist — which is exactly how a file stays diverged")
+	}
 }

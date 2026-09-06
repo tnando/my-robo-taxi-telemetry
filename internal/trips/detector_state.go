@@ -1,0 +1,291 @@
+package trips
+
+import "time"
+
+// THE RULES: what a SEQUENCE of frames says about whether a car has arrived,
+// and the per-car memory that makes a sequence out of deltas.
+//
+// Separated from detector.go — no I/O, no bus, no store, no clock of its own —
+// for exactly the reason internal/arrival separates rules.go: the decision is
+// the part a false positive comes out of, and it has to be testable against
+// scripted sequences without a database or a car. The frame distillation these
+// rules consume is next door in detector_fields.go, which knows nothing about
+// history; this file is entirely about history.
+
+// vehicleState is what the detector remembers per VIN between frames: the last
+// destination the car reported, and the last fix it can measure stillness from.
+//
+// Not internally locked. Every method is called from the single handler
+// goroutine the bus delivers on, exactly as internal/arrival's tracks are.
+type vehicleState struct {
+	// destination is the car's current navigation destination name, "" when it
+	// has none. Sticky across frames that do not mention it.
+	destination string
+	// destLat/destLng/hasDest are the destination COORDINATE, when the car
+	// streams one. Cleared with the name.
+	destLat, destLng float64
+	hasDest          bool
+
+	// driving is the last decided motion verdict. Sticky across frames that
+	// report neither speed nor gear, which is most of them.
+	driving bool
+	// prev is the last located fix, held so the positional stillness rung has
+	// something to compare against.
+	prev *fix
+	// stillSince is the start of the current run of qualifying frames — inside
+	// the destination radius AND stopped — zero when the car is not currently
+	// qualifying. Any disqualifying frame clears it, which is what makes an
+	// interrupted dwell restart rather than resume.
+	stillSince time.Time
+	// arrivalLatched records that this car's current leg has already been
+	// closed as arrived, so the twenty further qualifying frames that arrive
+	// while it sits there do nothing.
+	arrivalLatched bool
+	// legID is the leg these per-leg fields are ABOUT, and it is what makes
+	// them structurally unable to outlive it.
+	//
+	// The latch used to be cleared only on a destination NAME change, which is
+	// the one clearing condition that does not cover the case the latch is most
+	// dangerous in: a second leg to the SAME place — a car that arrives, parks,
+	// and later drives back to the same destination, which on a road trip is
+	// every return journey. Its name never changes, so the latch survived into
+	// the new leg and that leg's arrival branch was disabled for good; the leg
+	// could then only ever end as `completed`, and "your car arrived" was never
+	// sent. Keyed on the leg id instead, the reset happens because the leg is a
+	// different leg, whatever the previous one's ending did.
+	legID string
+
+	// lastCardETA and lastCardPush are the CARD THROTTLE. A car streams up to
+	// once per second and Apple throttles high-frequency Activity pushes by
+	// budget, so a card refresh has to earn its push twice over: the arrival
+	// MINUTE must have changed (it is the only number on the card that moves —
+	// the destination and the trip name are fixed for the leg), and a minimum
+	// interval must have passed.
+	//
+	// Both conditions, not either. The minute alone would be enough on a
+	// motorway and far too much in stop-start traffic, where an ETA can flip
+	// between two values every few seconds; the interval alone would push an
+	// unchanged card. Held per VIN in memory rather than persisted: losing it
+	// on a restart costs one extra push per leg, which is the cheapest possible
+	// failure on this surface.
+	lastCardETA  *int
+	lastCardPush time.Time
+}
+
+// cardMinInterval is the floor between two card refreshes for one car. Chosen
+// to sit just under the ride ticker's own 24–36s cadence (MYR-573), which is
+// the empirically-survivable rate on this surface: fast enough that a countdown
+// reads as continuous, slow enough to stay inside Apple's budget.
+const cardMinInterval = 20 * time.Second
+
+// dueForCard reports whether this frame's arrival estimate has earned a push,
+// and records the decision when it has.
+//
+// The FIRST update of a leg always passes (lastCardPush is zero), which is what
+// puts a time on a card that was pushed-to-start without one.
+func (v *vehicleState) dueForCard(minutes *int, at time.Time) bool {
+	if minutes == nil {
+		return false
+	}
+	if v.lastCardETA != nil && *v.lastCardETA == *minutes {
+		return false
+	}
+	if !v.lastCardPush.IsZero() && at.Sub(v.lastCardPush) < cardMinInterval {
+		return false
+	}
+	v.lastCardETA, v.lastCardPush = minutes, at
+	return true
+}
+
+// beginLeg points the per-leg fields at legID, resetting them when it is a
+// different leg from the one they were about.
+//
+// It is called on every frame that sees an open leg, not only at the edge, so
+// the reset cannot be missed by a closing path that failed, by a leg another
+// process opened, or by a restart that rebuilt this state from nothing.
+func (v *vehicleState) beginLeg(legID string) {
+	if v.legID == legID {
+		return
+	}
+	v.legID = legID
+	v.arrivalLatched = false
+	v.stillSince = time.Time{}
+	v.lastCardETA, v.lastCardPush = nil, time.Time{}
+}
+
+// endLeg forgets which leg the per-leg fields were about, so the next one
+// begins from a clean slate.
+func (v *vehicleState) endLeg() { v.beginLeg("") }
+
+// apply folds one frame into the state and reports what changed.
+//
+// Returns the two edges the detector acts on: whether the car is NOW driving
+// with a destination, and whether it just STOPPED being so.
+func (v *vehicleState) apply(f fix, cfg Config) {
+	if f.destName != nil {
+		next := *f.destName
+		if next != v.destination {
+			// A NEW DESTINATION RESETS THE ARRIVAL STATE. The car is going
+			// somewhere else now, so the dwell it may have been accumulating at
+			// the old place says nothing about the new one.
+			v.stillSince = time.Time{}
+			v.arrivalLatched = false
+			// A new destination is a new card state. Clearing the throttle
+			// lets the next frame carrying an estimate refresh the card at
+			// once rather than up to cardMinInterval later.
+			v.lastCardETA, v.lastCardPush = nil, time.Time{}
+			// AND IT INVALIDATES THE CACHED COORDINATE, which is the half this
+			// used to get wrong. Tesla streams deltas, so the frame that
+			// announces a new destination NAME very often carries no
+			// DestLocation — the coordinate arrives a frame or several later,
+			// or never. Left in place, destLat/destLng still point at the
+			// PREVIOUS destination while `destination` names the new one, and
+			// inRadius prefers the coordinate over the car's own
+			// milesToArrival: the detector would then measure arrival against
+			// a place the car is no longer going, declaring an arrival the
+			// moment it happens to pass the old one and never at the new.
+			//
+			// Cleared, inRadius falls through to milesToArrival — which on a
+			// leg is the most direct evidence there is (see arrivedAt) — until
+			// a fresh DestLocation lands. The clear is unconditional on a name
+			// change; the `if f.hasDest` below re-arms it in the same frame
+			// when the car did send both.
+			v.hasDest, v.destLat, v.destLng = false, 0, 0
+		}
+		v.destination = next
+		if next == "" {
+			v.hasDest = false
+		}
+	}
+	if f.hasDest {
+		v.destLat, v.destLng, v.hasDest = f.destLat, f.destLng, true
+	}
+
+	switch reportedMotion(f, cfg.StoppedSpeedMPH) {
+	case motionMoving:
+		v.driving = true
+	case motionStopped:
+		v.driving = false
+	case motionUnreported:
+		// Left alone deliberately. A frame that says nothing about motion is
+		// not evidence that the car stopped — which is the exact cell of the
+		// truth table MYR-563 found wrong in the arrival detector.
+	}
+}
+
+// motion is what a frame's REPORTED fields say about movement. Three-valued,
+// because "did not say" is not "said no" (MYR-563).
+type motion int
+
+const (
+	motionUnreported motion = iota
+	motionStopped
+	motionMoving
+)
+
+// reportedMotion reads the two fields that speak for themselves, in the same
+// order and with the same asymmetry as internal/arrival: a reported speed
+// decides on its own, gear decides only in its absence, and neither present
+// means nothing is claimed.
+func reportedMotion(f fix, maxSpeedMPH float64) motion {
+	if f.speed != nil {
+		if *f.speed <= maxSpeedMPH {
+			return motionStopped
+		}
+		return motionMoving
+	}
+	switch f.gear {
+	case "":
+		return motionUnreported
+	case gearPark:
+		return motionStopped
+	default:
+		return motionMoving
+	}
+}
+
+// gearPark is Tesla's shift-state string for park, as normalised by the decoder.
+const gearPark = "P"
+
+// arrivedAt folds one frame into the dwell and reports whether the car has now
+// been stopped at its destination for the whole window.
+//
+// THE DISTANCE COMES FROM THE COORDINATE WHEN THE CAR STREAMS ONE, and from the
+// car's own `milesToArrival` when it does not. That second source is the exact
+// signal internal/arrival refuses, and refusing it there is right for the reason
+// its package doc gives — the dash's target and the RIDE's target are different
+// facts. ON A LEG THEY ARE THE SAME FACT BY CONSTRUCTION: a leg is defined as
+// "the car is driving to the place the dash names", so the dash's distance to
+// that place is the most direct evidence there is.
+//
+// STILLNESS IS STILL REQUIRED either way, which is what stops a leg "arriving"
+// at a red light 60 m short of the destination, and the dwell is measured on
+// FRAME timestamps so a burst of backlogged frames cannot fake it.
+func (v *vehicleState) arrivedAt(f fix, cfg Config) bool {
+	prev := v.prev
+	if f.hasFix {
+		snapshot := f
+		v.prev = &snapshot
+	}
+
+	if !v.inRadius(f, cfg) {
+		v.stillSince = time.Time{}
+		return false
+	}
+	since, still := v.stillnessRun(f, prev, cfg)
+	if !still {
+		v.stillSince = time.Time{}
+		return false
+	}
+	if v.stillSince.IsZero() {
+		v.stillSince = since
+	}
+	// Not Before rather than After, so a zero dwell (tests) fires on the first
+	// qualifying frame and a frame landing exactly on the boundary counts.
+	return !f.at.Before(v.stillSince.Add(cfg.Dwell))
+}
+
+// inRadius reports whether this frame places the car at its destination.
+func (v *vehicleState) inRadius(f fix, cfg Config) bool {
+	if v.hasDest && f.hasFix {
+		return haversineMeters(f.lat, f.lng, v.destLat, v.destLng) <= cfg.ArrivalRadiusMeters
+	}
+	if f.milesToGo != nil {
+		return *f.milesToGo*metersPerMile <= cfg.ArrivalRadiusMeters
+	}
+	// No coordinate and no reported distance: nothing is claimed, which is the
+	// direction every ambiguity in this detector resolves to.
+	return false
+}
+
+// stillnessRun answers "is this car stopped, and if so since when", with the
+// same three-rung ladder internal/arrival uses — a reported speed, then gear,
+// then positional stillness across a bounded interval (MYR-563).
+//
+// The third rung matters here for the same reason it matters there and MORE: a
+// car that parks STOPS STREAMING, so the frames that prove it stayed put are
+// REST-backfill fixes carrying a location and nothing else.
+func (v *vehicleState) stillnessRun(f fix, prev *fix, cfg Config) (time.Time, bool) {
+	switch reportedMotion(f, cfg.StoppedSpeedMPH) {
+	case motionStopped:
+		// A reported stillness speaks for THIS instant only.
+		return f.at, true
+	case motionMoving:
+		return time.Time{}, false
+	case motionUnreported:
+	}
+
+	if prev == nil || !f.hasFix {
+		return time.Time{}, false
+	}
+	gap := f.at.Sub(prev.at)
+	if gap <= 0 || gap > cfg.MaxStillnessGap {
+		return time.Time{}, false
+	}
+	if haversineMeters(prev.lat, prev.lng, f.lat, f.lng) > cfg.StillnessMeters {
+		return time.Time{}, false
+	}
+	// Stillness proven across the interval, so the dwell may honestly count
+	// from the EARLIER fix.
+	return prev.at, true
+}

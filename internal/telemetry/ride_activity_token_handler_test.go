@@ -573,7 +573,7 @@ func TestActivityToken_OtherDispatchFailuresStillRegister(t *testing.T) {
 // which is precisely wrong here.
 func TestActivityToken_StoreGuardRaceIsConflict(t *testing.T) {
 	registry := newFakeActivityRegistry()
-	registry.registerErr = ErrLiveActivityRideClosed
+	registry.registerErr = ErrLiveActivityClosed
 	store := &fakeRideStore{getRec: fixtureRideData("clowner999999999999xyz", rideStatusAccepted)}
 	h := newActivityHandler(store, registry, rideUserID)
 

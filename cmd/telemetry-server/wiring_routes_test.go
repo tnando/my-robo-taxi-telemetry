@@ -149,6 +149,16 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// /api/vehicles/ path served by the RIDE-request handler, which is
 		// exactly the wiring mistake this test class exists for.
 		{"booked windows (MYR-385, §7.22)", "/api/vehicles/clxyz1234567890abcdef/booked-windows"},
+		// MYR-602 trips (§7.30). ALWAYS MOUNTED, kill switch or not: this
+		// config is the zero value, so TRIPS_ENABLED reads false and these
+		// answer 503 — which is the point of passing the switch into the
+		// handler rather than gating the registration. An unmounted route is
+		// a 404, and a 404 tells a client the feature does not exist; a 503
+		// says "not right now", which is the true thing and is what this
+		// assertion (anything but 404) pins.
+		{"trips list (MYR-602, §7.30)", "/api/trips"},
+		{"trip detail (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567"},
+		{"trip drives (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/drives"},
 	}
 
 	for _, rt := range routes {
@@ -186,6 +196,23 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"share invite create (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
 		{"share invite resend (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd/resend"},
 		{"share invite redeem (MYR-184, §7.5)", "/api/invites/redeem"},
+		// MYR-602 trips (§7.30). The create route lives under
+		// /api/vehicles/{vehicleId}/ and is served by the TRIP handler, which
+		// is exactly the cross-surface wiring mistake this test class exists
+		// for — the same shape as the MYR-385 booked-windows entry above.
+		{"trip create (MYR-602, §7.30)", "/api/vehicles/clxyz1234567890abcdef/trips"},
+		{"trip end (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/end"},
+		{"trip activity start token (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/activity-start-token"},
+		// The LEG token pair (§7.21.7) is the other cross-surface case this
+		// test class exists for, arriving from the opposite direction to the
+		// create route above: it lives under /api/trip-legs/ — a path prefix no
+		// other handler on the service claims — and is served by the TRIP
+		// handler. The per-route tests mount it in a fresh ServeMux, so they
+		// would pass unchanged if wiring_trips.go dropped the HandleFunc, and
+		// the observable symptom would be a leg card that can never be updated
+		// or ended.
+		{"trip leg activity token register (MYR-602, §7.21.7)",
+			"/api/trip-legs/cleg0123456789abcdef01234567/activity-token"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -250,6 +277,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// MYR-321: the PUT and DELETE share the {kind} path, so mounting only
 		// one of the two verbs is a live failure mode this catches.
 		{"saved place delete (MYR-321, §7.20)", "/api/users/me/places/work"},
+		// MYR-602 §7.21.7: the POST and DELETE share this path, so mounting only
+		// one of the two verbs is a live failure mode this catches — the same
+		// shape as the two entries above it.
+		{"trip leg activity token end (MYR-602, §7.21.7)",
+			"/api/trip-legs/cleg0123456789abcdef01234567/activity-token"},
 	}
 	for _, rt := range deleteRoutes {
 		t.Run(rt.name, func(t *testing.T) {

@@ -2,7 +2,6 @@ package push
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 )
 
@@ -57,6 +56,15 @@ type delivery struct {
 	// the banner", so a new fan-out site that forgets this cannot accidentally
 	// silence itself. See notifier_activity_gate.go.
 	islandAlerts bool
+	// tripPush is the MYR-602 subject: the trip, the car, the event and the
+	// deep link that together replace `rideID` on a notification that is not
+	// about a ride. Nil on every ride delivery, which is what keeps their
+	// payloads byte-identical (see buildPayload).
+	//
+	// A POINTER rather than a value so that "this is not a trip push" is one
+	// nil check rather than a comparison against a zero struct — the same
+	// reason ActivityNotification.Alert is one.
+	tripPush *TripPush
 }
 
 // fanOut resolves one ride party's devices and sends the alert to each. Every
@@ -133,8 +141,8 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	}
 
 	var delivered int
-	for _, d := range devices {
-		if n.send(ctx, d, rideID, topic, a) {
+	for _, dev := range devices {
+		if n.send(ctx, dev, d, a) {
 			delivered++
 		}
 	}
@@ -144,6 +152,7 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	n.logger.Info("push sent",
 		slog.String("topic", topic),
 		slog.String("ride_id", rideID),
+		slog.String("trip_id", d.tripID()),
 		slog.String("user_id", userID),
 		slog.Int("devices", len(devices)),
 		slog.Int("delivered", delivered),
@@ -192,95 +201,4 @@ func (n *Notifier) allowed(ctx context.Context, userID string, category Category
 		slog.String("user_id", userID),
 	)
 	return false
-}
-
-// send delivers to one device and applies the APNs feedback: a permanently
-// rejected token is removed from the registry so the next ride does not retry
-// a phone that no longer exists. Reports whether the send succeeded.
-func (n *Notifier) send(ctx context.Context, d Device, rideID, topic string, a alert) bool {
-	err := n.sender.Send(ctx, Notification{
-		DeviceToken: d.Token,
-		Sandbox:     d.Sandbox,
-		Title:       a.title,
-		Body:        a.body,
-		RideID:      rideID,
-		// MYR-554: the (ride, topic) pair the collapse id is built from. It is
-		// the fan-out's OWN topic string — the same one every log line here
-		// carries — so the id names the notification's intent and nothing about
-		// the attempt that carries it.
-		EventTopic: topic,
-	})
-	if err == nil {
-		return true
-	}
-
-	if errors.Is(err, ErrUnregistered) {
-		n.dropDevice(ctx, d.Token, topic)
-		return false
-	}
-
-	n.logger.Warn("push: send failed",
-		slog.String("topic", topic),
-		slog.String("ride_id", rideID),
-		slog.String("device_token_prefix", tokenPrefix(d.Token)),
-		slog.String("error", err.Error()),
-	)
-	return false
-}
-
-// dropDevice removes a token APNs reported as permanently dead. The delete
-// runs on a context DETACHED from the fan-out's, which may already be at its
-// deadline — precisely when the registry most needs the correction to land.
-func (n *Notifier) dropDevice(ctx context.Context, deviceToken, topic string) {
-	delCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
-	defer cancel()
-
-	if err := n.stores.devices.DeleteDeviceToken(delCtx, deviceToken); err != nil {
-		n.logger.Error("push: failed to delete unregistered device",
-			slog.String("topic", topic),
-			slog.String("device_token_prefix", tokenPrefix(deviceToken)),
-			slog.String("error", err.Error()),
-		)
-		return
-	}
-	n.logger.Info("push: deleted unregistered device",
-		slog.String("topic", topic),
-		slog.String("device_token_prefix", tokenPrefix(deviceToken)),
-	)
-}
-
-// vehicleName resolves a vehicle nickname for the copy, best-effort. A failure
-// is logged at debug and yields "", which the copy renders as a generic label
-// — a notification with a slightly blander title beats no notification.
-// requesterFirstName resolves the rider's first name for owner-facing copy,
-// or "" when unwired, unknown or unreadable — the copy's anonymous fallback
-// handles all three the same way. The value is P1 and is never logged.
-func (n *Notifier) requesterFirstName(ctx context.Context, userID string) string {
-	if n.requesters == nil || userID == "" {
-		return ""
-	}
-	name, err := n.requesters.RequesterFirstName(ctx, userID)
-	if err != nil {
-		n.logger.Debug("push: requester name lookup failed",
-			slog.String("user_id", userID),
-			slog.String("error", err.Error()),
-		)
-		return ""
-	}
-	return name
-}
-
-func (n *Notifier) vehicleName(ctx context.Context, vehicleID string) string {
-	if n.vehicles == nil || vehicleID == "" {
-		return ""
-	}
-	name, err := n.vehicles.VehicleName(ctx, vehicleID)
-	if err != nil {
-		n.logger.Debug("push: vehicle name lookup failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		return ""
-	}
-	return name
 }

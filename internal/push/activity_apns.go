@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"time"
 )
 
 // The ActivityKit half of the APNs client (MYR-172).
@@ -38,6 +37,21 @@ type activityAPS struct {
 	// DismissalDate is `aps.dismissal-date` in unix seconds, present only on an
 	// end event. Omitted means iOS dismisses the Activity immediately.
 	DismissalDate *int64 `json:"dismissal-date,omitempty"`
+
+	// AttributesType is `aps.attributes-type`, present ONLY on a `start` event
+	// (MYR-602). It names the Swift `ActivityAttributes` struct iOS must
+	// instantiate to create the Activity, and it must match the type name in
+	// the widget bundle EXACTLY — a mismatch is silently ignored by the device,
+	// with APNs answering 200 and no card ever appearing. It is
+	// `TripActivityAttributes`; see TripActivityAttributesType.
+	AttributesType string `json:"attributes-type,omitempty"`
+
+	// Attributes is `aps.attributes`, the STATIC half of the Activity, present
+	// only on a `start`. It is decoded once into the Swift attributes struct
+	// and never changes for the life of the card, which is exactly why these
+	// values are NOT in the content-state: re-sending `tripId` and `vehicleId`
+	// on every ETA tick would spend Apple's 4KB budget on constants.
+	Attributes *tripActivityAttributes `json:"attributes,omitempty"`
 
 	// Alert is `aps.alert`, present only on the six phase changes (MYR-398) and
 	// only ever on an `update` (MYR-418 — see buildActivityPayload).
@@ -91,6 +105,20 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 		dismiss := n.DismissalDate.Unix()
 		aps.DismissalDate = &dismiss
 	}
+	// A `start` — and ONLY a start — carries the attributes (MYR-602). Written
+	// here, at the one place the keys are either present or not, for the same
+	// reason the `end`-never-alerts rule is enforced here: this surface has no
+	// failure signal, so attributes on an `update` would be accepted by APNs,
+	// ignored by the device, and indistinguishable from working.
+	if n.Event == ActivityEventStart && n.Start != nil {
+		aps.AttributesType = TripActivityAttributesType
+		aps.Attributes = &tripActivityAttributes{
+			TripID:      n.Start.TripID,
+			LegID:       n.Start.LegID,
+			VehicleID:   n.Start.VehicleID,
+			VehicleName: n.Start.VehicleName,
+		}
+	}
 	// AN `end` NEVER RENDERS AN ALERT, whatever the caller asked for (MYR-418).
 	//
 	// Apple's ActivityKit push documentation introduces the alert dictionary
@@ -106,6 +134,11 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 	// exactly like an alert that worked, from the server all the way to the
 	// logs. A caller that wants the sixth expansion must send it on the alerting
 	// UPDATE that precedes the end, which is what endRide does.
+	// A `start` may alert, and Apple's own documentation introduces the alert
+	// dictionary under `start` and `update` — but no trip caller sets one. The
+	// card APPEARING is the announcement, and the `trip_leg_started` banner is
+	// already on its way from the ordinary notifier; a third simultaneous
+	// interruption for one fact is what MYR-413 exists to stop.
 	if n.Alert != nil && n.Event != ActivityEventEnd {
 		aps.Alert = &activityAlert{Title: n.Alert.Title, Body: n.Alert.Body}
 	}
@@ -151,109 +184,3 @@ func (c *Client) SendActivity(ctx context.Context, n ActivityNotification) error
 		body:        body,
 	})
 }
-
-// endPushRetention is how long APNs holds an undelivered `end` push for a phone
-// that is off or out of signal. A day is far longer than any ride and far
-// shorter than the ActivityKit ceiling; it exists to outlast a flat battery or
-// an overnight flight, not to be precise.
-const endPushRetention = 24 * time.Hour
-
-// alertingUpdateRetention is the same day for an ALERTING update, and it is
-// deliberately its own constant rather than a reuse of endPushRetention: they
-// are two separate decisions about two separate shapes, and a shared constant is
-// how one of them silently moves the other.
-const alertingUpdateRetention = 24 * time.Hour
-
-// activityExpiration is the apns-expiration instant for one update, and the
-// shapes want OPPOSITE things from it.
-//
-// AN ORDINARY UPDATE EXPIRES AT ITS STALE-DATE. A queued ETA refresh that
-// reaches the phone after its content stopped being trustworthy is worse than
-// one that never arrives: it overwrites the Activity with a state ActivityKit
-// was about to mark stale anyway, resetting the staleness clock on expired
-// information. Late is worthless here, so we tell Apple to drop it.
-//
-// AN ALERTING UPDATE IS THE EXCEPTION, and MYR-413 is what made it one. Since
-// the duplicate-banner gate (notifier_activity_gate.go), a rider watching a card
-// gets NO lifecycle banner on the phases the island alerts on — so the alerting
-// update is now the SOLE carrier of "your car is here" for that rider, and the
-// banner it replaced had no apns-expiration at all, which is to say APNs stored
-// and retried it. Pinned to a three-minute stale-date, an alerting update to a
-// phone in a tunnel is discarded by Apple and the rider reconnects to nothing;
-// that is the ordinary case a lock-screen notification exists for, not an edge.
-// It gets the same day's floor as an `end` for the same reason.
-//
-// A late alerting update is SAFE to deliver in a way a late ETA tick is not,
-// which is what makes the exception sound rather than merely necessary. The
-// stale-date travels IN THE PAYLOAD (buildActivityPayload writes aps.stale-date)
-// independent of this header, so an update delivered an hour late self-declares
-// as stale and ActivityKit applies its own staleness treatment instead of
-// presenting expired data as current; and aps.timestamp ordering means it can
-// never overwrite a newer tick that arrived first.
-//
-// AN `end` MUST OUTLIVE THE PHONE BEING OFFLINE. It is the only push in this
-// system with no successor — the rows are tombstoned the moment it is sent, the
-// ticker will never look at them again, and nothing retries. Pinned to the
-// stale-date it would be discarded by APNs after ~3 minutes, and a rider whose
-// phone was in a tunnel when their ride was declined would be left with a lock
-// screen reading "your car is on its way" until ActivityKit's own ceiling
-// removed it hours later.
-//
-// It is NOT pinned to the dismissal-date, which is the tempting answer and the
-// wrong one. The dismissal-date is 30 SECONDS for the unhappy endings
-// (DismissPromptly) — pinning to it would make the most important push in the
-// feature the shortest-lived one, worse than the bug being fixed. And an end
-// that arrives after its dismissal-date is not wasted: a dismissal-date in the
-// past tells iOS to remove the Activity at once, which is exactly the outcome
-// wanted for a card that has been lying since the tunnel. So the floor is a
-// day, and a dismissal-date is only honoured when it is even later.
-//
-// Everything is computed off n.Timestamp, not the wall clock, so the header,
-// the `aps.timestamp` and the stale-date in the body all describe one instant.
-func activityExpiration(n ActivityNotification) time.Time {
-	if n.Event != ActivityEventEnd {
-		if n.Alert == nil {
-			return n.StaleDate()
-		}
-		// A FLOOR, not a replacement: if StaleAfter is ever raised past a day
-		// the stale-date is the later of the two and still wins, exactly as the
-		// dismissal-date does below.
-		retainUntil := n.Timestamp.Add(alertingUpdateRetention)
-		if stale := n.StaleDate(); stale.After(retainUntil) {
-			return stale
-		}
-		return retainUntil
-	}
-	retainUntil := n.Timestamp.Add(endPushRetention)
-	if n.DismissalDate != nil && n.DismissalDate.After(retainUntil) {
-		return *n.DismissalDate
-	}
-	return retainUntil
-}
-
-// DismissAfter is how long a COMPLETED ride's Activity lingers before iOS
-// removes it.
-//
-// MYR-194: the rider should get to look at the arrival state rather than have
-// it vanish the instant the owner taps "Dropped off".
-//
-// MYR-406 shortened it from fifteen minutes to five, to match the client's own
-// completed linger (MYR-405 ends the Activity locally at five). The client's
-// timer wins whenever the app is alive; this date is the FALLBACK for a phone
-// whose app is dead, so the two disagreeing meant the same ride lingered for
-// five minutes or fifteen depending on something the rider cannot see. Five is
-// still a long enough look at the arrival state to be worth having, and it is
-// gone well before the next ride.
-//
-// It is deliberately NOT shared with DismissPromptly: the two are separate
-// decisions about separate endings, and a shared constant is how one of them
-// silently moves the other.
-const DismissAfter = 5 * time.Minute
-
-// DismissPromptly is the linger for the unhappy terminal states — declined,
-// cancelled, and a reservation that expired.
-//
-// Not zero, deliberately: an Activity dismissed the same instant it is ended
-// can disappear before the rider's eyes reach it, and "my ride vanished" is a
-// worse experience than the bad news itself. Thirty seconds is one glance.
-const DismissPromptly = 30 * time.Second

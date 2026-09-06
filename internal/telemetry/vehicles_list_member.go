@@ -18,13 +18,21 @@ import (
 // the owner and shared halves, so the three surfaces (catalog, access set,
 // role resolution) name the same cars for the same caller.
 //
-// Membership rows carry the ZERO grant — viewer tier, no ride capability —
-// matching resolveRidingMember on the WS side: riding in a car buys watching
-// it, never booking it. And they are DEDUPLICATED against the rows already in
-// hand: a caller who owns the car keeps their owner row, a caller with a share
-// keeps the share's richer capability row, and the member row appears only
-// when membership is the ONLY relationship — which is exactly the joiner this
-// merge exists for.
+// Membership rows carry the ZERO grant — no ride capability — matching the WS
+// side: riding in a car buys watching it, never booking it. And they are
+// DEDUPLICATED against the rows already in hand: a caller who owns the car
+// keeps their owner row, a caller with a share keeps the share's richer
+// capability row, and the member row appears only when membership is the ONLY
+// relationship — which is exactly the joiner this merge exists for.
+//
+// MYR-602 CHANGED THE MASK THESE ROWS ARE PROJECTED THROUGH, from `viewer` to
+// `ride_member`, and the change is what keeps this merge doing its job. The
+// narrowing took `location` off the plain-viewer catalog row; a member row
+// projected through the viewer mask would therefore have arrived at the rider's
+// picker with no coordinate, and the picker's per-row pickup ETA (MYR-577)
+// would have gone blank for the one car the rider is actually in — a
+// regression no owner-side test could have caught. The WIRE role these rows
+// carry is still `viewer`; only the field set is the elevated one.
 
 // RideMemberVehicleLister returns viewer-shaped catalog rows for the vehicles
 // of live group rides the caller has joined. Implementations apply the
@@ -87,7 +95,7 @@ func (h *VehiclesListHandler) appendMemberRows(ctx context.Context, userID strin
 			continue
 		}
 		seen[rows[i].ID] = true
-		resp.Items = append(resp.Items, viewerSummaryMap(rows[i], auth.ShareGrant{}, now))
+		resp.Items = append(resp.Items, nonOwnerSummaryMap(rows[i], auth.ShareGrant{}, now, auth.RoleRideMember))
 	}
 	return resp
 }

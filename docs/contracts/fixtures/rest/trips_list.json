@@ -1,0 +1,105 @@
+{
+  "_meta": {
+    "description": "Happy-path response for GET /api/trips — the caller's trips, newest first (rest-api.md §7.30.2, contracts v0.41.0, MYR-602). ONE LIST FOR BOTH ROLES and one shape on every surface: the same Trip object is what POST /api/vehicles/{vehicleId}/trips, GET /api/trips/{tripId}, PATCH and POST .../end all return, so a client decodes one type and adopts every answer including a mutation's echo. The three rows are the three members of TripStatus, deliberately, because each one is the only place a different rule is observable. Row 1 is ACTIVE and the caller OWNS it: `endedAt` is null (a window that is merely open has not ended), `currentLeg` is present because the car is driving to a named place inside the window, and `role` is 'owner' — which is why `ownerFirstName` names the reader; an owner reading their own trip is the subject, not a disclosure. Row 2 is ACTIVE and the caller is a PARTICIPANT: same shape, same list, and `role` is the ONLY thing that distinguishes it — note `userIsSelf` marks which roster entry is the reader, and the roster never carries anybody's user id. Row 3 is ENDED and carries a NON-NULL `endedAt`, which is the terminal fact this surface is built on: `endedAt` records that an action already happened and its only writer is `SET ended_at = NOW()`, so a consumer reads a non-nil value as terminal and NEVER compares it against a clock — cross-machine skew makes the comparison wrong for as long as the skew lasts. It also carries NO `currentLeg`, because a closed window has no open leg, and a `driveCount` of 0 alongside a real window, which is legal: a trip SELECTS drives, it does not own them, and a window nobody drove in is an ordinary outcome rather than an error. `currentLeg` IS INFORMATIONAL AND NEVER A GATE — access is purely the window (client ruling, 2026-09-05), so a consumer must not condition a map or a live subscription on its presence; an active trip with no leg is the ordinary overnight state and row 2 shows it. `ownerFirstName` is nullable and row 3 carries null: an Apple-native account Apple was never asked to name, the same three-source ladder MYR-581 put on VehicleSummary. `trimLabel` is nullable on TripVehicle for the same reason it is on the catalog — null means 'no trim known', never the empty string, and a descriptor builder drops the fragment rather than emitting a stray separator.",
+    "anchoredFRs": [
+      "NFR-3.9",
+      "NFR-3.21",
+      "NFR-3.23"
+    ],
+    "scenario": "happy-path",
+    "addedBy": "MYR-602"
+  },
+  "items": [
+    {
+      "id": "cltrp1234567890abcdef",
+      "vehicleId": "clxyz1234567890abcdef",
+      "name": "DFW to LA",
+      "startsAt": "2026-09-06T15:00:00Z",
+      "endsAt": "2026-09-13T15:00:00Z",
+      "endedAt": null,
+      "status": "active",
+      "createdAt": "2026-09-06T14:58:12Z",
+      "role": "owner",
+      "ownerFirstName": "Alex",
+      "vehicle": {
+        "vehicleId": "clxyz1234567890abcdef",
+        "name": "Stumpy",
+        "model": "Model 3",
+        "year": 2024,
+        "color": "Midnight Silver Metallic",
+        "vinLast4": "0001",
+        "trimLabel": "Performance"
+      },
+      "participants": [
+        {
+          "participantId": "clsha1234567890abcdef",
+          "name": "Mira",
+          "userIsSelf": false
+        },
+        {
+          "participantId": "clshb1234567890abcdef",
+          "name": "Nabil",
+          "userIsSelf": false
+        }
+      ],
+      "driveCount": 14,
+      "currentLeg": {
+        "destinationName": "Grand Canyon Village",
+        "etaMinutes": 42,
+        "startedAt": "2026-09-07T14:32:00Z"
+      }
+    },
+    {
+      "id": "cltrp2234567890abcdef",
+      "vehicleId": "clxyz2234567890abcdef",
+      "name": "Tahoe weekend",
+      "startsAt": "2026-09-05T09:00:00Z",
+      "endsAt": "2026-09-08T21:00:00Z",
+      "endedAt": null,
+      "status": "active",
+      "createdAt": "2026-09-04T18:20:04Z",
+      "role": "participant",
+      "ownerFirstName": "Nabil",
+      "vehicle": {
+        "vehicleId": "clxyz2234567890abcdef",
+        "name": "Lightning",
+        "model": "Model Y",
+        "year": 2023,
+        "color": "Pearl White Multi-Coat",
+        "vinLast4": "0002",
+        "trimLabel": null
+      },
+      "participants": [
+        {
+          "participantId": "clshc1234567890abcdef",
+          "name": "Alex",
+          "userIsSelf": true
+        }
+      ],
+      "driveCount": 3
+    },
+    {
+      "id": "cltrp3234567890abcdef",
+      "vehicleId": "clxyz1234567890abcdef",
+      "name": "Big Bend",
+      "startsAt": "2026-08-28T13:00:00Z",
+      "endsAt": "2026-09-02T13:00:00Z",
+      "endedAt": "2026-09-01T02:14:00Z",
+      "status": "ended",
+      "createdAt": "2026-08-27T22:03:51Z",
+      "role": "owner",
+      "ownerFirstName": null,
+      "vehicle": {
+        "vehicleId": "clxyz1234567890abcdef",
+        "name": "Stumpy",
+        "model": "Model 3",
+        "year": 2024,
+        "color": "Midnight Silver Metallic",
+        "vinLast4": "0001",
+        "trimLabel": "Performance"
+      },
+      "participants": [],
+      "driveCount": 0
+    }
+  ]
+}

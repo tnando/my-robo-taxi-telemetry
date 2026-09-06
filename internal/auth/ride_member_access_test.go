@@ -12,6 +12,23 @@ import (
 // the store's integration tests; what is pinned here is the resolution: which
 // TIER a member gets, where membership sits in the precedence order, and which
 // way each failure resolves.
+//
+// MYR-602 REVERSED THE PRECEDENCE AND RENAMED THE TIER, and both changes are
+// recorded in the cases below rather than papered over.
+//
+//   - The tier is now RoleRideMember, not RoleViewer. MYR-602 narrowed
+//     RoleViewer (a standing share no longer carries live location), so a
+//     riding member resolving as a viewer would have LOST the map mid-ride.
+//     RoleRideMember's field set is byte-for-byte the pre-MYR-602 viewer set,
+//     which is what makes ride tracking unchanged.
+//   - The elevated probes now run BEFORE the share is allowed to answer. Every
+//     trip participant is by construction also a share-holder, so resolving
+//     the share first would have returned RoleViewer for all of them and the
+//     window would have granted nothing. The CAPABILITY concern the old
+//     ordering protected is preserved differently and better: the grant is
+//     read first and returned ALONGSIDE the elevated role, so a `rides`
+//     share-holder who is also riding keeps allow_rides — see the case below,
+//     which now asserts exactly that.
 
 // stubRideMembership answers the per-vehicle membership probe.
 type stubRideMembership struct {
@@ -48,9 +65,9 @@ func TestResolveVehicleAccess_RideMembership(t *testing.T) {
 		{
 			// The admission this issue exists for: no share at all, but the
 			// caller is riding in the car right now.
-			name:       "a live member with no share resolves as a viewer",
+			name:       "a live member with no share resolves as a ride member",
 			riding:     true,
-			wantRole:   RoleViewer,
+			wantRole:   RoleRideMember,
 			wantProbes: 1,
 		},
 		{
@@ -58,7 +75,7 @@ func TestResolveVehicleAccess_RideMembership(t *testing.T) {
 			// along never becomes permission to summon the car.
 			name:       "a member's grant carries no ride capability",
 			riding:     true,
-			wantRole:   RoleViewer,
+			wantRole:   RoleRideMember,
 			wantRides:  false,
 			wantProbes: 1,
 		},
@@ -73,16 +90,22 @@ func TestResolveVehicleAccess_RideMembership(t *testing.T) {
 			wantProbes: 1,
 		},
 		{
-			// PRECEDENCE. Somebody who holds a real `rides` share on a car they
-			// also happen to be riding in must keep the grant they actually
-			// hold, not be downgraded to the bare membership tier for the
-			// length of one ride — so the probe must not even run.
-			name:       "an accepted share wins and the membership probe never runs",
+			// PRECEDENCE, RESTATED BY MYR-602. Somebody who holds a real
+			// `rides` share on a car they also happen to be riding in must
+			// keep the grant they actually hold — and now ALSO gets the
+			// stronger role, because the strongest role wins.
+			//
+			// wantRides TRUE is the assertion that matters here: it is the
+			// property the old "the probe never runs" ordering existed to
+			// protect, and it survives the reversal because the grant is read
+			// before the probes and returned with the elevated role. The probe
+			// DOES run now, exactly once.
+			name:       "a riding share-holder is elevated AND keeps their grant",
 			grants:     map[string]ShareGrant{caller + "|" + vehicle: {AllowRides: true}},
 			riding:     true,
-			wantRole:   RoleViewer,
+			wantRole:   RoleRideMember,
 			wantRides:  true,
-			wantProbes: 0,
+			wantProbes: 1,
 		},
 		{
 			// FAILS CLOSED, as the caller's own denial rather than as an error:

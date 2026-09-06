@@ -1,13 +1,9 @@
 package ws
 
 import (
-	"context"
-	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/coder/websocket"
 
@@ -37,17 +33,49 @@ type Client struct {
 	// production this field stays false and an empty vehicleIDs slice
 	// means deny-all per NFR-3.21.
 	allVehicles bool
-	// vehicleRoles maps vehicleID -> role for this client. Populated at
-	// handshake time alongside vehicleIDs (handler.go authenticateClient).
-	// Per websocket-protocol.md §4.6, the hub looks up the role here to
-	// pick the role-appropriate pre-marshaled frame to enqueue. A
-	// missing entry resolves to the empty Role("") sentinel and the
-	// hub treats it as deny-all (fail-closed). See DV-09 for the
-	// known mid-connection refresh gap (role downgrade requires
-	// reconnect).
-	vehicleRoles map[string]auth.Role
+	// roles is this client's vehicleID -> role table, published as an
+	// IMMUTABLE MAP behind an atomic pointer. Seeded at handshake time
+	// alongside vehicleIDs (handler.go authenticateClient) and REPLACED
+	// WHOLE — never mutated in place — by the access revalidator when a
+	// window edge changes what a caller may see (MYR-602).
+	//
+	// Per websocket-protocol.md §4.6 the hub looks the role up here to pick
+	// the role-appropriate pre-marshaled frame to enqueue. A missing entry
+	// resolves to the empty Role("") sentinel and the hub treats it as
+	// deny-all (fail-closed).
+	//
+	// WHY AN ATOMIC SWAP AND NOT A MUTEX. This is read on the broadcast hot
+	// path — twice per BroadcastMasked call per client, at up to one frame
+	// per second per car — and it was previously a plain map written once at
+	// handshake and thereafter read with no synchronisation at all. That was
+	// safe only while nothing ever wrote to it again, which is exactly the
+	// property MYR-602 had to give up: a trip window opens and closes on the
+	// CLOCK, so a role can change under a live connection with no mutation
+	// anywhere to hang a handshake off. Replacing the whole map under an
+	// atomic pointer keeps the read lock-free (one atomic load) while making
+	// the write a publish rather than a data race, and readers see either the
+	// whole old table or the whole new one — never a half-updated one, which
+	// for a role table would mean a caller masked as two different tiers on
+	// two vehicles in the same frame.
+	roles atomic.Pointer[roleTable]
+	// rolesMu serialises READ-MODIFY-WRITE of the table above. The atomic
+	// pointer makes a single publish tear-free; it does nothing at all about
+	// two writers that each read the old table, each compute a new one from
+	// it, and each publish — the second silently discarding the first.
+	//
+	// That is not hypothetical here. The AccessRevalidator's SweepOnce is
+	// reachable from three places at once (its own 60-second ticker, and the
+	// trips service's nudge on every window edge and every participant added),
+	// and its re-mask is exactly such a read-modify-write. Two overlapping
+	// passes could therefore have a NARROWING publish overwritten by a
+	// concurrent pass holding a pre-narrowing resolution — leaving a
+	// participant whose window closed with live location until something else
+	// happened to re-mask them. Held across the resolve as well as the publish,
+	// so the losing pass re-reads the database after the winner's write rather
+	// than replaying a decision made before it.
+	rolesMu sync.Mutex
 	// defaultRole is the fallback role consulted ONLY when allVehicles=true
-	// and the per-vehicle vehicleRoles map has no entry for the requested
+	// and the per-vehicle roles table has no entry for the requested
 	// vehicleID. Set by the handshake to auth.RoleOwner for the dev-mode
 	// NoopAuthenticator path (whose ResolveRole returns RoleOwner
 	// unconditionally) so dev-mode clients receive role-projected frames
@@ -55,7 +83,7 @@ type Client struct {
 	// empty Role("") deny-all sentinel that left them silently filtered
 	// out (MYR-66). Production clients have allVehicles=false; defaultRole
 	// is never consulted, so the fail-closed deny-all posture for clients
-	// without an explicit vehicleRoles entry is preserved.
+	// without an explicit roles entry is preserved.
 	defaultRole auth.Role
 	// subscribed tracks which of the client's owned vehicles are
 	// currently active subscriptions. Initialized at handshake from
@@ -102,15 +130,16 @@ type Client struct {
 // newClient creates a Client that is not yet authenticated. The userID and
 // vehicleIDs are populated after the auth handshake completes.
 func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
-	return &Client{
-		conn:         conn,
-		send:         make(chan []byte, sendBufSize),
-		done:         make(chan struct{}),
-		vehicleRoles: make(map[string]auth.Role),
-		subscribed:   make(map[string]struct{}),
-		hub:          hub,
-		logger:       logger,
+	c := &Client{
+		conn:       conn,
+		send:       make(chan []byte, sendBufSize),
+		done:       make(chan struct{}),
+		subscribed: make(map[string]struct{}),
+		hub:        hub,
+		logger:     logger,
 	}
+	c.setRoles(nil)
+	return c
 }
 
 // markRevoked cuts this session off and wakes its writePump, in that order.
@@ -126,204 +155,4 @@ func newClient(conn *websocket.Conn, hub *Hub, logger *slog.Logger) *Client {
 func (c *Client) markRevoked() {
 	c.revoked.Store(true)
 	c.doneOnce.Do(func() { close(c.done) })
-}
-
-// roleFor returns the role this client holds against vehicleID. Resolution
-// order: (1) the per-vehicle vehicleRoles map populated at handshake; (2)
-// for clients with allVehicles=true that lack a per-vehicle entry, the
-// defaultRole set at handshake (the dev-mode NoopAuthenticator path);
-// (3) the empty Role("") fail-closed sentinel, which the mask layer in
-// internal/mask interprets as deny-all. Production clients (allVehicles=
-// false) skip step 2, so a missing vehicleRoles entry stays deny-all.
-func (c *Client) roleFor(vehicleID string) auth.Role {
-	if c == nil {
-		return auth.Role("")
-	}
-	if role, ok := c.vehicleRoles[vehicleID]; ok {
-		return role
-	}
-	if c.allVehicles {
-		return c.defaultRole
-	}
-	return auth.Role("")
-}
-
-// writePump reads messages from the send channel and writes them to the
-// WebSocket connection. It exits when the send channel is closed, the
-// context is cancelled, or the session is revoked (MYR-373).
-//
-// The revocation case is not a nicety: a revoked session can never receive
-// another message on c.send, so without an out-of-band signal this loop would
-// park forever and hold the whole teardown behind it — see Client.done.
-func (c *Client) writePump(ctx context.Context, writeTimeout time.Duration) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.done:
-			// Revoked. The 4002 close frame is written by RevokeUserAccess
-			// directly on the connection, not through this pump, so there is
-			// nothing left to flush and nothing to say on the way out.
-			return
-		case msg, ok := <-c.send:
-			if !ok {
-				// Hub closed the channel — send a close frame.
-				_ = c.conn.Close(websocket.StatusGoingAway, "server shutting down")
-				return
-			}
-			if err := c.writeMessage(ctx, msg, writeTimeout); err != nil {
-				c.logger.Debug("write failed, closing client",
-					slog.String("user_id", c.userID),
-					slog.Any("error", err),
-				)
-				return
-			}
-			c.hub.metrics.IncMessagesSent()
-		}
-	}
-}
-
-// readPump reads messages from the WebSocket. After authentication,
-// it dispatches client->server control frames (subscribe, unsubscribe,
-// ping — DV-07) and ignores any other frame type so unknown messages
-// from a future SDK do not poison the connection. Returns when the
-// socket is closed or the context cancels.
-func (c *Client) readPump(ctx context.Context, writeTimeout time.Duration) {
-	c.conn.SetReadLimit(readLimit)
-	for {
-		_, data, err := c.conn.Read(ctx)
-		if err != nil {
-			if !isNormalClose(err) {
-				c.logger.Debug("read error",
-					slog.String("user_id", c.userID),
-					slog.Any("error", err),
-				)
-			}
-			return
-		}
-		if !c.handleClientFrame(ctx, data, writeTimeout) {
-			// Returning false signals a hard close (subscribe to a
-			// non-owned vehicle). The handler has already emitted the
-			// typed error frame and closed the socket; just exit.
-			return
-		}
-	}
-}
-
-// enqueue adds a message to the client's send buffer. If the buffer is
-// full, it drops the oldest message to make room (drop-oldest policy).
-// Returns true if a message was dropped.
-//
-// THIS IS THE ONLY WRITER TO c.send, which is what makes the revoked check
-// below a real choke point rather than one of several (MYR-373). An earlier
-// version of this fix guarded `hasVehicle` instead and was WRONG: the
-// snapshot-on-subscribe path (snapshot.go `sendSnapshot`) reaches `enqueue`
-// without ever consulting `hasVehicle`, so a revoked session could still pull
-// live GPS by sending a `subscribe` frame during the close-handshake window.
-// Guarding the channel itself is the version of this claim that cannot be
-// bypassed by a path somebody adds later.
-//
-// A refusal returns FALSE, not true: `true` means "a message was dropped
-// because this client is slow" and feeds `IncMessagesDropped`. A revoked
-// session is not a slow client, and counting it as one would make a
-// revocation look like backpressure on the dashboards.
-func (c *Client) enqueue(msg []byte) bool {
-	if c.revoked.Load() {
-		return false
-	}
-	select {
-	case c.send <- msg:
-		return false
-	default:
-		// Buffer full — drop the oldest message.
-		select {
-		case <-c.send:
-		default:
-		}
-		// Now try again. This should always succeed because we just
-		// drained one slot (or the channel was consumed concurrently).
-		select {
-		case c.send <- msg:
-		default:
-			// Extremely unlikely race; just drop the new message.
-		}
-		return true
-	}
-}
-
-// hasVehicle reports whether this client is authorized AND currently
-// subscribed for the given vehicle ID. allVehicles=true (dev-mode
-// NoopAuthenticator) short-circuits to true. Otherwise the vehicleID
-// must be in the per-client subscription set, which is initialized
-// from vehicleIDs at handshake and modified by subscribe/unsubscribe
-// (DV-07 / MYR-46). An empty vehicleIDs slice with allVehicles=false
-// means deny-all (NFR-3.21).
-//
-// A session marked revoked (MYR-373) is deny-all for EVERY vehicle, including
-// the dev-mode wildcard, and the check comes first for that reason: it is the
-// one condition that must beat every other way of being authorized.
-func (c *Client) hasVehicle(vehicleID string) bool {
-	if c.revoked.Load() {
-		return false
-	}
-	if c.allVehicles {
-		return true
-	}
-	c.subMu.RLock()
-	_, ok := c.subscribed[vehicleID]
-	c.subMu.RUnlock()
-	return ok
-}
-
-// owns reports whether the client was authorized for vehicleID at
-// handshake time. Used by the subscribe handler to gate the
-// permission_denied path before mutating the subscription set, so the
-// ownership check is independent of the current subscription state.
-func (c *Client) owns(vehicleID string) bool {
-	if c.allVehicles {
-		return true
-	}
-	return slices.Contains(c.vehicleIDs, vehicleID)
-}
-
-// subscribe adds vehicleID to the active subscription set. Caller MUST
-// have verified ownership (Client.owns) first — the typed error frame
-// for vehicle_not_owned is emitted by the readPump dispatcher, not
-// here. Idempotent.
-func (c *Client) subscribe(vehicleID string) {
-	c.subMu.Lock()
-	c.subscribed[vehicleID] = struct{}{}
-	c.subMu.Unlock()
-}
-
-// unsubscribe removes vehicleID from the active subscription set.
-// Idempotent: removing an already-absent ID is a no-op. Does NOT
-// require ownership — a subscribed-but-since-revoked vehicle should
-// still be removable so the client can drain the set on logout.
-func (c *Client) unsubscribe(vehicleID string) {
-	c.subMu.Lock()
-	delete(c.subscribed, vehicleID)
-	c.subMu.Unlock()
-}
-
-// writeMessage writes a single message to the WebSocket with a timeout.
-func (c *Client) writeMessage(ctx context.Context, msg []byte, timeout time.Duration) error {
-	writeCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	if err := c.conn.Write(writeCtx, websocket.MessageText, msg); err != nil {
-		return fmt.Errorf("client.writeMessage(user=%s): %w", c.userID, err)
-	}
-	return nil
-}
-
-// isNormalClose reports whether the error represents a normal WebSocket
-// closure (client disconnecting cleanly or context cancelled).
-func isNormalClose(err error) bool {
-	if err == context.Canceled { //nolint:errorlint // exact sentinel match intentional
-		return true
-	}
-	status := websocket.CloseStatus(err)
-	return status == websocket.StatusNormalClosure ||
-		status == websocket.StatusGoingAway
 }

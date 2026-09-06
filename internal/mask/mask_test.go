@@ -51,7 +51,13 @@ func TestApply_PartialMask_StripsVIN(t *testing.T) {
 	// This case used `licensePlate` until MYR-286 moved that field into BOTH
 	// role allow-lists, leaving `vin` as the only owner-only VehicleState
 	// field and therefore the canonical partial-mask fixture.
-	mask := For(ResourceVehicleState, auth.RoleViewer)
+	//
+	// MYR-602 retargeted it from `viewer` to `ride_member`. This test is about
+	// APPLY'S MECHANICS — one field stripped, the rest passed through, the
+	// stripped one named — and it needs a role that keeps `speed` to have
+	// anything to pass through. The narrowed plain viewer no longer does; the
+	// narrowing itself is asserted by TestFor_VehicleState_PlainViewerHasNoLiveLocation.
+	mask := For(ResourceVehicleState, auth.RoleRideMember)
 	input := map[string]any{
 		"speed":       65,
 		"chargeLevel": 82,
@@ -78,7 +84,10 @@ func TestApply_AbsentNotNulled_OnJSONSerialization(t *testing.T) {
 	// rest-api.md §5.1 requires denied fields to be ABSENT from the
 	// JSON, not emitted with a null value. Verify by round-tripping
 	// the projected map and inspecting raw JSON for the key name.
-	mask := For(ResourceVehicleState, auth.RoleViewer)
+	//
+	// `ride_member` for the same reason as the test above: the absent-not-nulled
+	// property needs a surviving key to contrast against a stripped one.
+	mask := For(ResourceVehicleState, auth.RoleRideMember)
 	input := map[string]any{
 		"speed": 65,
 		"vin":   "7SAYGDET7TA613795",
@@ -115,8 +124,28 @@ func TestApply_Idempotent(t *testing.T) {
 	if !reflect.DeepEqual(first, second) {
 		t.Errorf("Apply not idempotent: first=%v, second=%v", first, second)
 	}
-	if len(secondMasked) != 0 {
-		t.Errorf("second pass should mask nothing, got %v", secondMasked)
+
+	// MYR-602 SPLIT THE TWO HALVES OF THIS ASSERTION APART, and only one of
+	// them was ever the contract.
+	//
+	// IDEMPOTENCE IS ABOUT `out`, and it still holds exactly: the second pass
+	// produces the same map, key for key and value for value, which is what a
+	// re-projecting caller (the hub, on replay) depends on.
+	//
+	// `fieldsMasked` is NOT idempotent any more, and must not be. A
+	// sentinel-substituted field leaves its KEY behind carrying a no-value
+	// spelling (sentinels.go), so the second pass meets it again and reports
+	// the same withholding again — which is the honest audit answer, because
+	// the value really was withheld on both passes. Requiring silence here
+	// would force Apply to either forget the substitution or read the value
+	// back to guess whether it had already happened.
+	//
+	// What must still be empty is the set of fields that were REMOVED: `vin`
+	// is gone after the first pass, so nothing can strip it twice.
+	for _, field := range secondMasked {
+		if _, substituted := mask.Sentinels[field]; !substituted {
+			t.Errorf("second pass removed %q, which the first pass should already have taken", field)
+		}
 	}
 }
 
@@ -216,9 +245,16 @@ func TestFor_VehicleSummary_BothRolesHaveLicensePlate(t *testing.T) {
 // renders "{Owner}'s {Vehicle}" — so re-introducing the subtraction has to
 // break a test rather than ship quietly. Any future subtraction here MUST be
 // paired with making the field optional in the schema.
+//
+// MYR-602 ADDED THE FIRST SUBTRACTION — `location` — and this test is written
+// against the LIVE-VIEWER arm (ride_member / trip_participant), which still
+// subtracts nothing. The plain-viewer arm's single subtraction has its own
+// test, TestFor_VehicleSummary_PlainViewerLosesOnlyLocation, and `location` is
+// OPTIONAL in vehicle-summary.schema.json, which is the pairing the paragraph
+// above demands of any subtraction.
 func TestFor_VehicleSummary_ViewerIsOwnerPlusSharePermission(t *testing.T) {
 	owner := For(ResourceVehicleSummary, auth.RoleOwner)
-	viewer := For(ResourceVehicleSummary, auth.RoleViewer)
+	viewer := For(ResourceVehicleSummary, auth.RoleTripParticipant)
 
 	for field := range owner.Allowed {
 		if _, ok := viewer.Allowed[field]; !ok {
@@ -244,6 +280,46 @@ func TestFor_VehicleSummary_ViewerIsOwnerPlusSharePermission(t *testing.T) {
 	}
 }
 
+// TestFor_VehicleSummary_PlainViewerLosesOnlyLocation pins MYR-602's catalog
+// narrowing precisely: a plain viewer's row is the elevated row minus EXACTLY
+// `location`, and nothing else moved with it.
+//
+// Both directions matter. If the subtraction ever grew, a rider's picker row
+// would start losing charge or availability and the client would render a
+// broken card; if it ever shrank back to nothing, the whole client decision
+// ("you should really only see live location during an active trip or ride")
+// would be silently undone with no other test noticing.
+func TestFor_VehicleSummary_PlainViewerLosesOnlyLocation(t *testing.T) {
+	viewer := For(ResourceVehicleSummary, auth.RoleViewer)
+	live := For(ResourceVehicleSummary, auth.RoleTripParticipant)
+
+	if _, ok := viewer.Allowed[vehicleSummaryLiveLocationField]; ok {
+		t.Errorf("plain viewer catalog mask still carries %q — MYR-602 removed it, and "+
+			"leaving it here makes the catalog the weaker surface setting the real "+
+			"privacy bound", vehicleSummaryLiveLocationField)
+	}
+	if _, ok := live.Allowed[vehicleSummaryLiveLocationField]; !ok {
+		t.Errorf("trip_participant catalog mask is missing %q — the window is supposed to "+
+			"restore it", vehicleSummaryLiveLocationField)
+	}
+	for field := range live.Allowed {
+		if field == vehicleSummaryLiveLocationField {
+			continue
+		}
+		if _, ok := viewer.Allowed[field]; !ok {
+			t.Errorf("%q is visible to trip_participant but not to a plain viewer, and it "+
+				"is not %q — MYR-602 subtracted exactly one catalog field",
+				field, vehicleSummaryLiveLocationField)
+		}
+	}
+	for field := range viewer.Allowed {
+		if _, ok := live.Allowed[field]; !ok {
+			t.Errorf("%q reaches a plain viewer but NOT a trip_participant — the elevated "+
+				"role must be a superset", field)
+		}
+	}
+}
+
 func TestFor_VehicleState_OwnerHasSpeed(t *testing.T) {
 	owner := For(ResourceVehicleState, auth.RoleOwner)
 	if _, ok := owner.Allowed["speed"]; !ok {
@@ -251,15 +327,77 @@ func TestFor_VehicleState_OwnerHasSpeed(t *testing.T) {
 	}
 }
 
+// TestFor_VehicleState_ViewerRetainsSharedFields is now about the WINDOW-SCOPED
+// roles. FR-5.1's sharing use case did not go away — MYR-602 moved it behind a
+// ride or a trip, which is where the client says it belongs.
 func TestFor_VehicleState_ViewerRetainsSharedFields(t *testing.T) {
-	viewer := For(ResourceVehicleState, auth.RoleViewer)
-	if _, ok := viewer.Allowed["speed"]; !ok {
-		t.Error("viewer mask missing speed")
+	for _, role := range auth.LiveLocationRoles() {
+		t.Run(role.String(), func(t *testing.T) {
+			m := For(ResourceVehicleState, role)
+			if _, ok := m.Allowed["speed"]; !ok {
+				t.Errorf("%s mask missing speed", role)
+			}
+			for _, f := range []string{"latitude", "longitude", "destinationName", "navRouteCoordinates"} {
+				if _, ok := m.Allowed[f]; !ok {
+					t.Errorf("%s mask missing %q (required for FR-5.1)", role, f)
+				}
+			}
+		})
 	}
-	// Viewer should retain GPS / nav per FR-5.1 sharing use case.
-	for _, f := range []string{"latitude", "longitude", "destinationName", "navRouteCoordinates"} {
+}
+
+// TestFor_VehicleState_PlainViewerHasNoLiveLocation is the MYR-602 headline
+// assertion at the table: a standing accepted share, with no ride and no open
+// trip window, receives NOT ONE field that says where the car is or where it is
+// going.
+//
+// Iterated over vehicleStateLiveLocationFields rather than over a hand-written
+// list, so a field added to the location/navigation set is covered the moment
+// it is classified there and cannot be forgotten here.
+func TestFor_VehicleState_PlainViewerHasNoLiveLocation(t *testing.T) {
+	viewer := For(ResourceVehicleState, auth.RoleViewer)
+	for _, f := range vehicleStateLiveLocationFields {
+		if _, ok := viewer.Allowed[f]; ok {
+			t.Errorf("plain viewer mask still allows %q — MYR-602 (client decision, "+
+				"2026-09-05) restricts live location and navigation to an active ride "+
+				"or an open trip window", f)
+		}
+	}
+	// Non-vacuity: the viewer must still be a usable catalog row.
+	for _, f := range []string{"vehicleId", "name", "status", "chargeLevel", "lastUpdated"} {
 		if _, ok := viewer.Allowed[f]; !ok {
-			t.Errorf("viewer mask missing %q (required for FR-5.1)", f)
+			t.Errorf("plain viewer mask lost %q — the narrowing was supposed to take the "+
+				"location and navigation groups, not the car's identity or availability", f)
+		}
+	}
+}
+
+// TestLiveRolesMatchThePreMYR602ViewerSet is the migration-safety pin: the two
+// window-scoped roles see EXACTLY what a viewer saw before MYR-602, so ride
+// tracking (MYR-540) is untouched by the narrowing. Composed rather than
+// asserted against a frozen literal, because the composition IS the claim.
+func TestLiveRolesMatchThePreMYR602ViewerSet(t *testing.T) {
+	want := make(map[string]struct{})
+	for _, f := range vehicleStateViewerFields {
+		want[f] = struct{}{}
+	}
+	for _, f := range vehicleStateLiveLocationFields {
+		if _, dup := want[f]; dup {
+			t.Errorf("%q is in BOTH vehicleStateViewerFields and "+
+				"vehicleStateLiveLocationFields — the two lists must partition the "+
+				"non-owner surface, not overlap", f)
+		}
+		want[f] = struct{}{}
+	}
+	for _, role := range auth.LiveLocationRoles() {
+		got := For(ResourceVehicleState, role).Allowed
+		if len(got) != len(want) {
+			t.Errorf("%s allows %d fields, want %d", role, len(got), len(want))
+		}
+		for f := range want {
+			if _, ok := got[f]; !ok {
+				t.Errorf("%s is missing %q", role, f)
+			}
 		}
 	}
 }

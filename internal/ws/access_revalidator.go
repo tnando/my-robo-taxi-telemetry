@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/myrobotaxi/telemetry/internal/auth"
 )
 
 // DefaultRevalidateInterval is how often the backstop sweep re-derives every
@@ -24,10 +26,11 @@ import (
 // therefore correct regardless of who mutated what, where.
 const DefaultRevalidateInterval = 60 * time.Second
 
-// AccessResolver re-derives a user's authorized vehicle set. Defined at the
-// consumer site; satisfied by the same *auth.JWTAuthenticator the handshake
-// already uses, so the sweep and the handshake cannot disagree about what a
-// user may see.
+// AccessResolver re-derives a user's authorized vehicle set AND their role on
+// each vehicle in it. Defined at the consumer site; satisfied by the same
+// *auth.JWTAuthenticator the handshake already uses, so the sweep and the
+// handshake cannot disagree about what a user may see — nor, since MYR-602,
+// about which TIER they see it at.
 //
 // Note the cache underneath: JWTAuthenticator serves this from a 5-minute
 // per-process cache. On the machine that served the mutation the entry was
@@ -36,11 +39,42 @@ const DefaultRevalidateInterval = 60 * time.Second
 // there is the TTL plus one interval. Both are bounded; only the first is fast.
 type AccessResolver interface {
 	GetUserVehicles(ctx context.Context, userID string) ([]string, error)
+	// ResolveRole re-derives one (user, vehicle) role. Same method the
+	// handshake calls, so a window edge resolves identically whether the
+	// caller reconnected or was re-masked in place.
+	ResolveRole(ctx context.Context, userID, vehicleID string) (auth.Role, error)
 }
 
 // AccessRevalidator periodically re-derives every connected user's access set
 // and closes sessions that are holding a vehicle the user can no longer see
-// (MYR-373, websocket-protocol.md §10 DV-09).
+// (MYR-373, websocket-protocol.md §10 DV-09) — and, since MYR-602, RE-MASKS in
+// place the sessions whose access changed TIER rather than disappearing.
+//
+// THE SECOND JOB IS WHAT TRIPS NEEDED. A share is revoked by somebody clicking
+// something, so there is a mutation to hang the fast nudge off. A TRIP WINDOW
+// OPENS AND CLOSES ON THE CLOCK: nothing is written at `starts_at`, nobody
+// calls anything at `ends_at`, and the only thing that has changed a
+// millisecond later is what `NOW()` returns inside the access query. So this
+// sweep is not a backstop for the window case — it IS the mechanism, and its
+// interval is the whole latency budget (~60s, matching the trip sweeper's).
+//
+// Two directions, and both are real:
+//
+//   - NARROWING. A participant whose window just closed still holds their
+//     accepted share, so the VEHICLE stays in their access set and the old
+//     kick-on-loss path never fires. Without a role re-resolution they would
+//     keep receiving the live GPS the window was the entire justification for,
+//     for as long as they left the socket open. They are re-masked down to
+//     `viewer` instead — the connection survives, the location stops.
+//   - WIDENING. A share-holder whose window just opened is already connected as
+//     a plain `viewer`, and their frozen handshake role would have kept them
+//     there until they happened to reconnect. They are promoted to
+//     `trip_participant` in place, which is what makes "the trip started and my
+//     map came alive" true without the app having to reconnect on a timer.
+//
+// A KICK STILL BEATS A RE-MASK. The lost-vehicle check runs first and returns:
+// a session that must be closed is closed, and re-masking a client that is
+// about to be torn down would be work for a socket with no future.
 type AccessRevalidator struct {
 	hub      *Hub
 	resolver AccessResolver
@@ -94,7 +128,16 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 	// cannot close one tab and spare another on a cache expiry landing
 	// mid-loop.
 	resolved := make(map[string]accessSet, len(clients))
-	closed := 0
+	// AND ONE ROLE RESOLUTION PER (USER, VEHICLE), for the same two reasons the
+	// access memo above gives. A user with three tabs open holds one role on
+	// each car, and resolving once guarantees every session of that user is
+	// re-masked to the SAME answer — so a pass cannot narrow one tab and leave
+	// another elevated because a cache entry lapsed mid-loop. It also bounds
+	// the pass's database work by (distinct users × their cars) rather than by
+	// connections, which is what keeps the 60-second interval — the whole
+	// window-edge latency budget — affordable.
+	roles := make(map[userVehicle]auth.Role, len(clients))
+	closed, remasked := 0, 0
 
 	for _, client := range clients {
 		// Dev-mode wildcard clients are authorized for everything by
@@ -125,6 +168,13 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 
 		if lost, found := firstLostVehicle(client, allowed); found {
 			closed += r.hub.RevokeUserAccess(client.userID, lost, "revalidation_backstop")
+			continue
+		}
+		// MYR-602 — the access set is intact; is the TIER? Only reached for a
+		// session that is staying open, and only for the vehicles it actually
+		// holds.
+		if r.remaskClient(ctx, client, roles) {
+			remasked++
 		}
 	}
 
@@ -132,13 +182,32 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 	// signal worth seeing — either the nudge did not reach this hub, or a
 	// mutation happened somewhere that does not publish — and logging every
 	// quiet pass at Info would bury exactly that line once a minute forever.
-	if closed > 0 {
-		r.logger.Info("access revalidation backstop closed sessions",
+	if closed > 0 || remasked > 0 {
+		r.logger.Info("access revalidation swept",
 			slog.Int("sessions_closed", closed),
+			// MYR-602: a re-mask is the ORDINARY outcome at a trip window edge,
+			// unlike a close, which always means the nudge failed to arrive.
+			// Both are on one line so an operator reading it can tell a window
+			// opening from a grant being pulled.
+			slog.Int("sessions_remasked", remasked),
 			slog.Int("clients_examined", len(clients)),
 		)
 	}
 	return closed
+}
+
+// resolveRole fetches one (user, vehicle) role under the same timeout the
+// access read uses, for the same reason: the sweep walks every connected
+// session on one goroutine, and a hung read would wedge every later pass.
+func (r *AccessRevalidator) resolveRole(ctx context.Context, userID, vehicleID string) (auth.Role, error) {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
+
+	role, err := r.resolver.ResolveRole(ctx, userID, vehicleID)
+	if err != nil {
+		return auth.Role(""), fmt.Errorf("revalidator.resolveRole(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+	}
+	return role, nil
 }
 
 // accessSet is one user's current entitlement.

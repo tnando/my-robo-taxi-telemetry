@@ -168,6 +168,24 @@ func (a *accountDataDeleterAdapter) DeleteVehicleDriverAccess(ctx context.Contex
 	return a.deleter.DeleteVehicleDriverAccess(ctx, userID)
 }
 
+// DeleteTripsOwned drops the trips this person created (MYR-602, §3.1 step 8g).
+// The roster, the push-to-start tokens and the legs cascade off go_trips(id).
+func (a *accountDataDeleterAdapter) DeleteTripsOwned(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripsOwned(ctx, userID)
+}
+
+// DeleteTripParticipations removes this person from other people's trips
+// (MYR-602, §3.1 step 8g).
+func (a *accountDataDeleterAdapter) DeleteTripParticipations(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripParticipations(ctx, userID)
+}
+
+// DeleteTripActivityTokens removes the push-to-start registrations the cascade
+// above did not reach (MYR-602, §3.1 step 8g).
+func (a *accountDataDeleterAdapter) DeleteTripActivityTokens(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripActivityTokens(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -177,6 +195,13 @@ func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, use
 // access set that list admits to the ride's vehicle.
 func (a *accountDataDeleterAdapter) DeleteRideMemberships(ctx context.Context, userID string) (int, error) {
 	return a.deleter.DeleteRideMemberships(ctx, userID)
+}
+
+// DeleteTripLegActivities drops the account's leg-anchored Live Activity rows
+// (MYR-602, §3.1 step 8g), leaving its RIDE Activities to the ride teardown
+// that is responsible for end-pushing them first.
+func (a *accountDataDeleterAdapter) DeleteTripLegActivities(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripLegActivities(ctx, userID)
 }
 
 func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope telemetry.AccountDeletionScope, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
@@ -200,6 +225,16 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		TeslaTokenKeepaliveRowsDeleted:  counts.TeslaTokenKeepaliveRowsDeleted,
 		RemovedVehicleTombstonesDeleted: counts.RemovedVehicleTombstonesDeleted,
 		VehicleDriverAccessRowsDeleted:  counts.VehicleDriverAccessRowsDeleted,
+
+		// MYR-602 — four counts, one per relation a person can stand in to a
+		// trip. All four are plain integers, which is the audit row's whole
+		// P0 rule (CG-DL-5): a trip NAME is P1 user content and a
+		// push-to-start token is a P1 capability, and neither may cross this
+		// boundary in any form but a tally.
+		TripsDeleted:              counts.TripsDeleted,
+		TripParticipationsDeleted: counts.TripParticipationsDeleted,
+		TripActivityTokensDeleted: counts.TripActivityTokensDeleted,
+		TripLegActivitiesDeleted:  counts.TripLegActivitiesDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

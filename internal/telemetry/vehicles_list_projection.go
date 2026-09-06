@@ -43,8 +43,10 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		ChargeLevel:    v.ChargeLevel,
 		EstimatedRange: v.EstimatedRange,
 		LastUpdated:    v.LastUpdated.UTC().Format(time.RFC3339),
-		Role:           string(role),
-		HasActiveRide:  v.HasActiveRide,
+		// MYR-602: the WIRE role, not the internal one. Four RBAC roles now
+		// exist and the contract's enum still has two — see wireRole.
+		Role:          wireRole(role),
+		HasActiveRide: v.HasActiveRide,
 		// MYR-316: resolved here so the precedence and the in-service gate
 		// are applied exactly once per surface (service_window.go).
 		ServiceEstimatedEndAt: serviceEstimatedEndAtWire(v.Status, v.ServiceETC, v.ServiceExpectedEndAt),
@@ -85,12 +87,22 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// driver-access row IS the claim.
 		TeslaAccessType: teslaAccessTypeWire(v.DriverAccess),
 	}
-	if role == auth.RoleViewer {
+	if role != auth.RoleOwner {
 		// DERIVED, not stored (MYR-369): the grant's flags decide the
 		// compatibility value a pre-MYR-369 client reads. A suspended grant
 		// never reaches here — the viewer's catalog query excludes it, so
 		// the vehicle is absent from the response entirely rather than
 		// present with some reduced value.
+		//
+		// MYR-602 WIDENED THE CONDITION from `== RoleViewer` to `!= RoleOwner`,
+		// and the change is not cosmetic. `sharePermission` is keyed to the WIRE
+		// role (`viewer`), which every non-owner row still carries — so when the
+		// mask role split into three, a ride member's row started emitting
+		// `role: "viewer"` with the tier MISSING. A consumer told to read an
+		// absent tier as the lowest one would have been guessing about a car it
+		// was sitting in. Owners are excluded for the original reason: an owner
+		// holds no grant, and stating one would read as a downgrade of their own
+		// access.
 		summary.SharePermission = grant.Permission().String()
 	}
 	return summary
@@ -123,4 +135,34 @@ func derefTrim(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// wireRole projects an internal auth.Role onto the two-value enum
+// `VehicleSummary.role` has carried since v1: `owner` or `viewer`.
+//
+// THERE ARE FOUR INTERNAL ROLES AND TWO WIRE VALUES, and this function is the
+// only place the gap is crossed. MYR-602 introduced `ride_member` and
+// `trip_participant` as MASK roles — they decide which FIELDS a caller
+// receives — and deliberately did not widen the wire enum:
+//
+//   - vehicle-summary.schema.json declares `role` as a CLOSED enum. A client
+//     decoding it into a Swift enum or a TypeScript union rejects an
+//     unrecognised member, so emitting "trip_participant" would not degrade
+//     gracefully — it would fail the whole row on every shipped build.
+//   - The client does not need it. The distinction the app actually renders is
+//     "is there a trip open on this car right now", and that is `activeTripId`
+//     — a value, not a role — which is exactly why the contract added it as a
+//     separate field rather than as a third role.
+//   - An RBAC role is an internal name. Publishing it would make every future
+//     narrowing or split a breaking wire change.
+//
+// TOTAL BY CONSTRUCTION: anything that is not RoleOwner is a non-owner, so a
+// role added later without touching this function is reported as `viewer` —
+// the narrower, safer answer. TestWireRoleNeverEmitsAnInternalRoleName pins
+// that no auth.Role maps to its own name.
+func wireRole(role auth.Role) string {
+	if role == auth.RoleOwner {
+		return string(auth.RoleOwner)
+	}
+	return string(auth.RoleViewer)
 }

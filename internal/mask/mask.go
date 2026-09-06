@@ -49,11 +49,32 @@ const (
 // inside Apply. The zero value (nil Allowed) represents the deny-all
 // mask, which is what fail-closed produces for unknown (resource, role)
 // pairs.
+//
+// ⚠ BOTH MAPS ARE IMMUTABLE AFTER INIT AND MUST NEVER BE WRITTEN TO. `For`
+// returns the table's own map by REFERENCE, not a copy, so every caller
+// projecting a frame for one (resource, role) pair shares one map — a single
+// write would silently change what every later projection on the process
+// emits, for every connected client, with nothing in the diff to explain it.
+// Reads are race-safe precisely because there are no writes: the tables are
+// built once at package init and never touched again. A caller needing a
+// variant must build its own map, not edit this one.
 type ResourceMask struct {
 	// Allowed is the set of field names that should pass through Apply.
 	// A nil or empty map produces an empty projected payload regardless
 	// of input.
 	Allowed map[string]struct{}
+
+	// Sentinels is the SUBSTITUTION table: field names that are NOT allowed
+	// but that must nonetheless appear in the output, mapped to the no-value
+	// spelling to emit in place of the real one. Nil on almost every mask —
+	// see sentinels.go for the single case that needs it (MYR-602's narrowed
+	// `viewer` against the six schema-REQUIRED location fields) and for why
+	// removing them outright would make the frame undecodable rather than
+	// merely narrower.
+	//
+	// A name in BOTH maps is a contradiction; Allowed wins in Apply and
+	// TestSentinelsNeverOverlapTheAllowList forbids the state outright.
+	Sentinels map[string]any
 }
 
 // allows reports whether the given field name is permitted by this
@@ -71,7 +92,11 @@ func (m ResourceMask) allows(field string) bool {
 //   - out: a new map containing only the keys allowed by mask. Allowed
 //     keys map to the same value as in input. Keys absent from mask are
 //     omitted from out entirely (no key emitted) — see "absent, not
-//     nulled" in rest-api.md §5.1.
+//     nulled" in rest-api.md §5.1 — UNLESS the mask carries a sentinel for
+//     them, in which case the key survives carrying the schema's documented
+//     no-value spelling instead of the real one. See sentinels.go: that
+//     exception exists only for fields the schema declares `required`, where
+//     removing the key does not narrow the frame but makes it undecodable.
 //   - fieldsMasked: the names of input keys that were removed by the
 //     projection. Used by the audit-log emit path (deferred, see
 //     audit.go and the TODOs in the hub / REST handler) to record which
@@ -90,6 +115,17 @@ func Apply(input map[string]any, mask ResourceMask) (out map[string]any, fieldsM
 		if mask.allows(k) {
 			out[k] = v
 			continue
+		}
+		// WITHHELD. The value never survives; the only question is whether
+		// the KEY does. It does for the handful of fields the schema declares
+		// required (sentinels.go) and for nothing else.
+		//
+		// Substituted fields are still reported in fieldsMasked, deliberately:
+		// the audit trail records what was WITHHELD, and a sentinel is a
+		// withholding that happens to leave a key behind. Recording it as
+		// visible would make the audit understate the projection.
+		if s, ok := mask.sentinel(k); ok {
+			out[k] = s
 		}
 		fieldsMasked = append(fieldsMasked, k)
 	}
@@ -112,3 +148,17 @@ func For(resource ResourceType, role auth.Role) ResourceMask {
 	}
 	return mask
 }
+
+// Allows reports whether a field survives this mask.
+//
+// The exported form of the internal predicate, added by MYR-602 for the ONE
+// caller that must consult a mask WITHOUT running a projection: the catalog's
+// trip merge stamps `activeTripId` onto rows the earlier merge legs have
+// already projected, so it has no unprojected map to pass through Apply.
+//
+// STAMPING PAST A MASK IS EXACTLY THE PATTERN THIS PACKAGE EXISTS TO PREVENT,
+// so the stamp asks first. Consulting the mask keeps the allow-list the single
+// authority over that field: remove `activeTripId` from a role's list and the
+// stamp stops, rather than continuing to write a key the table no longer
+// permits.
+func (m ResourceMask) Allows(field string) bool { return m.allows(field) }

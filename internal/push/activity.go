@@ -1,7 +1,6 @@
 package push
 
 import (
-	"context"
 	"time"
 	"unicode/utf8"
 )
@@ -31,6 +30,21 @@ const (
 	// to its dismissed-pending state; the dismissal-date decides when it leaves
 	// the lock screen.
 	ActivityEventEnd ActivityEvent = "end"
+	// ActivityEventStart PUSH-TO-STARTS an Activity that does not exist yet
+	// (MYR-602, iOS 17.2+).
+	//
+	// IT EXISTS BECAUSE A TRIP LEG BEGINS WHILE THE APP IS NOT RUNNING. Every
+	// ride Activity is started LOCALLY by the app, at a moment the rider is
+	// looking at their phone — they tapped Book. A leg begins when a car in
+	// another state pulls out of a car park with a destination set, and no
+	// participant's phone is involved in that at all; iOS gives a backgrounded
+	// app no way to start an Activity, so the only way a leg card can appear is
+	// for the SERVER to create it.
+	//
+	// It is addressed by a PUSH-TO-START token (go_trip_activity_tokens), not
+	// by an Activity update token, and it is the only event that carries
+	// `attributes-type` and `attributes`. See buildActivityPayload.
+	ActivityEventStart ActivityEvent = "start"
 )
 
 // ActivityContentStateVersion is the `v` discriminator carried in every
@@ -144,6 +158,34 @@ type ActivityContentState struct {
 	// activity_progress.go for the derivation and its honesty bounds.
 	Progress *float64 `json:"progress,omitempty"`
 
+	// Kind is which sort of journey this card shows — `trip` on a trip leg,
+	// omitted on a ride (MYR-602, contracts v0.41.0).
+	//
+	// OMITTED IS `ride`, permanently rather than transitionally, which is what
+	// keeps every ride payload byte-identical to what it was before this field
+	// existed and lets a build compiled before v0.41.0 decode a leg's payload
+	// unchanged — it renders it as the ride card it already knows, and every
+	// field it reads still means what it meant.
+	//
+	// P0: a two-member enum saying which product surface this card belongs to.
+	Kind ActivityKind `json:"kind,omitempty"`
+
+	// TripName is the owner's label for the trip window, present only when Kind
+	// is `trip` (MYR-602).
+	//
+	// Its job is DISAMBIGUATION, which is a real problem on this surface and on
+	// no other: a person can be a participant on two trips at once, on two
+	// different friends' cars, and "Optimus · Grand Canyon Village" does not say
+	// whose road trip that is. A rider has exactly one ride card and never has
+	// to ask.
+	//
+	// P1 USER CONTENT, the same tier and the same handling as `Destination`
+	// beside it: sealed at rest on the trip row, carried here narrowly because a
+	// Live Activity is addressed by a token scoped to one card on one device,
+	// and NEVER in an alert body or a push title — copy_trips.go states that
+	// rule and holds it.
+	TripName string `json:"tripName,omitempty"`
+
 	// AsOf is when the DATA in this content-state was true, in unix seconds
 	// (MYR-398, the v3 card). The client renders it as the stale presentation's
 	// subline, "Last updated {h:mm A}".
@@ -228,63 +270,3 @@ func truncateLabel(s string) string {
 // does not flap the display, short enough that a rider is never confidently
 // misinformed.
 const StaleAfter = 3 * time.Minute
-
-// ActivityNotification is one addressed Live Activity update.
-type ActivityNotification struct {
-	// ActivityToken is the ActivityKit update token. P1 — never log in full.
-	ActivityToken string
-	// Sandbox selects the APNs sandbox host (development builds).
-	Sandbox bool
-	// Event is `update` or `end`.
-	Event ActivityEvent
-	// ContentState is the state the Activity will display.
-	ContentState ActivityContentState
-	// Timestamp is when this state was true. ActivityKit uses it to discard an
-	// update that arrives out of order, which the network makes routine.
-	Timestamp time.Time
-	// DismissalDate, set only on an end event, is when iOS removes the Activity
-	// from the lock screen. Nil on an end event means "dismiss immediately".
-	DismissalDate *time.Time
-	// LowPriority sends at apns-priority 5 instead of 10. ⚠️ NO PRODUCTION
-	// CALLER SETS IT SINCE MYR-573: the ETA ticker rode it per MYR-194
-	// decision 3, and field evidence reversed that — priority-5 Activity
-	// updates are deferred indefinitely on a locked phone, so the card only
-	// ever moved on lifecycle alerts. Kept as the deliberate retreat shape
-	// (one line in the ticker re-enables it if Apple ever throttles the
-	// immediate budget), and pinned by TestActivityTickUsesConservingPriority
-	// so the header mapping cannot rot. Ignored when Alert is set — see
-	// priority().
-	LowPriority bool
-	// Alert, when set, adds an `aps.alert` dictionary that makes iOS expand the
-	// Dynamic Island for ~3s (MYR-398). Nil on all but the six phase changes;
-	// see activity_alert.go for why "nil" is the overwhelmingly common case.
-	Alert *ActivityAlert
-}
-
-// ActivitySender delivers ActivityKit remote updates.
-//
-// Defined at the consumer site, like Sender beside it, so the Live Activity
-// notifier can be tested against a spy without an APNs key.
-type ActivitySender interface {
-	SendActivity(ctx context.Context, n ActivityNotification) error
-}
-
-// StaleDate is when this update stops being trustworthy.
-func (n ActivityNotification) StaleDate() time.Time {
-	return n.Timestamp.Add(StaleAfter)
-}
-
-// priority renders the apns-priority header for this update.
-//
-// AN ALERTING UPDATE IS ALWAYS IMMEDIATE, whatever the caller asked for — a
-// push whose entire purpose is to open the island for three seconds is not a
-// refresh that can afford to be dropped or coalesced. (Historical note: until
-// MYR-573 the ETA ticker set LowPriority, so this promotion was load-bearing on
-// every Arriving alert; today no production caller sets the flag and the guard
-// is defence for the retreat path.)
-func (n ActivityNotification) priority() string {
-	if n.LowPriority && n.Alert == nil {
-		return priorityConserving
-	}
-	return priorityImmediate
-}

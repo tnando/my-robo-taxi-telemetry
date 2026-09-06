@@ -307,29 +307,38 @@ func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID stri
 	}
 	items := make([]telemetry.DriveListItem, 0, len(page.Items))
 	for i := range page.Items {
-		d := &page.Items[i]
-		items = append(items, telemetry.DriveListItem{
-			ID:               d.ID,
-			VehicleID:        d.VehicleID,
-			StartTime:        d.StartTime,
-			EndTime:          d.EndTime,
-			Date:             d.Date,
-			StartLocation:    d.StartLocation,
-			StartAddress:     d.StartAddress,
-			EndLocation:      d.EndLocation,
-			EndAddress:       d.EndAddress,
-			DistanceMiles:    d.DistanceMiles,
-			DurationMinutes:  d.DurationMinutes,
-			AvgSpeedMph:      d.AvgSpeedMph,
-			MaxSpeedMph:      d.MaxSpeedMph,
-			StartChargeLevel: d.StartChargeLevel,
-			EndChargeLevel:   d.EndChargeLevel,
-			FsdMiles:         d.FsdMiles,
-			FsdPercentage:    d.FsdPercentage,
-			CreatedAt:        d.CreatedAt,
-		})
+		items = append(items, driveListItem(page.Items[i]))
 	}
 	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
+}
+
+// driveListItem converts one store drive-summary row to the handler's shape.
+//
+// EXTRACTED BY MYR-602 so the trip surfaces convert a drive the same way §7.2
+// does. A second copy would be a second place for a field to go missing, and
+// the missing field would show up as a drive that reads differently depending
+// on which list it was opened from.
+func driveListItem(d store.DriveSummaryRow) telemetry.DriveListItem {
+	return telemetry.DriveListItem{
+		ID:               d.ID,
+		VehicleID:        d.VehicleID,
+		StartTime:        d.StartTime,
+		EndTime:          d.EndTime,
+		Date:             d.Date,
+		StartLocation:    d.StartLocation,
+		StartAddress:     d.StartAddress,
+		EndLocation:      d.EndLocation,
+		EndAddress:       d.EndAddress,
+		DistanceMiles:    d.DistanceMiles,
+		DurationMinutes:  d.DurationMinutes,
+		AvgSpeedMph:      d.AvgSpeedMph,
+		MaxSpeedMph:      d.MaxSpeedMph,
+		StartChargeLevel: d.StartChargeLevel,
+		EndChargeLevel:   d.EndChargeLevel,
+		FsdMiles:         d.FsdMiles,
+		FsdPercentage:    d.FsdPercentage,
+		CreatedAt:        d.CreatedAt,
+	}
 }
 
 // driveRouteAdapter adapts store.DriveRepo.GetByID to the

@@ -200,24 +200,35 @@ func TestBroadcaster_CabinOnlyTelemetry_SendsViewerNothing(t *testing.T) {
 		t.Fatalf("Publish cabin-only: %v", err)
 	}
 
-	// Then a speed tick the viewer IS entitled to. Both take the same immediate
+	// Then an ODOMETER tick the viewer IS entitled to. Both take the same immediate
 	// non-nav path, so ordering holds: if the cabin frame was suppressed, the
 	// FIRST frame the viewer sees is this one.
-	speedOnly := events.NewEvent(events.VehicleTelemetryEvent{
+	//
+	// It was a speed tick until MYR-602 narrowed `viewer` off the Speed/GPS
+	// group, at which point a speed-only frame became suppressed in its own
+	// right and this test would have deadlocked waiting for a frame that is now
+	// correctly never sent. The control has to be a field the narrowed viewer
+	// genuinely receives.
+	// Odometer rather than charge: `chargeLevel` is an ATOMIC GROUP member and
+	// is held by the accumulator for its flush window, so it would arrive late
+	// enough to race this read. `odometerMiles` is ungrouped and takes the same
+	// immediate non-nav path the cabin tick does, which is what makes the
+	// ordering argument above hold.
+	odometerOnly := events.NewEvent(events.VehicleTelemetryEvent{
 		VIN:       "5YJ3E1EA1NF000001",
 		CreatedAt: time.Date(2026, 8, 2, 12, 0, 1, 0, time.UTC),
 		Fields: map[string]events.TelemetryValue{
-			"speed": {FloatVal: ptrFloat64(65.0)},
+			"odometer": {FloatVal: ptrFloat64(12345.0)},
 		},
 	})
-	if err := bus.Publish(ctx, speedOnly); err != nil {
-		t.Fatalf("Publish speed: %v", err)
+	if err := bus.Publish(ctx, odometerOnly); err != nil {
+		t.Fatalf("Publish odometer: %v", err)
 	}
 
 	got := vehicleUpdateFields(t, readMessage(t, conn))
 
-	if _, hasSpeed := got["speed"]; !hasSpeed {
-		t.Errorf("the first frame the viewer received was %v, not the speed frame. The "+
+	if _, hasOdometer := got["odometerMiles"]; !hasOdometer {
+		t.Errorf("the first frame the viewer received was %v, not the odometer frame. The "+
 			"cabin-only tick was NOT suppressed: its values were masked but the FRAME "+
 			"still went out, giving the viewer a beacon that pulses exactly when the "+
 			"owner is in the cabin or playing audio", got)

@@ -483,6 +483,76 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 	}
 	counts.VehicleDriverAccessRowsDeleted = driverAccess
 
+	// (8g) The trips (MYR-602). FOUR statements for one step, because a person
+	// stands in four relations to a trip and only one of them cascades.
+	//
+	// THE OWNED TRIPS GO FIRST, and the order between the four is not
+	// arbitrary. Migration 0047 declares real foreign keys from
+	// go_trip_participants, go_trip_activity_tokens and go_trip_legs to
+	// go_trips(id) ON DELETE CASCADE — permitted because all four relations are
+	// Go-owned; CG-DL-9 forbids naming a PRISMA table, not a sibling — so
+	// deleting the windows this person opened takes their rosters, their
+	// push-to-start tokens and their legs with them. Running the owned delete
+	// first means the two statements after it find only what is genuinely
+	// somebody else's trip, which is what makes their counts mean what the
+	// audit row says they mean.
+	//
+	// THE PARTICIPATIONS ARE DELETED, not tombstoned, and this is the ONE place
+	// that is right. Everywhere else `left_at` answers "was this person ever on
+	// the trip"; after an account deletion there is no person left for that
+	// question to be about, and a tombstone would leave a deleted user's id on
+	// a stranger's roster forever.
+	//
+	// THE TOKENS GET THEIR OWN STATEMENT because a push-to-start token is a
+	// LIVE CAPABILITY ON A PHONE, not a membership record. A person may hold
+	// one for a trip they have already left, so a deletion that only walked the
+	// roster would leave a token behind that could still start a Live Activity
+	// on a device belonging to an account that no longer exists.
+	//
+	// THE FOURTH STATEMENT IS THE LEG-ANCHORED LIVE ACTIVITIES, and it is here
+	// for the token's reason rather than the roster's: a go_live_activities row
+	// anchored on go_trip_legs.trip_leg_id addresses ONE RUNNING CARD on this
+	// person's phone, under somebody else's trip that is still happening. Left
+	// behind, the leg detector updates it on the trip's next leg — the server
+	// would push to a card belonging to an account that no longer exists, and
+	// keep doing it for the rest of the window. The hazard is a DELIVERY rather
+	// than a leak (neither row holds anything about the person beyond an opaque
+	// cuid), which is why the whole of 8g is P0 hygiene in the 8-family rather
+	// than an erasure obligation like 8c.
+	//
+	// POSITION: after 8e/8f, with the same step-3 constraint they carry — the
+	// per-vehicle teardown removes a car's trips in its own transaction, so
+	// anything found here is what the teardown could not reach. Nothing later
+	// in the sequence reads any of these rows.
+	//
+	// WHAT SURVIVES, DELIBERATELY: the DRIVES that fell inside those windows. A
+	// trip never owned a drive — the window merely selected it — so closing a
+	// window changes nothing about a vehicle's own history, which step 3 deals
+	// with on its own terms.
+	tripsOwned, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripsOwned)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trips_owned", cause: err}
+	}
+	counts.TripsDeleted = tripsOwned
+
+	tripParticipations, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripParticipations)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trip_participations", cause: err}
+	}
+	counts.TripParticipationsDeleted = tripParticipations
+
+	tripTokens, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripActivityTokens)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trip_activity_tokens", cause: err}
+	}
+	counts.TripActivityTokensDeleted = tripTokens
+
+	legActivities, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripLegActivities)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trip_leg_activities", cause: err}
+	}
+	counts.TripLegActivitiesDeleted = legActivities
+
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
 	// because it is what authenticates a re-run if step 10 fails.

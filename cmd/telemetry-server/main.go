@@ -370,6 +370,23 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// Activity, written by the §7.21 endpoints and read by both the lifecycle
 	// consumer and the ETA ticker.
 	liveActivityRepo := store.NewLiveActivityRepo(db.Pool(), logger.With(slog.String("component", "live-activity-repo")))
+	// MYR-602 — the LIVE half of trips. The two encrypted repos take the same
+	// label encryptor the vehicle and drive repos take: a trip's name and a
+	// leg's destination are P1 user content and P1 place names, sealed by the
+	// same AES-256-GCM path (MYR-447), and a repo built without it fails HERE
+	// rather than returning empty strings on a lock screen.
+	tripLiveRepo, err := store.NewTripLiveRepo(db.Pool(), encryptor, storeMetrics,
+		logger.With(slog.String("component", "trip-live-repo")))
+	if err != nil {
+		return fmt.Errorf("building trip live repo: %w", err)
+	}
+	tripLegRepo, err := store.NewTripLegRepo(db.Pool(), encryptor, storeMetrics,
+		logger.With(slog.String("component", "trip-leg-repo")))
+	if err != nil {
+		return fmt.Errorf("building trip leg repo: %w", err)
+	}
+	tripTokenRepo := store.NewTripActivityTokenRepo(db.Pool(),
+		logger.With(slog.String("component", "trip-activity-token-repo")))
 
 	// --- Drive detector ---
 	// MYR-146: reconciler reads open Drive rows on Start so a Fly
@@ -593,9 +610,18 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// fails open rather than lingering into db.Close (I3). It adds nothing to
 	// the shutdown closure, so shutdownDrainBudget and fly.toml's kill_timeout
 	// arithmetic are unchanged.
+	//
+	// MYR-602 KEEPS A HANDLE ON IT. Since trips, this sweep is not only a
+	// backstop: a trip window opens and closes on the CLOCK with no mutation
+	// anywhere, so it is the ONLY thing that re-masks a participant's live
+	// socket at either edge. The trip sweeper nudges it on every transition so
+	// a window edge does not wait for the next tick — without that, a
+	// participant's phone would say "your trip started" up to a minute before
+	// their map came alive.
+	var accessRevalidator *ws.AccessRevalidator
 	if jwtAuth != nil {
-		revalidator := ws.NewAccessRevalidator(hub, jwtAuth, ws.DefaultRevalidateInterval, shareAccessLogger)
-		go revalidator.Run(ctx)
+		accessRevalidator = ws.NewAccessRevalidator(hub, jwtAuth, ws.DefaultRevalidateInterval, shareAccessLogger)
+		go accessRevalidator.Run(ctx)
 	}
 
 	// --- Push notifications (MYR-186) ---
@@ -638,6 +664,37 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// Drained by the shutdown block above, after bus.Close — see MYR-410.
 	liveActivityNotifier = activityNotifier
 	startLiveActivityTicker(ctx, cfg, activityNotifier, liveActivityRepo, logger)
+
+	// --- Trips: the window sweeper and the leg detector (MYR-602) ---
+	//
+	// Started AFTER the ride Live Activity notifier because it reuses the same
+	// APNs client, and BEFORE the nav dispatcher for no reason beyond reading
+	// order — nothing here depends on the dispatcher and nothing there depends
+	// on this.
+	//
+	// SHUTDOWN: the detector holds a telemetry subscription, so it is stopped
+	// in the same step 1 that stops the broadcaster, before the bus drains. The
+	// sweeper is a plain ticker on ctx and needs no stop, matching the
+	// reservation sweeper and the access revalidator.
+	tripsRuntime, err := setupTripsLive(ctx, tripsLiveDeps{
+		cfg:          cfg,
+		bus:          bus,
+		tripRepo:     tripLiveRepo,
+		legRepo:      tripLegRepo,
+		tokenRepo:    tripTokenRepo,
+		activityRepo: liveActivityRepo,
+		prefsRepo:    pushPrefsRepo,
+		names:        vehicleNameRepo,
+		vins:         vinCache,
+		apns:         apnsClient,
+		pusher:       notifier,
+		revalidator:  accessRevalidator,
+		logger:       logger,
+	})
+	if err != nil {
+		return fmt.Errorf("setting up trips: %w", err)
+	}
+	defer tripsRuntime.Stop()
 
 	// --- Nav-dispatch (MYR-176) ---
 	// Subscribes to the ride.accepted seam (published by the owner-accept
@@ -767,6 +824,7 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		// The same authenticator also owns the user-existence cache the
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,
+		storeMetrics:       storeMetrics,
 		pool:               db.Pool(),
 		encryptor:          encryptor,
 		auditEmitter:       auditEmitter,
@@ -774,6 +832,10 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		debugGate:          gates.debugFields,
 		originPatterns:     originPatterns,
 		serviceStatus:      serviceStatusMonitor,
+		// MYR-602: the trips seam. tripsRuntime.Notifier is nil when
+		// TRIPS_ENABLED is false — the endpoints are still mounted and answer
+		// 503, and nothing is announced because there is nothing to announce.
+		tripNotifier: tripNotifier(tripsRuntime, logger),
 		// MYR-489: lets the vehicle-command endpoint tell the fleet-config
 		// reconciler that a signed command applied.
 		fleetConfigReconciler: fleetConfigReconciler,

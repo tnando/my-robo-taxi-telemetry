@@ -19,8 +19,14 @@ import (
 // breadcrumb array — the store's GetByID resolves the routePointsEnc
 // shadow before the handler ever sees it.
 type DriveRouteData struct {
-	DriveID     string
-	VehicleID   string
+	DriveID   string
+	VehicleID string
+	// StartTime is the drive's RFC 3339 start instant. Carried on this shape
+	// since MYR-602 purely as an INPUT TO THE ACCESS CHECK — a trip
+	// participant is admitted only to drives that began inside one of their
+	// windows, and this endpoint's own response has never carried it. Not on
+	// the wire; see driveRouteResponse.
+	StartTime   string
 	RoutePoints json.RawMessage
 }
 
@@ -49,6 +55,11 @@ type driveRouteResponse struct {
 // role-based DriveRoute mask, and returns the polyline per rest-api.md
 // §7.4 / §5.2.4. Mirrors VehicleDrivesHandler's auth/ownership/mask flow.
 type DriveRouteHandler struct {
+	// trips is the MYR-602 window gate. OPTIONAL and nil by default, which
+	// leaves this endpoint owner-only exactly as MYR-369 left it — the
+	// fail-closed direction for a deployment that has not wired trips.
+	trips TripDriveAdmitter
+
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveRouteFetcher
@@ -123,7 +134,7 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, userID) {
+	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
 		return
 	}
 
@@ -136,58 +147,6 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // returns false.
 // A drive that points at a missing vehicle is a data-integrity fault
 // (500), distinct from an ownership mismatch (403, vehicle_not_owned).
-func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, driveID, vehicleID, userID string) bool {
-	row, err := h.vehicles.GetByID(ctx, vehicleID)
-	if err != nil {
-		if errors.Is(err, sdk.ErrNotFound) {
-			// The drive resolved but its vehicle did not — inconsistent
-			// data, not a client error.
-			h.logger.Error("drive route: drive's vehicle not found",
-				slog.String("drive_id", driveID),
-				slog.String("vehicle_id", vehicleID),
-			)
-			h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-			return false
-		}
-		h.logger.Error("drive route: vehicle lookup failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
-	}
-
-	// MYR-369: THE DRIVES SURFACES ARE OWNER-ONLY AGAIN, unconditionally.
-	//
-	// MYR-184 opened them to a viewer holding `live_history` or better. That
-	// tier is RETIRED and the capability is removed from the product, so the
-	// gate is back to what it was before sharing shipped: owner or nobody.
-	// This is a DELIBERATE NARROWING — a legacy grant created at
-	// `live_history` can no longer read drives, and there is no flag that
-	// re-opens them. Suspension is irrelevant here for the same reason: no
-	// grant of any shape passes.
-	//
-	// Expressed as capBase-against-the-owner rather than a bare
-	// `row.UserID != userID` comparison so the denial still flows through the
-	// one access helper — same 403, same log shape, same non-oracle message
-	// as every other refusal — and so re-opening the surface later is a
-	// one-argument change rather than a re-derivation.
-	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
-		if errors.Is(err, errNoVehicleAccess) {
-			denyVehicleAccess(w, h.logger, "drive route", vehicleID, userID)
-			return false
-		}
-		h.logger.Error("drive route: access resolution failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return false
-	}
-
-	return true
-}
-
 // writeMaskedRoute resolves the caller's role, projects the route through
 // the DriveRoute mask, and writes the response. When no roleResolver is
 // configured the projection runs against auth.RoleOwner.

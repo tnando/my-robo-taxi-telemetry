@@ -77,16 +77,39 @@ func TestHub_ViewerReceivesSharedVehicleUpdates(t *testing.T) {
 		if pl.VehicleID != sharedVehicle {
 			t.Errorf("vehicleId = %q, want %q", pl.VehicleID, sharedVehicle)
 		}
-		// Live location is the product being shared — the floor tier is
-		// literally named "Live location", so a viewer MUST see it.
-		if pl.Fields["speed"] != float64(42) {
-			t.Errorf("the viewer did not receive `speed`: %v", pl.Fields)
-		}
-		if pl.Fields["latitude"] == nil || pl.Fields["longitude"] == nil {
-			t.Errorf("the viewer did not receive live GPS; that is the whole feature: %v", pl.Fields)
-		}
+		// MYR-602 REVERSED THIS ASSERTION, and the reversal is the client
+		// decision the whole issue rests on: "you should really only see live
+		// location during an active trip shared with a user" (or an active
+		// ride). A standing share is neither, so a plain `viewer` no longer
+		// receives the Speed/GPS group. What they still receive is the CATALOG
+		// row — which car this is, whether it is available — and that is what
+		// this test now pins.
+		//
+		// The six schema-REQUIRED location keys are still PRESENT, carrying the
+		// no-fix sentinels, because vehicle-state.schema.json's `required` list
+		// did not move in contracts v0.41.0 and an object missing them is one a
+		// conformant SDK may discard whole.
+		//
+		// The live map this test was written about now belongs to the two
+		// window-scoped roles: `ride_member` (MYR-540) and `trip_participant`
+		// (MYR-602), which share one field list that is byte-for-byte the
+		// pre-MYR-602 viewer set.
 		if pl.Fields["licensePlate"] != "8ABC123" {
 			t.Errorf("the viewer did not receive licensePlate: %v", pl.Fields)
+		}
+		for field, want := range map[string]any{
+			"speed": float64(0), "latitude": float64(0), "longitude": float64(0),
+		} {
+			got, present := pl.Fields[field]
+			if !present {
+				t.Errorf("required field %q was DROPPED for a viewer (%v) — the frame no "+
+					"longer satisfies vehicle-state.schema.json", field, pl.Fields)
+				continue
+			}
+			if got != want {
+				t.Errorf("%s = %v, want the %v sentinel: a standing share must not carry "+
+					"live location after MYR-602", field, got, want)
+			}
 		}
 		// ...but the owner-only field is gone.
 		if _, leaked := pl.Fields["vin"]; leaked {

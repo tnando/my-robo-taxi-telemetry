@@ -34,6 +34,12 @@ type PushPrefs struct {
 	DriveCompleted   bool
 	ChargingComplete bool
 	ViewerJoined     bool
+	// Trips is the MYR-602 category: added to a trip, a trip window opening or
+	// closing, and each leg the car drives inside it starting and arriving.
+	// Last in the struct because the wire response is produced by a struct
+	// CONVERSION in internal/push (see newPrefsResponse), which is order- and
+	// name-sensitive — appending is the only safe place to grow.
+	Trips bool
 }
 
 // DefaultPushPrefs is what a person with no stored row gets: everything on.
@@ -46,6 +52,7 @@ func DefaultPushPrefs() PushPrefs {
 		DriveCompleted:   true,
 		ChargingComplete: true,
 		ViewerJoined:     true,
+		Trips:            true,
 	}
 }
 
@@ -60,12 +67,13 @@ type PushPrefsUpdate struct {
 	DriveCompleted   *bool
 	ChargingComplete *bool
 	ViewerJoined     *bool
+	Trips            *bool
 }
 
 // queryGetPushPrefs is the point read behind both the endpoint's GET and the
 // notifier's per-send gate.
 const queryGetPushPrefs = `
-SELECT ride_lifecycle, drive_started, drive_completed, charging_complete, viewer_joined
+SELECT ride_lifecycle, drive_started, drive_completed, charging_complete, viewer_joined, trips
 FROM go_push_prefs
 WHERE user_id = $1`
 
@@ -87,7 +95,7 @@ WHERE user_id = $1`
 const queryUpsertPushPrefs = `
 INSERT INTO go_push_prefs (
     user_id, ride_lifecycle, drive_started, drive_completed, charging_complete, viewer_joined,
-    created_at, updated_at
+    trips, created_at, updated_at
 )
 VALUES (
     $1,
@@ -96,6 +104,7 @@ VALUES (
     COALESCE($4::boolean, TRUE),
     COALESCE($5::boolean, TRUE),
     COALESCE($6::boolean, TRUE),
+    COALESCE($7::boolean, TRUE),
     NOW(), NOW()
 )
 ON CONFLICT (user_id) DO UPDATE
@@ -104,8 +113,9 @@ SET ride_lifecycle    = COALESCE($2::boolean, go_push_prefs.ride_lifecycle),
     drive_completed   = COALESCE($4::boolean, go_push_prefs.drive_completed),
     charging_complete = COALESCE($5::boolean, go_push_prefs.charging_complete),
     viewer_joined     = COALESCE($6::boolean, go_push_prefs.viewer_joined),
+    trips             = COALESCE($7::boolean, go_push_prefs.trips),
     updated_at        = NOW()
-RETURNING ride_lifecycle, drive_started, drive_completed, charging_complete, viewer_joined`
+RETURNING ride_lifecycle, drive_started, drive_completed, charging_complete, viewer_joined, trips`
 
 // PushPrefsRepo is the go_push_prefs repository.
 type PushPrefsRepo struct {
@@ -140,6 +150,7 @@ func (r *PushPrefsRepo) PrefsForUser(ctx context.Context, userID string) (PushPr
 		&prefs.DriveCompleted,
 		&prefs.ChargingComplete,
 		&prefs.ViewerJoined,
+		&prefs.Trips,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return DefaultPushPrefs(), nil
@@ -167,12 +178,14 @@ func (r *PushPrefsRepo) UpdatePrefs(ctx context.Context, userID string, update P
 		update.DriveCompleted,
 		update.ChargingComplete,
 		update.ViewerJoined,
+		update.Trips,
 	).Scan(
 		&prefs.RideLifecycle,
 		&prefs.DriveStarted,
 		&prefs.DriveCompleted,
 		&prefs.ChargingComplete,
 		&prefs.ViewerJoined,
+		&prefs.Trips,
 	)
 	if err != nil {
 		return PushPrefs{}, fmt.Errorf("store.UpdatePrefs(user=%s): %w", userID, err)

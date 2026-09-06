@@ -11,7 +11,7 @@ import (
 
 // The notification-preference endpoints (rest-api.md §7.19):
 //
-//	GET /api/users/me/push-prefs   read this account's five switches
+//	GET /api/users/me/push-prefs   read this account's six switches
 //	PUT /api/users/me/push-prefs   change some of them
 //
 // User-scoped like §7.7 and §7.17: there is no vehicle in the path, so there is
@@ -42,6 +42,7 @@ type PrefsUpdate struct {
 	DriveCompleted   *bool
 	ChargingComplete *bool
 	ViewerJoined     *bool
+	Trips            *bool
 }
 
 // isEmpty reports whether the update would change nothing. A legal request —
@@ -52,7 +53,8 @@ func (u PrefsUpdate) isEmpty() bool {
 		u.DriveStarted == nil &&
 		u.DriveCompleted == nil &&
 		u.ChargingComplete == nil &&
-		u.ViewerJoined == nil
+		u.ViewerJoined == nil &&
+		u.Trips == nil
 }
 
 // PrefsHandler serves the notification-preference surface.
@@ -80,6 +82,7 @@ type prefsResponse struct {
 	DriveCompleted   bool `json:"driveCompleted"`
 	ChargingComplete bool `json:"chargingComplete"`
 	ViewerJoined     bool `json:"viewerJoined"`
+	Trips            bool `json:"trips"`
 }
 
 // newPrefsResponse projects the domain type onto the wire shape.
@@ -116,6 +119,7 @@ type prefsRequest struct {
 	DriveCompleted   *bool `json:"driveCompleted"`
 	ChargingComplete *bool `json:"chargingComplete"`
 	ViewerJoined     *bool `json:"viewerJoined"`
+	Trips            *bool `json:"trips"`
 }
 
 // toUpdate projects the decoded body onto the store's partial-update shape.
@@ -190,6 +194,7 @@ func (h *PrefsHandler) ServePut(w http.ResponseWriter, r *http.Request) {
 		slog.Bool("drive_completed", prefs.DriveCompleted),
 		slog.Bool("charging_complete", prefs.ChargingComplete),
 		slog.Bool("viewer_joined", prefs.ViewerJoined),
+		slog.Bool("trips", prefs.Trips),
 	)
 	h.writeJSON(w, http.StatusOK, newPrefsResponse(prefs))
 }
