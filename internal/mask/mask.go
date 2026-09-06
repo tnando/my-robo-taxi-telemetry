@@ -49,6 +49,15 @@ const (
 // inside Apply. The zero value (nil Allowed) represents the deny-all
 // mask, which is what fail-closed produces for unknown (resource, role)
 // pairs.
+//
+// ⚠ BOTH MAPS ARE IMMUTABLE AFTER INIT AND MUST NEVER BE WRITTEN TO. `For`
+// returns the table's own map by REFERENCE, not a copy, so every caller
+// projecting a frame for one (resource, role) pair shares one map — a single
+// write would silently change what every later projection on the process
+// emits, for every connected client, with nothing in the diff to explain it.
+// Reads are race-safe precisely because there are no writes: the tables are
+// built once at package init and never touched again. A caller needing a
+// variant must build its own map, not edit this one.
 type ResourceMask struct {
 	// Allowed is the set of field names that should pass through Apply.
 	// A nil or empty map produces an empty projected payload regardless

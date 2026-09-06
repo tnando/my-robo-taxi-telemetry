@@ -326,7 +326,7 @@ type VehicleActivityRide struct {
 // point where a registration means anything. The HTTP layer maps it to 409
 // (rest-api.md §7.21.1), which is an instruction to the client to end its
 // Activity locally.
-var ErrLiveActivityClosed = errors.New("live activity: ride is closed to registration")
+var ErrLiveActivityClosed = errors.New("live activity: anchor is closed to registration")
 
 // LiveActivityRepo is the go_live_activities repository.
 type LiveActivityRepo struct {

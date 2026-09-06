@@ -20,7 +20,7 @@ import (
 //
 // ANCHOR-NEUTRAL BY NAME, because both anchors return it and the HTTP answer is
 // identical: 409, "end your Activity locally".
-var ErrLiveActivityClosed = errors.New("live activity: ride is closed to registration")
+var ErrLiveActivityClosed = errors.New("live activity: anchor is closed to registration")
 
 // Live Activity token registration (MYR-172, rest-api.md §7.21).
 //

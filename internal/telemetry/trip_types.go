@@ -112,8 +112,20 @@ type TripCreateInput struct {
 // distinction the wire draws between an absent key and a null one survives to
 // this layer rather than being flattened into a zero value.
 type TripUpdateInput struct {
-	Name                 *string
-	EndsAt               *time.Time
+	Name   *string
+	EndsAt *time.Time
+	// AddParticipantIDs and RemoveParticipantIDs are SHARE IDS, not user ids —
+	// the same values ParticipantShareIDs carries on create, named more tersely
+	// only because the patch verb is already in the field name.
+	//
+	// THE NAMING ASYMMETRY IS WORTH ONE COMMENT rather than a rename, because
+	// the wire keys are `addParticipantIds` / `removeParticipantIds` and a
+	// rename here would leave the Go field and the JSON key disagreeing. What
+	// they mean is fixed by the model: a trip creates NO new vehicle
+	// relationship — participants are chosen from the car's already-accepted
+	// grants — so a share id is the only identifier that can express "this
+	// person, on this car", and a user id would name somebody without saying
+	// which grant admits them.
 	AddParticipantIDs    []string
 	RemoveParticipantIDs []string
 }

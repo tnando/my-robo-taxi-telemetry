@@ -203,6 +203,16 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"trip create (MYR-602, §7.30)", "/api/vehicles/clxyz1234567890abcdef/trips"},
 		{"trip end (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/end"},
 		{"trip activity start token (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/activity-start-token"},
+		// The LEG token pair (§7.21.7) is the other cross-surface case this
+		// test class exists for, arriving from the opposite direction to the
+		// create route above: it lives under /api/trip-legs/ — a path prefix no
+		// other handler on the service claims — and is served by the TRIP
+		// handler. The per-route tests mount it in a fresh ServeMux, so they
+		// would pass unchanged if wiring_trips.go dropped the HandleFunc, and
+		// the observable symptom would be a leg card that can never be updated
+		// or ended.
+		{"trip leg activity token register (MYR-602, §7.21.7)",
+			"/api/trip-legs/cleg0123456789abcdef01234567/activity-token"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {
@@ -267,6 +277,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// MYR-321: the PUT and DELETE share the {kind} path, so mounting only
 		// one of the two verbs is a live failure mode this catches.
 		{"saved place delete (MYR-321, §7.20)", "/api/users/me/places/work"},
+		// MYR-602 §7.21.7: the POST and DELETE share this path, so mounting only
+		// one of the two verbs is a live failure mode this catches — the same
+		// shape as the two entries above it.
+		{"trip leg activity token end (MYR-602, §7.21.7)",
+			"/api/trip-legs/cleg0123456789abcdef01234567/activity-token"},
 	}
 	for _, rt := range deleteRoutes {
 		t.Run(rt.name, func(t *testing.T) {

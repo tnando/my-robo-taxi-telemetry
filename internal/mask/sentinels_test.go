@@ -271,3 +271,77 @@ func TestIsSubstantiveExcludingSentinels_OwnerIsUnaffected(t *testing.T) {
 		t.Error("an owner's real coordinates were read as sentinels and suppressed")
 	}
 }
+
+// TestWithheldIsByteIdenticalToNoFix asserts the property the whole exception
+// rests on, DIRECTLY rather than by construction.
+//
+// Every other test here proves the sentinels are the right SET and are
+// substituted at the right TIMES. This one proves the thing a consumer actually
+// depends on: a viewer's projection of a car that IS reporting a position is
+// byte-for-byte the same document as a viewer's projection of a car that has no
+// fix at all. If it ever stopped being true, a client could distinguish
+// "withheld" from "no GPS" by reading the bytes — and the moment one can, the
+// narrowing leaks the one bit it exists to withhold: whether the car is
+// somewhere.
+//
+// rest-api.md §5 states the other half as an obligation ON THE CLIENT: it must
+// branch on the role it holds (`role` + `activeTripId` + `hasActiveRide`),
+// because the value cannot tell it. That obligation is only reasonable if this
+// test passes.
+func TestWithheldIsByteIdenticalToNoFix(t *testing.T) {
+	viewerMask := For(ResourceVehicleState, auth.RoleViewer)
+
+	// A car parked outside somebody's house, reporting everything.
+	located := map[string]any{
+		"speed":           42,
+		"heading":         180,
+		"latitude":        37.7749,
+		"longitude":       -122.4194,
+		"locationName":    "Home",
+		"locationAddress": "123 Market St, San Francisco, CA",
+		"chargeLevel":     78,
+		"status":          "parked",
+	}
+	// The SAME car with no fix and no geocode — the state vehicle-state-schema
+	// §2.3 documents, which every consumer already handles because a car that
+	// has never reported a position emits it.
+	noFix := map[string]any{
+		"speed":           0,
+		"heading":         0,
+		"latitude":        float64(0),
+		"longitude":       float64(0),
+		"locationName":    "",
+		"locationAddress": "",
+		"chargeLevel":     78,
+		"status":          "parked",
+	}
+
+	withheld, _ := Apply(located, viewerMask)
+	honest, _ := Apply(noFix, viewerMask)
+
+	// MARSHALLED, not DeepEqual'd: the wire is what a consumer sees, and two
+	// maps that compare equal in Go could still differ on the wire if a
+	// sentinel's TYPE were wrong (a float where the schema says integer is as
+	// much a decode failure as an absent key).
+	gotWithheld, err := json.Marshal(withheld)
+	if err != nil {
+		t.Fatalf("marshal withheld: %v", err)
+	}
+	gotHonest, err := json.Marshal(honest)
+	if err != nil {
+		t.Fatalf("marshal no-fix: %v", err)
+	}
+	if string(gotWithheld) != string(gotHonest) {
+		t.Errorf("a viewer can tell WITHHELD from NO FIX by reading the bytes:\n"+
+			" withheld: %s\n  no-fix: %s\n"+
+			"The two must be indistinguishable — a client is told to branch on its ROLE "+
+			"precisely because the value cannot tell it, and any difference here leaks "+
+			"whether the car is somewhere.", gotWithheld, gotHonest)
+	}
+
+	// And the catalog floor survives both: a narrowing takes location, never
+	// the whole document.
+	if withheld["chargeLevel"] != 78 || withheld["status"] != "parked" {
+		t.Errorf("the narrowing took more than location: %v", withheld)
+	}
+}

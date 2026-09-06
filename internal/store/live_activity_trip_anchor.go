@@ -25,6 +25,12 @@ import (
 // implementation would look exactly like a working one from the server all the
 // way to the logs.
 //
+// THE ACCESS QUESTION LIVES NEXT DOOR, in live_activity_leg_access.go: this
+// file is about the ROW — how a leg-anchored Activity is written, listed,
+// stamped and tombstoned — while "who may register a card on this leg" is the
+// §7.21.7 route's whole gate and is the only authorization statement in the
+// pair.
+//
 // WHAT IS DELIBERATELY NOT SHARED. The ride path's registration statement
 // (queryUpsertLiveActivity) is an INSERT … SELECT guarded on the RIDE's status:
 // it refuses a registration on a terminal ride, and on an unrescued expired
