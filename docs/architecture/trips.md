@@ -159,21 +159,22 @@ Everything else across the four tables is P0 — opaque cuids, instants, boolean
 
 ## 9. Account deletion (step 8g)
 
-**Three statements, one cascade.**
+**Four statements, one cascade.** Specified normatively in [`data-lifecycle.md`](../contracts/data-lifecycle.md) §3.1 step 8g and §1.4.7.
 
 | Statement | What it removes |
 |---|---|
 | `DeleteTripsOwned` | `DELETE FROM go_trips WHERE owner_user_id = $1` — the windows this person **created** |
 | `DeleteTripParticipations` | `DELETE FROM go_trip_participants WHERE user_id = $1` — their memberships of **other people's** trips |
 | `DeleteTripActivityTokens` | `DELETE FROM go_trip_activity_tokens WHERE user_id = $1` — their push-to-start registrations on other people's trips |
+| `DeleteTripLegActivities` | `DELETE FROM go_live_activities WHERE user_id = $1 AND trip_leg_id IS NOT NULL` — their **running leg cards** under other people's trips. The anchor predicate is load-bearing: without it the statement would also take their RIDE Activities, whose end push a different lifecycle is responsible for sending before the row goes |
 
 **ONE STATEMENT FOR FOUR TABLES on the first row.** Migration 0047 declares real FKs from the three children to `go_trips(id) ON DELETE CASCADE`, so deleting the parent takes the roster, the tokens and the legs with it. **A hand-rolled four-statement version would be four chances to miss one, and the one it missed would be a dangling row in an access gate.**
 
-**Why three statements and not one:** a person stands in two relations to trips and the deletions are not the same shape — windows they opened, and windows they were invited into. The third is separate again because **a token is a LIVE CAPABILITY on a phone, not a membership record**: a person may hold a push-to-start token for a trip they have already left, and a deletion that only walked the roster would leave it behind. Running it after the cascade finds fewer rows, never more, and finding none is the idempotency every step in the sequence has.
+**Why four statements and not one:** a person stands in two relations to trips and the deletions are not the same shape — windows they opened, and windows they were invited into. The third is separate again because **a token is a LIVE CAPABILITY on a phone, not a membership record**: a person may hold a push-to-start token for a trip they have already left, and a deletion that only walked the roster would leave it behind. Running it after the cascade finds fewer rows, never more, and finding none is the idempotency every step in the sequence has.
 
 **Ordering:** after **step 3** (the per-vehicle teardown, which deletes a car's trips in its own transaction, so anything left here is what the teardown could not reach), and before the identity delete, like every destructive step. Nothing later in the sequence reads these rows.
 
-**Three counts reach the `account_deleted` audit metadata** — `tripsDeleted`, `tripParticipationsDeleted`, `tripActivityTokensDeleted` — and they are **counts and never rows** (CG-DL-5): the trip name is P1 user content and the token is a P1 capability, so the only thing that may cross that boundary is how many.
+**Four counts reach the `account_deleted` audit metadata** — `tripsDeleted`, `tripParticipationsDeleted`, `tripActivityTokensDeleted`, `tripLegActivitiesDeleted` — and they are **counts and never rows** (CG-DL-5): the trip name is P1 user content and both tokens are P1 capabilities, so the only thing that may cross that boundary is how many. Four rather than one because a deletion that reached some relations and not others is exactly the state they exist to make visible.
 
 **WHAT DELIBERATELY SURVIVES: the DRIVES.** A trip never owned a drive — the window merely **selected** it — so closing the window changes nothing about the vehicle's own history, which the owner's vehicle teardown deals with on its own terms.
 
@@ -283,7 +284,11 @@ doing anything, and iOS gives a backgrounded app no way to start an Activity, so
 the card is raised by an ActivityKit **push-to-start** addressed by a token the
 app registers once per trip. The full envelope, the `attributes-type` constant,
 the three attributes, the content-state and the fifteen-minute expiration are
-specified in `rest-api.md` **§7.21.7**.
+specified in `rest-api.md` **§7.21.7**. The attributes are **four** — `tripId`,
+`vehicleId`, `vehicleName` and `legId` — and the last is not decoration: the
+card registers its own update token against the LEG (§7.30.10), and a device
+that was asleep when the leg opened cannot derive which leg its card is for.
+Without it the server can create a card and never update or end it.
 
 **Two tables, two meanings of a `410`:**
 
@@ -375,7 +380,6 @@ open window keeps seeing the car until the window's own end — the safe directi
 for a switch whose purpose is to stop the machinery rather than to punish the
 people using it.
 
-## 12. What is NOT built
 ## 12. The seams, and what is still not built
 
 **Both lanes are now in.** Everything §10 and §11 describe — the sweeper, the leg
@@ -393,17 +397,22 @@ Two smaller seams are wired the same fail-closed way and are worth knowing about
 
 **Still not built, recorded so the gaps are documented rather than discovered:**
 
-- **The trip card has no ticker.** Its ETA refreshes only on the frames the detector sees, so a car that goes quiet mid-leg holds its last number until the 3-minute stale-date marks the card stale. The ride path has `ActivityTicker` for exactly this; a leg-anchored equivalent is a small follow-up (`ListActiveLegActivities` already exists in shape).
-- **`internal/push/activity_ticker.go`'s reaper does not know about legs.** Its 24-hour `updated_at` sweep covers leg rows correctly by accident — same table, same column — which is the right outcome reached without a test saying so.
-- **`push.Activity.RideRequestID` carries a LEG id on the trip path.** The struct has one anchor field and the leg send paths only log it, so nothing misreads it, but a second field would be honest.
-- **A `409` from the leg registration is not distinguishable from a ride's.** Both return `store.ErrLiveActivityRideClosed`, deliberately — the HTTP answer is identical — but the sentinel's NAME now lies about half its callers.
-- **`v1Roles` in `internal/ws/hub_masked.go` still lists only owner and viewer.** Harmless: it is used solely to size a map, and the active-role set is built from the clients actually connected.
+- **The trip card has no ticker, and this is now DOCUMENTED rather than merely true** (`rest-api.md` §7.21.7). Its ETA refreshes only on the frames the detector sees, so a car that goes quiet mid-leg — a tunnel, an underground car park, a Tesla that stops streaming — holds its last number until the card's 3-minute stale-date marks it stale. **The stale-date is what keeps it honest in the meantime:** ActivityKit greys a stale Activity itself, so a participant sees "this number is old" rather than a wrong number presented as current, which is the same bound the surface already relies on between two ordinary ticks. The ride path has `ActivityTicker` for exactly this; a leg-anchored equivalent is a small follow-up (`ActivitiesForLeg` is already the shape it needs).
 - **`internal/telemetry` still has no auth middleware (DV-19)** — every trips handler repeats the bearer preamble, like every other handler on the surface.
-- **`data-lifecycle.md` §3.1 / §4.2 carry no step 8g** and no trip metadata counts, though the Go comments cite "§3.1 step 8g".
+- **`account_deletion_sequence.go` keeps growing** ([MYR-584](https://linear.app/myrobotaxi/issue/MYR-584) is the standing decomposition issue).
+
+**Closed in the review round, and recorded because each was a claim this document used to make:**
+
+- **The reaper knows about legs deliberately now.** It used to cover them *by accident* — same table, same column — and the accident was load-bearing in the wrong direction: nothing stamped `updated_at` on a leg row, so a card on a day-long drive had its registration hard-DELETED while it was still on the lock screen, taking the end push's only address with it. The fan-out now marks the rows Apple accepted, and a store test plants a 30-hour-old leg row and proves it survives the sweep.
+- **`push.Activity` carries `TripLegID` in its own field.** The leg id used to ride the `RideRequestID` slot on the argument that nothing read it — true, and the kind of true that lasts until somebody adds a log line.
+- **`ErrLiveActivityRideClosed` is `ErrLiveActivityClosed`.** Both anchors return it and the HTTP answer is identical; only the name lied.
+- **`v1Roles` is derived from `auth.AllRoles`.** It listed two of four. The consequence was a map growth, but the declaration READS as an enumeration of the vocabulary and a reader would have believed it.
+- **`data-lifecycle.md` carries step 8g**, its four `account_deleted` counts, a retention-table row and a new §1.4.7 — the Go comments cited a section that did not exist.
+- **The per-Activity update token has a route.** `RegisterLegActivity` and `EndLegActivity` had no production caller at all, so the whole Live Activity half addressed zero rows: the server could raise a card and never update or end it. §7.30.10 / §7.30.11 are that route pair, and the push-to-start's `attributes` now carry `legId` so the device can name the anchor.
 
 ## 13. References
 
-- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the nine routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
+- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the eleven routes — nine trip routes plus the two LEG token routes of §7.30.10 / §7.30.11 — the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
 - **Schemas:** [`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json), and the MYR-602 amendments to [`vehicle-summary.schema.json`](../contracts/schemas/vehicle-summary.schema.json) (`activeTripId`, the rewritten `location` RBAC text), [`vehicle-state.schema.json`](../contracts/schemas/vehicle-state.schema.json) (the per-field MYR-602 visibility notes) and [`live-activity.schema.json`](../contracts/schemas/live-activity.schema.json) (the `ride` \| `trip` kind).
 - **Classification:** [`data-classification.md`](../contracts/data-classification.md) §1.25–§1.28, §1.18 (`trip_leg_id`), §3.1 (two new encrypted columns), §3.2 (the push-to-start token), §6 (counts).
 - **Schema:** [`internal/store/migrations/0047_trips.up.sql`](../../internal/store/migrations/0047_trips.up.sql) — the header comment carries the four-table argument and the CG-DL-9 FK reasoning.

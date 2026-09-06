@@ -9,6 +9,7 @@ package contract_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -882,5 +883,58 @@ func assertTripEndedAtMatchesStatus(t *testing.T, m map[string]any) {
 				t.Errorf("items[%d]: an ended trip carries a currentLeg; a closed window has no open leg", i)
 			}
 		}
+	}
+}
+
+// TestLiveActivitySchema_VendorDeviationIsClosed pins that the vendored
+// live-activity schema is the UPSTREAM one again (contracts v0.41.1).
+//
+// THE HISTORY THIS GUARDS. `destinationIsStop` and the multi-stop rewrite of
+// `destination` shipped in MYR-587 by editing this file directly, and the paired
+// contracts PR CONTRIBUTING.md requires was never opened — so the property
+// existed on no contracts tag at all, and `LiveActivityContentState` is
+// `additionalProperties: false`, which made every real multi-stop payload the
+// server emits INVALID against its own published contract. MYR-602 vendored the
+// union and recorded the divergence in the schema's own description; v0.41.1
+// upstreamed the missing half, and this file is v0.41.1 verbatim again.
+//
+// Two assertions, and they fail in opposite directions. The property must be
+// PRESENT, because the server sends it on every mid-journey multi-stop leg and a
+// re-vendor that dropped it would silently invalidate those payloads again. And
+// the deviation NOTE must be ABSENT, because a note describing a divergence that
+// no longer exists is worse than no note: the next person to re-vendor would
+// preserve it, and the file would drift from upstream to keep a paragraph true.
+func TestLiveActivitySchema_VendorDeviationIsClosed(t *testing.T) {
+	root := repoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "docs/contracts/schemas/live-activity.schema.json"))
+	if err != nil {
+		t.Fatalf("read live-activity.schema.json: %v", err)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("parse live-activity.schema.json: %v", err)
+	}
+	defs, ok := doc["$defs"].(map[string]any)
+	if !ok {
+		t.Fatal("live-activity.schema.json has no $defs")
+	}
+	state, ok := defs["LiveActivityContentState"].(map[string]any)
+	if !ok {
+		t.Fatal("LiveActivityContentState is missing")
+	}
+	props, ok := state["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("LiveActivityContentState has no properties")
+	}
+	if _, present := props["destinationIsStop"]; !present {
+		t.Error("`destinationIsStop` is absent. internal/push sends it on every mid-journey " +
+			"multi-stop leg and the content state is additionalProperties:false, so every " +
+			"one of those pushes is now invalid against its own schema")
+	}
+	if strings.Contains(string(raw), "VENDOR DEVIATION") {
+		t.Error("the vendor-deviation note is still in the file. contracts v0.41.1 upstreamed " +
+			"`destinationIsStop`, so this file is the tag verbatim and the note now describes " +
+			"a divergence that does not exist — which is exactly how a file stays diverged")
 	}
 }

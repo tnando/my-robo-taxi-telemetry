@@ -43,6 +43,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -665,7 +666,87 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 
 	CREATE UNIQUE INDEX idx_go_live_activities_leg_user
 		ON go_live_activities ("trip_leg_id", "user_id")
-		WHERE "trip_leg_id" IS NOT NULL;`
+		WHERE "trip_leg_id" IS NOT NULL;
+
+	-- go_vehicle_shares: the STANDING GRANT (migration 0020, plus 0024's
+	-- allow_rides / suspended_at).
+	--
+	-- Provisioned because MYR-602 made it unavoidable rather than merely
+	-- useful. auth.queryUserVehicleIDs is FOUR UNION legs, and TWO of them read
+	-- this table — the plain share and, through a join, the trip participation
+	-- — so without it the access-set query cannot run in this harness at all
+	-- and a participant-admission test could not be written. The trips tables
+	-- alone were necessary and not sufficient, which the harness comment used
+	-- to say instead of fixing.
+	--
+	-- THE TWO PREDICATES ARE WHY IT IS THE FULL SHAPE and not two columns:
+	-- "status = 'accepted' AND suspended_at IS NULL" is the access predicate
+	-- carried CHARACTER-FOR-CHARACTER by six statements across three packages
+	-- (auth.queryUserVehicleIDs, auth.queryActiveTripParticipation,
+	-- store.queryTripAudience, store.queryTripActivityTokens and the two
+	-- catalog merges). A harness that could not plant a suspended row could not
+	-- observe any of them, and "a suspended grantee is indistinguishable from
+	-- no grantee" is the property the whole trips access model rests on.
+	--
+	-- The CHECK constraints are 0020's verbatim: a conformance harness that
+	-- accepted a status the migration forbids would let a test plant a state
+	-- production cannot reach and then assert about it.
+	CREATE TABLE go_vehicle_shares (
+		"id"                  TEXT        PRIMARY KEY,
+		"vehicle_id"          TEXT        NOT NULL,
+		"owner_user_id"       TEXT        NOT NULL,
+		-- P1 user content, like the trip name: never logged, never in an error.
+		"label"               TEXT        NOT NULL,
+		"permission"          TEXT        NOT NULL
+			CONSTRAINT go_vehicle_shares_permission_check
+			CHECK ("permission" IN ('live', 'live_history', 'rides')),
+		-- P1 CAPABILITY: whoever holds the code can redeem the grant.
+		"code"                TEXT        NOT NULL,
+		"status"              TEXT        NOT NULL DEFAULT 'pending'
+			CONSTRAINT go_vehicle_shares_status_check
+			CHECK ("status" IN ('pending', 'accepted', 'revoked')),
+		"created_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"expires_at"          TIMESTAMPTZ NOT NULL,
+		"accepted_at"         TIMESTAMPTZ,
+		"accepted_by_user_id" TEXT,
+		"revoked_at"          TIMESTAMPTZ,
+		-- 0024. allow_rides is what a trip participant KEEPS for the length of
+		-- the window (ResolveVehicleAccess returns their own grant alongside
+		-- the elevated role); suspended_at is the half of the access predicate
+		-- a status check alone would miss.
+		"allow_rides"         BOOLEAN     NOT NULL DEFAULT FALSE,
+		"suspended_at"        TIMESTAMPTZ
+	);
+
+	-- The access-set index, 0020's shape verbatim: (accepted_by_user_id,
+	-- vehicle_id) leading on the PERSON, because "which vehicles has this
+	-- person been granted?" is what runs on every handshake.
+	CREATE UNIQUE INDEX uq_go_vehicle_shares_accepted_grant
+		ON go_vehicle_shares ("accepted_by_user_id", "vehicle_id")
+		WHERE "status" = 'accepted';
+
+	-- go_ride_members: the group-ride roster (migration 0040, MYR-540).
+	--
+	-- The THIRD UNION leg of auth.queryUserVehicleIDs, and provisioned for the
+	-- same reason as the shares table beside it: the access-set query names all
+	-- four relations in one statement, so a harness missing any one of them
+	-- cannot run it, and the ride_member role — which sees live location, and
+	-- is therefore one of the two roles the narrowing had to keep — could not
+	-- be exercised against this schema at all.
+	--
+	-- The ride FK is declared because go_ride_requests is provisioned above and
+	-- 0040 declares it: a member row outliving its ride would be a person
+	-- holding live location on a car through a ride that no longer exists.
+	CREATE TABLE go_ride_members (
+		"ride_id"   TEXT        NOT NULL REFERENCES go_ride_requests ("id") ON DELETE CASCADE,
+		"user_id"   TEXT        NOT NULL,
+		"joined_at" TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		CONSTRAINT pk_go_ride_members PRIMARY KEY ("ride_id", "user_id")
+	);
+
+	-- The user-leading index the access-set leg needs; the primary key leads on
+	-- the ride and is useless for it.
+	CREATE INDEX idx_go_ride_members_user ON go_ride_members ("user_id");`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
@@ -729,9 +810,19 @@ func setupTestServer(t *testing.T) (*httptest.Server, *seedHelpers) {
 	driveAdapter := &contractDriveLister{repo: driveRepo}
 
 	listHandler := telemetry.NewVehiclesListHandler(authenticator, listAdapter, logger)
+	// MYR-602: the SHARE READER is wired now that go_vehicle_shares is
+	// provisioned. Without it the handler is owner-only and answers 403 to
+	// every non-owner, which made the whole non-owner half of the mask —
+	// viewer, ride_member and trip_participant — unreachable from this harness.
+	// The role resolver beside it is what then decides WHICH of the three the
+	// caller is, and the two together are the composition the trips access
+	// model actually is.
+	shareRepo := store.NewVehicleShareRepo(testPool, logger)
+	shareReader := &contractShareReader{repo: shareRepo}
 	snapshotHandler := telemetry.NewVehicleSnapshotHandler(
 		authenticator, snapshotAdapter, logger,
 		telemetry.WithSnapshotRoleResolver(authenticator),
+		telemetry.WithSnapshotShareReader(shareReader),
 	)
 	drivesHandler := telemetry.NewVehicleDrivesHandler(
 		authenticator, snapshotAdapter, driveAdapter, logger,
@@ -780,6 +871,21 @@ func newContractEncryptor(t *testing.T) cryptox.Encryptor {
 // Real-repo adapters (mirror cmd/telemetry-server/adapters.go but live
 // in the test package so we don't introduce a cyclic dep through cmd/)
 // ---------------------------------------------------------------------------
+
+// contractShareReader binds the standing-grant read onto the handler's seam,
+// mirroring cmd/telemetry-server's shareReaderAdapter exactly — including the
+// property that makes a SUSPENDED grant indistinguishable from no grant: the
+// store's statement excludes suspended rows, so there is no paused grant for
+// this adapter to hand a gate, and no gate has to name suspension.
+type contractShareReader struct{ repo *store.VehicleShareRepo }
+
+func (a *contractShareReader) ShareGrantFor(ctx context.Context, userID, vehicleID string) (auth.ShareGrant, error) {
+	allowRides, err := a.repo.ShareGrantFor(ctx, userID, vehicleID)
+	if err != nil {
+		return auth.ShareGrant{}, err
+	}
+	return auth.ShareGrant{AllowRides: allowRides}, nil
+}
 
 type contractVehicleLister struct{ repo *store.VehicleRepo }
 
@@ -1014,6 +1120,21 @@ func cleanTables(t *testing.T, pool *pgxpool.Pool) {
 	if _, err := pool.Exec(ctx, `DELETE FROM go_profile_name_confirmations`); err != nil {
 		t.Fatalf("clean go_profile_name_confirmations: %v", err)
 	}
+	// MYR-602. BOTH must go, and go BEFORE the grants they point at would have
+	// been removed by the Vehicle delete above: a surviving trip window on a
+	// re-used vehicle id would silently ELEVATE the next test's share-holder to
+	// trip_participant, which shows up as a viewer reading a real coordinate —
+	// a leak that looks exactly like the bug the narrowing exists to prevent.
+	// go_trip_participants cascades from go_trips, so one statement covers both.
+	if _, err := pool.Exec(ctx, `DELETE FROM go_trips`); err != nil {
+		t.Fatalf("clean go_trips: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM go_vehicle_shares`); err != nil {
+		t.Fatalf("clean go_vehicle_shares: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM go_ride_members`); err != nil {
+		t.Fatalf("clean go_ride_members: %v", err)
+	}
 }
 
 // seedUser inserts a minimal User row so the JWTAuthenticator's FR-10.1
@@ -1112,6 +1233,13 @@ type vehicleSeed struct {
 	DestinationAddress string // empty seeds NULL
 	FsdMilesReset      float64
 	LastUpdated        time.Time
+	// Latitude/Longitude are the car's P1 position, planted as CIPHERTEXT ONLY
+	// (MYR-433) exactly as the writers do. Both zero seeds the (0,0) no-fix
+	// row, which is the state a car that has never reported a position is in —
+	// and, since MYR-602, ALSO the state a narrowed viewer is shown, which is
+	// the indistinguishability the sentinel rule is built on.
+	Latitude  float64
+	Longitude float64
 }
 
 // seedVehicle inserts a Vehicle row. The fixture covers every field the
@@ -1143,6 +1271,7 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 			"locationName", "locationAddress",
 			"locationNameEnc", "locationAddressEnc",
 			"destinationNameEnc", "destinationAddressEnc",
+			"latitudeEnc", "longitudeEnc",
 			"fsdMilesSinceReset", "lastUpdated"
 		) VALUES (
 			$1, $2, $3, $4,
@@ -1151,13 +1280,15 @@ func (h *seedHelpers) seedVehicle(ctx context.Context, t *testing.T, v vehicleSe
 			'', '',
 			$11, $12,
 			$13, $14,
-			$15, $16
+			$15, $16,
+			$17, $18
 		)`,
 		v.ID, v.UserID, v.VIN, v.Name,
 		v.Model, v.Year, v.Color, status,
 		v.ChargeLevel, v.EstimatedRange,
 		h.seal(t, v.LocationName), h.seal(t, v.LocationAddress),
 		h.seal(t, v.DestinationName), h.seal(t, v.DestinationAddress),
+		h.sealFloat(t, v.Latitude), h.sealFloat(t, v.Longitude),
 		v.FsdMilesReset, v.LastUpdated,
 	)
 	if err != nil {
@@ -1200,6 +1331,84 @@ func (h *seedHelpers) seal(t *testing.T, plain string) *string {
 		t.Fatalf("seal label: %v", err)
 	}
 	return ct
+}
+
+// sealFloat plants a coordinate the way the writers do: base64-GCM over the
+// SHORTEST decimal that round-trips (strconv 'g', prec -1), which is the exact
+// spelling store.floatToEncString produces. A different formatting would still
+// decrypt, but a test asserting an exact wire value would then be asserting the
+// seed's formatting rather than the read path's.
+func (h *seedHelpers) sealFloat(t *testing.T, v float64) *string {
+	t.Helper()
+	ct, err := h.enc.EncryptString(strconv.FormatFloat(v, 'g', -1, 64))
+	if err != nil {
+		t.Fatalf("seal coordinate: %v", err)
+	}
+	return &ct
+}
+
+// seedAcceptedShare plants a LIVE accepted grant — the standing relationship a
+// trip participant is chosen from (MYR-602). Accepted and unsuspended, which is
+// the pair every access predicate on the platform asks for.
+func (h *seedHelpers) seedAcceptedShare(ctx context.Context, t *testing.T, shareID, vehicleID, ownerID, granteeID string) {
+	t.Helper()
+	_, err := h.pool.Exec(ctx, `
+		INSERT INTO go_vehicle_shares (
+			id, vehicle_id, owner_user_id, label, permission, code,
+			status, expires_at, accepted_at, accepted_by_user_id
+		) VALUES ($1, $2, $3, 'Seeded', 'live', 'code_' || $1,
+			'accepted', NOW() + INTERVAL '30 days', NOW(), $4)`,
+		shareID, vehicleID, ownerID, granteeID)
+	if err != nil {
+		t.Fatalf("seedAcceptedShare(%s): %v", shareID, err)
+	}
+}
+
+// suspendShare stamps suspended_at, leaving status 'accepted'. That combination
+// is the whole point: a suspension is invisible in `status`, so an access
+// predicate that checked only the status would keep admitting the grantee.
+func (h *seedHelpers) suspendShare(ctx context.Context, t *testing.T, shareID string) {
+	t.Helper()
+	if _, err := h.pool.Exec(ctx,
+		`UPDATE go_vehicle_shares SET suspended_at = NOW() WHERE id = $1`, shareID); err != nil {
+		t.Fatalf("suspendShare(%s): %v", shareID, err)
+	}
+}
+
+// tripSeed is one window on one car.
+type tripSeed struct {
+	ID        string
+	VehicleID string
+	OwnerID   string
+	StartsAt  time.Time
+	EndsAt    time.Time
+}
+
+// seedTrip plants a window. `name_enc` is sealed like every other P1 label —
+// the column is NOT NULL with no plaintext sibling, so a seed cannot skip it.
+func (h *seedHelpers) seedTrip(ctx context.Context, t *testing.T, tr tripSeed) {
+	t.Helper()
+	_, err := h.pool.Exec(ctx, `
+		INSERT INTO go_trips (id, vehicle_id, owner_user_id, name_enc, starts_at, ends_at)
+		VALUES ($1, $2, $3, $4, $5, $6)`,
+		tr.ID, tr.VehicleID, tr.OwnerID, *h.seal(t, "Seeded trip"), tr.StartsAt, tr.EndsAt)
+	if err != nil {
+		t.Fatalf("seedTrip(%s): %v", tr.ID, err)
+	}
+}
+
+// seedTripParticipant puts one share-holder on a trip. The share id is carried
+// rather than the user id alone because that IS the relationship: a trip
+// creates no new grant, it decides what an existing one means between two
+// instants.
+func (h *seedHelpers) seedTripParticipant(ctx context.Context, t *testing.T, tripID, userID, shareID string) {
+	t.Helper()
+	_, err := h.pool.Exec(ctx, `
+		INSERT INTO go_trip_participants (trip_id, user_id, share_id)
+		VALUES ($1, $2, $3)`, tripID, userID, shareID)
+	if err != nil {
+		t.Fatalf("seedTripParticipant(%s/%s): %v", tripID, userID, err)
+	}
 }
 
 // driveSeed bundles the columns that drive the drives-list ordering and
