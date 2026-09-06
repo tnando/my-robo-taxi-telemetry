@@ -3,6 +3,7 @@ package trips
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -59,6 +60,9 @@ func TestSweeper_AnnouncesEachEdgeOnceToParticipants(t *testing.T) {
 			t.Errorf("the owner was told their own trip started: %v", sent[0].UserIDs)
 		}
 	}
+	// The nudge is asynchronous and coalesced (see revalidate.go), so the
+	// assertion waits for it rather than sleeping.
+	svc.DrainRevalidation()
 	if reval.count() == 0 {
 		t.Error("no access revalidation was nudged; participants' sockets would stay " +
 			"masked as plain viewers for up to a minute after their phones buzzed")
@@ -185,6 +189,7 @@ func TestNotifyTripAdded_NudgesTheRemask(t *testing.T) {
 		t.Errorf("vehicleId = %q; the deep link must be able to name the car",
 			pusher.sent[0].VehicleID)
 	}
+	svc.DrainRevalidation()
 	if reval.count() == 0 {
 		t.Error("no revalidation nudge")
 	}
@@ -199,5 +204,42 @@ func TestNotifyTripAdded_EmptyAudienceSendsNothing(t *testing.T) {
 	}
 	if len(pusher.sent) != 0 {
 		t.Errorf("sent %d pushes to nobody", len(pusher.sent))
+	}
+}
+
+// TestSweepOnce_CoalescesTheRemaskNudge is the bound on the re-mask sweeps a
+// pass can cost.
+//
+// Revalidator.SweepOnce is GLOBAL — it walks every connected session on the
+// hub — so calling it once per claimed trip means a pass that claims a backlog
+// of elapsed windows (the shape an outage produces, up to SweepLimit per
+// direction) runs hundreds of identical fleet-wide sweeps inside one tick. The
+// single-flight collapses them: at most one running and one trailing, and the
+// trailing one is guaranteed to start after the last edge was written.
+func TestSweepOnce_CoalescesTheRemaskNudge(t *testing.T) {
+	svc, trips, _, _, _, reval := newTestService(t)
+
+	const n = 25
+	for i := 0; i < n; i++ {
+		id := "trip-bulk-" + strconv.Itoa(i)
+		trips.audience[id] = TripAudience{
+			TripID: id, VehicleID: "veh-1", OwnerUserID: "owner",
+			ParticipantUserIDs: []string{"p1"},
+		}
+		trips.toEnd = append(trips.toEnd, id)
+	}
+
+	if _, ended := NewSweeper(svc, nil).SweepOnce(context.Background()); ended != n {
+		t.Fatalf("ended %d trips, want %d", ended, n)
+	}
+	svc.DrainRevalidation()
+
+	got := reval.count()
+	if got == 0 {
+		t.Fatal("no sweep ran at all; a closed window would keep streaming live location")
+	}
+	if got > 1 {
+		t.Errorf("%d fleet-wide re-mask sweeps for %d trip endings, want at most 1 "+
+			"(one, after both loops) — the nudge is not coalescing", got, n)
 	}
 }

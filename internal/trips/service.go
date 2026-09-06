@@ -26,6 +26,10 @@ type TripStore interface {
 	ClaimTripStartNow(ctx context.Context, tripID string) (bool, error)
 	ClaimTripEndNow(ctx context.Context, tripID string) (bool, error)
 	ActiveTripVehicles(ctx context.Context, limit int) ([]TripVehicle, error)
+	// ActiveTripForVehicle re-asks, for ONE car, the question the candidate
+	// snapshot answered in bulk: which open window is it inside right now,
+	// or "" for none. It is the confirmation openLeg runs before it writes.
+	ActiveTripForVehicle(ctx context.Context, vehicleID string) (string, error)
 }
 
 // TripAudience is who a trip's notifications go to. Mirrors store.TripAudience;
@@ -130,6 +134,9 @@ type Service struct {
 	cfg        Config
 	logger     *slog.Logger
 	now        func() time.Time
+	// nudges coalesces the re-mask sweeps every transition asks for. See
+	// nudgeRevalidation.
+	nudges *revalidationNudge
 }
 
 // NewService builds the shared half.
@@ -149,13 +156,15 @@ func NewService(
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
-	return &Service{
+	svc := &Service{
 		trips:  trips,
 		legs:   legs,
 		cfg:    cfg.withDefaults(),
 		logger: logger,
 		now:    time.Now,
 	}
+	svc.nudges = newRevalidationNudge(svc)
+	return svc
 }
 
 // WithPushes wires the banner notifier. Optional, following the
@@ -181,22 +190,42 @@ func (s *Service) notify(ctx context.Context, p push.TripPush) {
 
 // nudgeRevalidation asks the WebSocket layer to re-derive access and roles now.
 //
-// Best-effort and deliberately un-awaited in spirit: the sweep is bounded by
-// its own timeouts and fails open, and a trip transition must never be held up
-// by a socket layer that is struggling. Called on EVERY edge — a window
-// opening promotes share-holders to trip_participant, a window closing narrows
-// participants back to viewer, and both are invisible to every other mechanism
-// in the service.
+// COALESCED AND DETACHED, and both halves were bugs before they were choices.
+//
+// SweepOnce is GLOBAL: it walks every connected session on the hub, whatever
+// trip prompted it. Called synchronously once per trip edge, a sweeper pass
+// that claimed 200 endings and 200 starts ran FOUR HUNDRED fleet-wide sweeps
+// inside one tick — the shape an outage produces, when a backlog of elapsed
+// windows is claimed at once — and each of those walks every socket resolving
+// a role per (session, vehicle). The same call also sat on the owner's HTTP
+// handler: "End trip" returned only after the whole hub had been re-derived.
+//
+// So a nudge is now a REQUEST rather than a call. One sweep runs at a time; a
+// request arriving while one is in flight sets a trailing flag and returns
+// immediately, so N edges in a tick cost at most two sweeps — the one already
+// running, and one more afterwards that is guaranteed to observe every edge
+// that asked. Nothing is lost by coalescing because the sweep takes no
+// argument: two sweeps for two trips do exactly what one sweep does.
+//
+// The context is DETACHED (context.WithoutCancel) and re-bounded, because the
+// caller is frequently an HTTP handler whose request context dies the moment
+// it answers — the re-mask must outlive the response that triggered it.
 func (s *Service) nudgeRevalidation(ctx context.Context, reason, tripID string) {
 	if s.revalidate == nil {
 		return
 	}
-	closed := s.revalidate.SweepOnce(ctx)
-	s.logger.Debug("trips: nudged access revalidation",
-		slog.String("reason", reason),
-		slog.String("trip_id", tripID),
-		slog.Int("sessions_closed", closed),
-	)
+	s.nudges.request(context.WithoutCancel(ctx), reason, tripID)
+}
+
+// DrainRevalidation waits for any in-flight or trailing re-mask sweep to
+// finish. The composition root calls it on shutdown so a detached sweep is not
+// abandoned mid-pass, and the package's own tests call it to make an
+// asynchronous nudge observable without sleeping.
+func (s *Service) DrainRevalidation() {
+	if s == nil {
+		return
+	}
+	s.nudges.drain()
 }
 
 // vehicleName resolves a nickname for the card, best-effort. "" routes the copy

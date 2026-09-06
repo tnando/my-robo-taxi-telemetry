@@ -51,6 +51,22 @@ type Config struct {
 	// neither a stalled claim nor a stalled candidate read can wedge the frame
 	// path or hold a pass past its own interval.
 	Timeout time.Duration
+
+	// EdgeTimeout bounds ONE claimed trip's post-claim work in a sweeper pass
+	// — its audience read, its open legs' endings, its card pushes and its
+	// banner fan-out taken together. Larger than Timeout because it covers a
+	// SEQUENCE that includes network sends to APNs, and far smaller than
+	// SweepInterval because a pass must finish before the next one starts.
+	EdgeTimeout time.Duration
+
+	// RevalidateTimeout bounds ONE coalesced re-mask sweep (see
+	// revalidate.go). Its own constant rather than a reuse of Timeout because
+	// the two bound different things: Timeout bounds a single indexed
+	// statement, while a sweep walks every connected session and resolves a
+	// role per (session, vehicle) — a fleet-wide pass that legitimately takes
+	// longer than any one query, and that must still not be able to hold the
+	// single-flight latch shut across a whole sweeper tick.
+	RevalidateTimeout time.Duration
 }
 
 const (
@@ -82,6 +98,17 @@ const (
 	defaultMaxStillnessGap     = 90 * time.Second
 
 	defaultTimeout = 5 * time.Second
+
+	// One trip's whole closing or opening edge, pushes included. Twenty
+	// seconds is three times the budget its longest single statement gets and
+	// a third of the interval, so a stalled edge is abandoned well before the
+	// next pass and the 199 trips behind it still get theirs.
+	defaultEdgeTimeout = 20 * time.Second
+
+	// A whole sweep, not a statement — see Config.RevalidateTimeout. Half the
+	// 60-second sweeper interval, so a pass that hangs is abandoned before the
+	// next tick's edges arrive rather than making them queue behind it.
+	defaultRevalidateTimeout = 30 * time.Second
 )
 
 // DefaultConfig returns the production settings with the feature ON.
@@ -98,6 +125,8 @@ func DefaultConfig() Config {
 		StillnessMeters:     defaultStillnessMeters,
 		MaxStillnessGap:     defaultMaxStillnessGap,
 		Timeout:             defaultTimeout,
+		EdgeTimeout:         defaultEdgeTimeout,
+		RevalidateTimeout:   defaultRevalidateTimeout,
 	}
 }
 
@@ -132,6 +161,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxStillnessGap <= 0 {
 		c.MaxStillnessGap = d.MaxStillnessGap
+	}
+	if c.EdgeTimeout <= 0 {
+		c.EdgeTimeout = d.EdgeTimeout
+	}
+	if c.RevalidateTimeout <= 0 {
+		c.RevalidateTimeout = d.RevalidateTimeout
 	}
 	if c.Timeout <= 0 {
 		c.Timeout = d.Timeout

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/events"
@@ -36,6 +37,15 @@ type Detector struct {
 	trips    *legCandidates
 	vehicles map[string]*vehicleState
 
+	// mu guards the lifecycle fields below. handleFrame reads ctx on every
+	// frame while Start and Stop write all four, and although the bus almost
+	// certainly serialises delivery against Unsubscribe, "almost certainly" is
+	// not a synchronisation primitive — an implicit invariant on the busiest
+	// path in the service is exactly the kind that a future bus rewrite
+	// falsifies silently. The mutex is uncontended in steady state (one
+	// uncontended Lock per frame) and makes the invariant something the race
+	// detector can see.
+	mu     sync.Mutex
 	sub    events.Subscription
 	subbed bool
 	ctx    context.Context
@@ -47,6 +57,14 @@ func NewDetector(svc *Service, bus events.Bus, vins VINResolver, logger *slog.Lo
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
 	}
+	// The context is seeded ALREADY CANCELLED rather than left nil. A frame
+	// delivered before Start — or after Stop, in the window before the bus
+	// stops calling — would otherwise derive a timeout from a nil parent and
+	// panic on the hot path; cancelled, every store call it makes fails fast
+	// and the frame is dropped, which is what a detector that is not running
+	// should do.
+	dead, cancelDead := context.WithCancel(context.Background())
+	cancelDead()
 	return &Detector{
 		svc:      svc,
 		bus:      bus,
@@ -55,21 +73,36 @@ func NewDetector(svc *Service, bus events.Bus, vins VINResolver, logger *slog.Lo
 		cfg:      svc.cfg,
 		trips:    newLegCandidates(svc.trips, svc.cfg, logger),
 		vehicles: make(map[string]*vehicleState),
+		ctx:      dead,
 	}
+}
+
+// frameCtx returns the context the per-frame path runs under.
+func (d *Detector) frameCtx() context.Context {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.ctx
 }
 
 // Start subscribes to TopicVehicleTelemetry. The context governs the candidate
 // reads and leg writes the handler makes, so cancelling it stops the detector
 // touching the database even before Stop unsubscribes it.
 func (d *Detector) Start(ctx context.Context) error {
+	d.mu.Lock()
 	d.ctx, d.cancel = context.WithCancel(ctx)
+	d.mu.Unlock()
 
+	// Subscribed OUTSIDE the lock: the bus may deliver the first frame from
+	// another goroutine before Subscribe returns, and that frame's frameCtx()
+	// would deadlock against a lock this call still held.
 	sub, err := d.bus.Subscribe(events.TopicVehicleTelemetry, d.handleFrame)
 	if err != nil {
-		d.cancel()
+		_ = d.Stop()
 		return fmt.Errorf("trips.Detector.Start: %w", err)
 	}
+	d.mu.Lock()
 	d.sub, d.subbed = sub, true
+	d.mu.Unlock()
 
 	d.logger.Info("trip leg detector started",
 		slog.Float64("arrival_radius_meters", d.cfg.ArrivalRadiusMeters),
@@ -82,14 +115,18 @@ func (d *Detector) Start(ctx context.Context) error {
 // Stop unsubscribes and cancels in-flight store work. Safe on a detector that
 // never started.
 func (d *Detector) Stop() error {
+	d.mu.Lock()
 	if d.cancel != nil {
 		d.cancel()
 	}
-	if !d.subbed {
+	sub, subbed := d.sub, d.subbed
+	d.subbed = false
+	d.mu.Unlock()
+
+	if !subbed {
 		return nil
 	}
-	d.subbed = false
-	if err := d.bus.Unsubscribe(d.sub); err != nil {
+	if err := d.bus.Unsubscribe(sub); err != nil {
 		return fmt.Errorf("trips.Detector.Stop: %w", err)
 	}
 	return nil
@@ -101,19 +138,29 @@ func (d *Detector) handleFrame(evt events.Event) {
 	if !ok || te.VIN == "" {
 		return
 	}
+	ctx := d.frameCtx()
 
-	byVehicle, fresh := d.trips.ensure(d.ctx, d.svc.now())
+	byVehicle, fresh := d.trips.ensure(ctx, d.svc.now())
+	if fresh {
+		// THE PRUNE IS STRUCTURAL, not a special case for the empty set.
+		//
+		// It used to clear the whole map only when NO window was open
+		// anywhere, and drop one car's entry only on a frame that car itself
+		// sent. A rolling fleet — cars entering and leaving windows with no
+		// completely-empty moment between them — therefore grew the map
+		// monotonically, and a car that left its window and then stopped
+		// streaming kept its entry for the life of the process. Rebuilding it
+		// against the fresh snapshot bounds it by the number of cars in an
+		// open window, which is what it was always meant to be, and it also
+		// makes the "a later trip begins from a clean slate" rule true for a
+		// car that never sends another frame in between.
+		d.pruneVehicles(byVehicle)
+	}
 	if len(byVehicle) == 0 {
-		if fresh {
-			// No open windows anywhere. Drop the per-VIN memory rather than
-			// carry it: the next window's first leg must be decided from live
-			// frames, not from a destination this car reported an hour ago.
-			d.vehicles = make(map[string]*vehicleState)
-		}
 		return
 	}
 
-	vehicleID, err := d.vins.ResolveID(d.ctx, te.VIN)
+	vehicleID, err := d.vins.ResolveID(ctx, te.VIN)
 	if err != nil || vehicleID == "" {
 		// A VIN with no vehicle row: a car mid-teardown, or one streaming
 		// before its provisioning finished. Nothing to attribute a leg to.
@@ -122,22 +169,35 @@ func (d *Detector) handleFrame(evt events.Event) {
 	tv, watching := byVehicle[vehicleID]
 	if !watching {
 		// The overwhelmingly common case: a car in no open window. Its
-		// per-VIN memory is dropped so a trip starting later begins from a
-		// clean slate rather than from a stale destination.
-		delete(d.vehicles, te.VIN)
+		// memory is dropped so a trip starting later begins from a clean
+		// slate rather than from a stale destination.
+		delete(d.vehicles, vehicleID)
 		return
 	}
 
-	state := d.vehicles[te.VIN]
+	state := d.vehicles[vehicleID]
 	if state == nil {
 		state = &vehicleState{}
-		d.vehicles[te.VIN] = state
+		d.vehicles[vehicleID] = state
 	}
 
 	f := fixFrom(te)
 	drivingBefore, destBefore := state.driving, state.destination
 	state.apply(f, d.cfg)
-	d.decide(tv, state, f, drivingBefore, destBefore)
+	d.decide(ctx, tv, state, f, drivingBefore, destBefore)
+}
+
+// pruneVehicles drops the per-car memory of every vehicle that is not in the
+// snapshot. Keyed by VEHICLE ID rather than by VIN precisely so this is
+// possible: the candidate snapshot is vehicle-keyed, and a VIN cannot be
+// compared against it without a resolver call the pruning path has no reason
+// to make.
+func (d *Detector) pruneVehicles(byVehicle map[string]TripVehicle) {
+	for vehicleID := range d.vehicles {
+		if _, watching := byVehicle[vehicleID]; !watching {
+			delete(d.vehicles, vehicleID)
+		}
+	}
 }
 
 // decide acts on the edges one frame produced.
@@ -151,8 +211,10 @@ func (d *Detector) handleFrame(evt events.Event) {
 // A leg that is already open is not re-opened: StartLeg is idempotent against
 // the one-open-leg-per-trip index, and a car that RE-ROUTES mid-leg keeps its
 // leg rather than getting a second card for one journey.
-func (d *Detector) decide(tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string) {
-	leg, err := d.svc.legs.OpenLegForVehicle(d.ctx, tv.VehicleID)
+func (d *Detector) decide(
+	ctx context.Context, tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string,
+) {
+	leg, err := d.svc.legs.OpenLegForVehicle(ctx, tv.VehicleID)
 	if err != nil {
 		d.logger.Warn("trips: open-leg lookup failed",
 			slog.String("vehicle_id", tv.VehicleID), slog.String("error", err.Error()))
@@ -161,15 +223,21 @@ func (d *Detector) decide(tv TripVehicle, state *vehicleState, f fix, drivingBef
 
 	underway := state.driving && state.destination != ""
 	if !leg.Open() {
+		state.endLeg()
 		if underway && (!drivingBefore || destBefore == "") {
-			d.svc.openLeg(d.ctx, tv, state.destination, f.at)
+			d.svc.openLeg(ctx, tv, state.destination, f.at)
 		}
 		return
 	}
+	// The per-leg fields (the arrival latch, the dwell, the card throttle)
+	// belong to THIS leg. Re-pointing them here is what stops a latch set on
+	// the previous leg from disabling this one's arrival branch — see
+	// vehicleState.beginLeg.
+	state.beginLeg(leg.ID)
 
 	// A leg IS open. Three things can close it, and they are checked in the
 	// order of how much they assert.
-	audience, audErr := d.svc.trips.TripAudienceFor(d.ctx, tv.TripID)
+	audience, audErr := d.svc.trips.TripAudienceFor(ctx, tv.TripID)
 	if audErr != nil {
 		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
 			slog.String("leg_id", leg.ID), slog.String("error", audErr.Error()))
@@ -185,7 +253,7 @@ func (d *Detector) decide(tv TripVehicle, state *vehicleState, f fix, drivingBef
 	//    that arrive while the car sits there do nothing.
 	if !state.arrivalLatched && state.arrivedAt(f, d.cfg) {
 		state.arrivalLatched = true
-		d.svc.closeLeg(d.ctx, leg, audience, true)
+		d.svc.closeLeg(ctx, leg, audience, true)
 		return
 	}
 
@@ -193,7 +261,7 @@ func (d *Detector) decide(tv TripVehicle, state *vehicleState, f fix, drivingBef
 	//    still be moving. The leg is over as a leg — there is no longer a place
 	//    it is going — and it ended without evidence.
 	if state.destination == "" {
-		d.svc.closeLeg(d.ctx, leg, audience, false)
+		d.svc.closeLeg(ctx, leg, audience, false)
 		return
 	}
 
@@ -215,14 +283,14 @@ func (d *Detector) decide(tv TripVehicle, state *vehicleState, f fix, drivingBef
 	//    proved it stayed — and it is the same dependency internal/arrival has
 	//    on the same poller for the same reason.
 	if !state.driving && drivingBefore && !atDestination {
-		d.svc.closeLeg(d.ctx, leg, audience, false)
+		d.svc.closeLeg(ctx, leg, audience, false)
 		return
 	}
 
 	// Still under way. Refresh the card only when this frame's arrival estimate
 	// has earned a push — see vehicleState.dueForCard.
 	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
-		d.svc.updateLeg(d.ctx, leg, audience, f, minutes)
+		d.svc.updateLeg(ctx, leg, audience, f, minutes)
 	}
 }
 
@@ -277,11 +345,29 @@ type legCandidates struct {
 	logger *slog.Logger
 
 	byVehicle map[string]TripVehicle
+	// fetchedAt is when the SNAPSHOT was taken, and it is what the staleness
+	// ceiling is measured against.
 	fetchedAt time.Time
-	failing   bool
+	// attemptedAt is when a refresh was last TRIED, successfully or not, and
+	// it is what the TTL gate consults.
+	//
+	// The two were one field, and a failed refresh left it untouched: the gate
+	// then read a snapshot that was already older than the TTL, so EVERY
+	// SUBSEQUENT FRAME re-ran the query. A database blip therefore converted
+	// the 15-second cache into a per-frame five-second-timeout read on the
+	// single bus goroutine — up to one per second per streaming car, each
+	// able to block the delivery loop for the whole timeout, which drops
+	// frames for every other subscriber on the bus. Separating them keeps the
+	// retry rate at one per TTL while leaving the ceiling honest about how old
+	// the data actually is.
+	attemptedAt time.Time
+	failing     bool
 }
 
 func newLegCandidates(store TripStore, cfg Config, logger *slog.Logger) *legCandidates {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	}
 	return &legCandidates{store: store, cfg: cfg, logger: logger}
 }
 
@@ -295,7 +381,10 @@ func newLegCandidates(store TripStore, cfg Config, logger *slog.Logger) *legCand
 // checked against a trip that ended, and opening a leg on a closed window would
 // push a card to people whose access has already been revoked.
 func (c *legCandidates) ensure(ctx context.Context, now time.Time) (map[string]TripVehicle, bool) {
-	if c.byVehicle != nil && now.Sub(c.fetchedAt) < c.cfg.CandidateTTL {
+	// Gated on the last ATTEMPT so a failing refresh backs off at the TTL
+	// rather than re-firing on every frame, and so the "no windows anywhere"
+	// answer is cached like any other.
+	if !c.attemptedAt.IsZero() && now.Sub(c.attemptedAt) < c.cfg.CandidateTTL {
 		return c.byVehicle, false
 	}
 
@@ -303,6 +392,7 @@ func (c *legCandidates) ensure(ctx context.Context, now time.Time) (map[string]T
 	defer cancel()
 
 	rows, err := c.store.ActiveTripVehicles(readCtx, c.cfg.CandidateLimit)
+	c.attemptedAt = now
 	if err != nil {
 		return c.serveStale(now, err), false
 	}

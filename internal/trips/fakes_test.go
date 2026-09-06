@@ -17,16 +17,20 @@ import (
 type fakeTripStore struct {
 	mu sync.Mutex
 
-	audience  map[string]TripAudience
-	names     map[string]string
-	toStart   []string
-	toEnd     []string
-	started   map[string]bool
-	ended     map[string]bool
-	vehicles  []TripVehicle
-	claimErr  error
-	audErr    error
-	vehiclErr error
+	audience   map[string]TripAudience
+	names      map[string]string
+	toStart    []string
+	toEnd      []string
+	started    map[string]bool
+	ended      map[string]bool
+	vehicles   []TripVehicle
+	claimErr   error
+	audErr     error
+	vehiclErr  error
+	confirmErr error
+	// vehicleCalls counts candidate reads, so a test can assert the frame path
+	// is not querying per frame.
+	vehicleCalls int
 }
 
 func newFakeTripStore() *fakeTripStore {
@@ -113,9 +117,28 @@ func (f *fakeTripStore) ClaimTripEndNow(_ context.Context, tripID string) (bool,
 	return true, nil
 }
 
+// ActiveTripForVehicle models the confirmation openLeg runs before it writes.
+// It answers from the SAME `vehicles` slice the candidate snapshot is built
+// from, so a test that removes a car from the snapshot has also closed its
+// window — which is the real relationship between the two statements.
+func (f *fakeTripStore) ActiveTripForVehicle(_ context.Context, vehicleID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.confirmErr != nil {
+		return "", f.confirmErr
+	}
+	for _, tv := range f.vehicles {
+		if tv.VehicleID == vehicleID {
+			return tv.TripID, nil
+		}
+	}
+	return "", nil
+}
+
 func (f *fakeTripStore) ActiveTripVehicles(_ context.Context, _ int) ([]TripVehicle, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.vehicleCalls++
 	if f.vehiclErr != nil {
 		return nil, f.vehiclErr
 	}

@@ -28,6 +28,9 @@ import (
 // two, the participant is left with a banner and no card, which the next leg
 // corrects, rather than a card nobody was told about.
 func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination string, at time.Time) {
+	if !s.windowStillOpen(ctx, tv) {
+		return
+	}
 	leg, err := s.legs.StartLeg(ctx, tv.TripID, tv.VehicleID, destination, at)
 	if err != nil {
 		s.logger.Error("trips: opening a leg failed",
@@ -61,6 +64,53 @@ func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination strin
 		slog.Bool("has_destination", leg.DestinationName != ""),
 		slog.Int("audience", len(audience.everyone())),
 	)
+}
+
+// windowStillOpen re-asks the database whether this car is inside THIS trip's
+// window, immediately before a leg is written.
+//
+// THE CANDIDATE SNAPSHOT IS DELIBERATELY STALE and the detector's own doc says
+// why: it is refreshed at most once per CandidateTTL, and on a failed refresh
+// it is served for up to four TTLs more. That is the right trade for the
+// per-frame path, which must not pay for a query per frame — but it is the
+// wrong basis for a WRITE. A minute-old snapshot cannot know that the owner
+// tapped "End trip" thirty seconds ago, and opening a leg on a window that has
+// closed pushes a Live Activity and a banner naming the car and its
+// destination to people whose access was revoked with the window. The
+// detector's own comment already states this as the reason the stale path
+// fails towards detecting nothing; this is the same rule applied at the one
+// moment the snapshot is acted upon rather than merely consulted.
+//
+// It costs one indexed read per LEG EDGE — a handful per car per day, not one
+// per frame — which is why the confirmation is here and not in the frame path.
+//
+// AN ERROR REFUSES THE LEG. Failing open would mean "we could not check, so we
+// pushed anyway", which is the one direction this feature is not allowed to
+// fail in; a leg refused on a database blip is re-opened by the next frame
+// that finds the car still driving with a destination, because the open
+// condition is a state and not an edge the detector can only see once.
+func (s *Service) windowStillOpen(ctx context.Context, tv TripVehicle) bool {
+	tripID, err := s.trips.ActiveTripForVehicle(ctx, tv.VehicleID)
+	if err != nil {
+		s.logger.Warn("trips: could not confirm the window before opening a leg; refusing it",
+			slog.String("trip_id", tv.TripID),
+			slog.String("vehicle_id", tv.VehicleID),
+			slog.String("error", err.Error()))
+		return false
+	}
+	if tripID == tv.TripID {
+		return true
+	}
+	// Either the window closed under the snapshot, or the car is now inside a
+	// DIFFERENT trip's window. Both mean the leg would have been attributed to
+	// the wrong trip, and the second is the one the create endpoint's overlap
+	// refusal makes rare rather than impossible (a window ending while the
+	// next begins).
+	s.logger.Info("trips: the snapshot's window is no longer this car's; leg not opened",
+		slog.String("snapshot_trip_id", tv.TripID),
+		slog.String("vehicle_id", tv.VehicleID),
+		slog.Bool("now_in_a_window", tripID != ""))
+	return false
 }
 
 // announceLegStarted fires `trip_leg_started` once per leg.

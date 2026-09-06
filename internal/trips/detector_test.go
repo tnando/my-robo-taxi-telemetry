@@ -2,6 +2,7 @@ package trips
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -413,5 +414,205 @@ func TestCardUpdatesAreThrottled(t *testing.T) {
 	}
 	if len(activities.updates) == 0 {
 		t.Error("no card update at all; the ETA is the one number on the card that moves")
+	}
+}
+
+// TestSecondLegToTheSameDestinationCanArrive is finding 5: a return journey.
+//
+// The arrival latch used to be cleared only on a destination NAME change, so a
+// car that arrived at the Grand Canyon, parked, and later drove BACK to the
+// Grand Canyon carried the latch into the second leg — whose arrival branch was
+// therefore disabled for good. That leg could only ever end as `completed`, and
+// "your car arrived" was never sent. The latch is now keyed on the leg id, so
+// it cannot outlive the leg it is about whatever the previous one's ending did.
+func TestSecondLegToTheSameDestinationCanArrive(t *testing.T) {
+	d, _, _, pusher, _ := newTestDetector(t)
+
+	const destName = "Grand Canyon Village"
+	// destLat/destLng and the arrival fix are the same point, so the car is
+	// unambiguously AT the destination on both legs.
+	const dLat, dLng = 36.0544, -112.1401
+
+	drive := func(base int) []frame {
+		return []frame{
+			{base, map[string]events.TelemetryValue{
+				string(telemetry.FieldDestinationName): dest(destName),
+				string(telemetry.FieldDestLocation):    loc(dLat, dLng),
+				string(telemetry.FieldGear):            gear("D"),
+				string(telemetry.FieldSpeed):           speed(45),
+				string(telemetry.FieldLocation):        loc(36.20, -112.30),
+			}},
+			// Arrive and stand still for the whole dwell.
+			{base + 60, map[string]events.TelemetryValue{
+				string(telemetry.FieldSpeed):    speed(0),
+				string(telemetry.FieldLocation): loc(dLat, dLng),
+			}},
+			{base + 60 + int(testDwell/time.Second) + 1, map[string]events.TelemetryValue{
+				string(telemetry.FieldSpeed):    speed(0),
+				string(telemetry.FieldLocation): loc(dLat, dLng),
+			}},
+		}
+	}
+
+	feed(d, drive(0))
+	// The car sits for an hour, then drives back to the same named place.
+	feed(d, drive(3600))
+
+	var arrivals int
+	for _, p := range pusher.sent {
+		if p.Event == push.TripEventLegArrived {
+			arrivals++
+		}
+	}
+	if arrivals != 2 {
+		t.Errorf("%d trip_leg_arrived pushes across two legs to the same destination, want 2 "+
+			"— a latch that survives a leg disables every later arrival at that place",
+			arrivals)
+	}
+}
+
+// TestDestinationNameChangeInvalidatesTheCachedCoordinate is finding 4.
+//
+// Tesla streams deltas, so the frame announcing a NEW destination name usually
+// carries no DestLocation. Left in place, the cached coordinate still points at
+// the PREVIOUS destination while `destination` names the new one — and
+// inRadius prefers the coordinate over the car's own milesToArrival, so the
+// detector measured arrival against a place the car was no longer going.
+func TestDestinationNameChangeInvalidatesTheCachedCoordinate(t *testing.T) {
+	var v vehicleState
+	cfg := Config{}.withDefaults()
+
+	v.apply(fix{
+		at:       at(0),
+		destName: str("Home"),
+		destLat:  36.0544, destLng: -112.1401, hasDest: true,
+	}, cfg)
+	if !v.hasDest {
+		t.Fatal("the first destination's coordinate was not cached")
+	}
+
+	// A name change with NO coordinate, which is the ordinary delta shape.
+	v.apply(fix{at: at(1), destName: str("Work")}, cfg)
+	if v.hasDest {
+		t.Fatal("the OLD destination's coordinate survived a change of destination; " +
+			"arrival would be measured against a place the car is no longer going")
+	}
+
+	// With no coordinate, the car's own distance-to-arrival is what decides —
+	// which on a leg is the same fact by construction (see arrivedAt).
+	far := fix{at: at(2), lat: 36.0544, lng: -112.1401, hasFix: true, milesToGo: f64(40)}
+	if v.inRadius(far, cfg) {
+		t.Error("a car 40 miles from its NEW destination reported as arrived, because " +
+			"it happened to be sitting on the old one's coordinate")
+	}
+	near := fix{at: at(3), milesToGo: f64(0.01)}
+	if !v.inRadius(near, cfg) {
+		t.Error("milesToArrival was ignored while no coordinate is known; the detector " +
+			"has no other evidence at that moment")
+	}
+
+	// A fresh DestLocation re-arms the coordinate path in the same frame.
+	v.apply(fix{at: at(4), destName: str("Work"), destLat: 1, destLng: 2, hasDest: true}, cfg)
+	if !v.hasDest || v.destLat != 1 || v.destLng != 2 {
+		t.Errorf("the new destination's coordinate was not adopted: %+v", v)
+	}
+}
+
+// TestCandidateRefreshBacksOffOnFailure is finding 12.
+//
+// `ensure` stamped only successful refreshes, so after one failed read the
+// snapshot was permanently older than the TTL and EVERY subsequent frame re-ran
+// the query — a database blip turning a 15-second cache into a per-frame
+// five-second-timeout read on the single bus goroutine, which drops frames for
+// every other subscriber on the bus.
+func TestCandidateRefreshBacksOffOnFailure(t *testing.T) {
+	store := newFakeTripStore()
+	store.vehiclErr = errors.New("connection refused")
+	c := newLegCandidates(store, Config{Enabled: true}.withDefaults(), nil)
+
+	now := frameBase
+	for i := 0; i < 50; i++ {
+		c.ensure(context.Background(), now.Add(time.Duration(i)*time.Second))
+	}
+	if store.vehicleCalls > 5 {
+		t.Errorf("%d candidate reads across 50 seconds of frames with the database down; "+
+			"the TTL is 15s, so at most a handful should have been attempted",
+			store.vehicleCalls)
+	}
+	if store.vehicleCalls == 0 {
+		t.Error("no read was attempted at all; the cache would never recover")
+	}
+}
+
+// TestPruneDropsCarsThatLeftTheirWindow is W2: the per-car map must be bounded
+// by the OPEN-WINDOW set, not by every car ever watched.
+//
+// It used to be cleared wholesale only when no window was open anywhere, and
+// per-car only on a frame that car itself sent. A rolling fleet — windows
+// always overlapping, cars going quiet when they park — therefore grew it
+// monotonically.
+func TestPruneDropsCarsThatLeftTheirWindow(t *testing.T) {
+	d, trips, _, _, _ := newTestDetector(t)
+
+	// A second car, in its own window, that will never send another frame.
+	trips.vehicles = append(trips.vehicles, TripVehicle{VehicleID: "veh-gone", TripID: "trip-2"})
+	d.vehicles["veh-gone"] = &vehicleState{destination: "Somewhere"}
+
+	feed(d, []frame{{0, map[string]events.TelemetryValue{
+		string(telemetry.FieldGear): gear("P"),
+	}}})
+	if _, held := d.vehicles["veh-gone"]; !held {
+		t.Fatal("the seeded car was dropped before its window closed")
+	}
+
+	// Its window closes. The snapshot is rebuilt on the next frame past the
+	// TTL, and the prune runs against it.
+	trips.vehicles = []TripVehicle{{VehicleID: testVehicle, TripID: testTrip}}
+	d.trips.attemptedAt = time.Time{}
+	feed(d, []frame{{1, map[string]events.TelemetryValue{
+		string(telemetry.FieldGear): gear("P"),
+	}}})
+
+	if _, held := d.vehicles["veh-gone"]; held {
+		t.Error("a car outside every open window kept its state; with windows always " +
+			"overlapping somewhere in the fleet, the map only ever grows")
+	}
+	if _, held := d.vehicles[testVehicle]; !held {
+		t.Error("the prune dropped a car that is still inside its window")
+	}
+}
+
+// TestLegIsNotOpenedOnAClosedWindow is the confirmation openLeg runs before it
+// writes.
+//
+// The candidate snapshot is up to a TTL old and, on a failed refresh, four TTLs
+// older than that. Opening a leg on a window that closed in the meantime pushes
+// a Live Activity and a banner naming the car and its destination to people
+// whose access was revoked with the window.
+func TestLegIsNotOpenedOnAClosedWindow(t *testing.T) {
+	d, trips, legs, pusher, activities := newTestDetector(t)
+
+	// The snapshot still lists the car; the window itself has closed.
+	d.trips.byVehicle = map[string]TripVehicle{testVehicle: {VehicleID: testVehicle, TripID: testTrip}}
+	d.trips.attemptedAt = frameBase
+	trips.vehicles = nil
+
+	feed(d, []frame{
+		{0, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest("Grand Canyon"),
+			string(telemetry.FieldGear):            gear("P"),
+		}},
+		{5, map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):  gear("D"),
+			string(telemetry.FieldSpeed): speed(30),
+		}},
+	})
+
+	if legs.startCalls != 0 {
+		t.Errorf("a leg was written on a window that has closed (%d StartLeg calls)", legs.startCalls)
+	}
+	if len(pusher.sent) != 0 || len(activities.starts) != 0 {
+		t.Errorf("a closed window still pushed: %d banners, %d cards",
+			len(pusher.sent), len(activities.starts))
 	}
 }

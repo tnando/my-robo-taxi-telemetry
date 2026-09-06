@@ -130,13 +130,25 @@ func setupTripsLive(ctx context.Context, deps tripsLiveDeps) (*tripsLive, error)
 	return &tripsLive{Service: svc, Detector: detector}, nil
 }
 
-// Stop releases the detector's subscription. Safe on a zero value, which is
-// what the kill-switch-off path returns.
+// Stop releases the detector's subscription and waits out any detached re-mask
+// sweep. Safe on a zero value, which is what the kill-switch-off path returns.
+//
+// THE DRAIN IS NOT TIDINESS. A trip transition's re-mask nudge runs on a
+// context deliberately detached from the caller's (an HTTP handler's request
+// context dies the moment it answers), so at shutdown there may be a sweep in
+// flight that nothing else is waiting for. Abandoning it mid-pass would leave
+// some sessions re-masked and others not — which on a closing window means
+// somebody keeps live location until they reconnect.
 func (t *tripsLive) Stop() {
-	if t == nil || t.Detector == nil {
+	if t == nil {
 		return
 	}
-	_ = t.Detector.Stop()
+	if t.Detector != nil {
+		_ = t.Detector.Stop()
+	}
+	if t.Service != nil {
+		t.Service.DrainRevalidation()
+	}
 }
 
 // tripLiveStoreAdapter adapts *store.TripLiveRepo onto trips.TripStore. Named
@@ -200,6 +212,14 @@ func (a *tripLiveStoreAdapter) ClaimTripEndNow(ctx context.Context, tripID strin
 		return false, fmt.Errorf("trips: claim end: %w", err)
 	}
 	return claimed, nil
+}
+
+func (a *tripLiveStoreAdapter) ActiveTripForVehicle(ctx context.Context, vehicleID string) (string, error) {
+	tripID, err := a.repo.ActiveTripForVehicle(ctx, vehicleID)
+	if err != nil {
+		return "", fmt.Errorf("trips: confirm open window: %w", err)
+	}
+	return tripID, nil
 }
 
 func (a *tripLiveStoreAdapter) ActiveTripVehicles(ctx context.Context, limit int) ([]trips.TripVehicle, error) {

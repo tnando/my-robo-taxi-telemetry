@@ -111,6 +111,19 @@ type vehicleState struct {
 	// closed as arrived, so the twenty further qualifying frames that arrive
 	// while it sits there do nothing.
 	arrivalLatched bool
+	// legID is the leg these per-leg fields are ABOUT, and it is what makes
+	// them structurally unable to outlive it.
+	//
+	// The latch used to be cleared only on a destination NAME change, which is
+	// the one clearing condition that does not cover the case the latch is most
+	// dangerous in: a second leg to the SAME place — a car that arrives, parks,
+	// and later drives back to the same destination, which on a road trip is
+	// every return journey. Its name never changes, so the latch survived into
+	// the new leg and that leg's arrival branch was disabled for good; the leg
+	// could then only ever end as `completed`, and "your car arrived" was never
+	// sent. Keyed on the leg id instead, the reset happens because the leg is a
+	// different leg, whatever the previous one's ending did.
+	legID string
 
 	// lastCardETA and lastCardPush are the CARD THROTTLE. A car streams up to
 	// once per second and Apple throttles high-frequency Activity pushes by
@@ -154,6 +167,26 @@ func (v *vehicleState) dueForCard(minutes *int, at time.Time) bool {
 	return true
 }
 
+// beginLeg points the per-leg fields at legID, resetting them when it is a
+// different leg from the one they were about.
+//
+// It is called on every frame that sees an open leg, not only at the edge, so
+// the reset cannot be missed by a closing path that failed, by a leg another
+// process opened, or by a restart that rebuilt this state from nothing.
+func (v *vehicleState) beginLeg(legID string) {
+	if v.legID == legID {
+		return
+	}
+	v.legID = legID
+	v.arrivalLatched = false
+	v.stillSince = time.Time{}
+	v.lastCardETA, v.lastCardPush = nil, time.Time{}
+}
+
+// endLeg forgets which leg the per-leg fields were about, so the next one
+// begins from a clean slate.
+func (v *vehicleState) endLeg() { v.beginLeg("") }
+
 // apply folds one frame into the state and reports what changed.
 //
 // Returns the two edges the detector acts on: whether the car is NOW driving
@@ -171,6 +204,23 @@ func (v *vehicleState) apply(f fix, cfg Config) {
 			// lets the next frame carrying an estimate refresh the card at
 			// once rather than up to cardMinInterval later.
 			v.lastCardETA, v.lastCardPush = nil, time.Time{}
+			// AND IT INVALIDATES THE CACHED COORDINATE, which is the half this
+			// used to get wrong. Tesla streams deltas, so the frame that
+			// announces a new destination NAME very often carries no
+			// DestLocation — the coordinate arrives a frame or several later,
+			// or never. Left in place, destLat/destLng still point at the
+			// PREVIOUS destination while `destination` names the new one, and
+			// inRadius prefers the coordinate over the car's own
+			// milesToArrival: the detector would then measure arrival against
+			// a place the car is no longer going, declaring an arrival the
+			// moment it happens to pass the old one and never at the new.
+			//
+			// Cleared, inRadius falls through to milesToArrival — which on a
+			// leg is the most direct evidence there is (see arrivedAt) — until
+			// a fresh DestLocation lands. The clear is unconditional on a name
+			// change; the `if f.hasDest` below re-arms it in the same frame
+			// when the car did send both.
+			v.hasDest, v.destLat, v.destLng = false, 0, 0
 		}
 		v.destination = next
 		if next == "" {
