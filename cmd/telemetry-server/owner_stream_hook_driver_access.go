@@ -46,12 +46,28 @@ import (
 	"log/slog"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
-	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
-// provisionDriverAccess completes the DRIVER exit of provisionVehicle: the
-// "Vehicle" row already exists, so this records WHAT KIND of car it is and
-// leaves it inert.
+// provisionDriverAccess completes the SHUT-GATE exit of provisionVehicle: the
+// "Vehicle" row already exists, so this records WHY it is inert and leaves it
+// that way.
+//
+// IT RUNS ONLY WHILE THE GATE IS SHUT (MYR-599 review finding D), which is a
+// narrower condition than "Tesla calls this person a driver" and the difference
+// is not cosmetic. `awaiting_owner_ack` means "nothing has ever been pushed at
+// this car". It is a member of store.fleetConfigAbsentOutcomes, so the MYR-592
+// inactivity sweeper skips any car carrying it — correctly, since there is no
+// Tesla-side config to remove and no disconnection to warn anybody about.
+//
+// The old fork seeded it on EVERY driver-branch pass. A driver car that had been
+// acknowledged months ago and had been streaming ever since would, on the next
+// incidental AfterLink, have the label written back over whatever the reconciler
+// had recorded — asserting "never configured" about a car that was configured
+// and billing, and re-arming the sweeper exemption for good. The cost control
+// would have been permanently disabled for exactly the population MYR-599
+// created. An ACKNOWLEDGED driver car now takes the ordinary push-and-seed path,
+// which is the same one an owner's car takes and the correct one for a car whose
+// gate is open.
 //
 // EVERYTHING IT DOES IS BEST-EFFORT, AND THAT IS ONLY SAFE BECAUSE THE GATE IS
 // NOT DONE HERE. The two writes carry very different weights:
@@ -65,40 +81,48 @@ import (
 //     same transaction as the "Vehicle" row, so the car and its gate exist
 //     together or not at all.
 //   - The SCHEDULE SEED, below, is explanation. If it is missing the card is
-//     quieter than it should be and the reconciler fills it in later, which is
-//     a fair thing to log and move past.
+//     quieter than it should be — and, since the MYR-599 review, the inactivity
+//     sweeper still refuses the car, because it anti-joins the driver-access row
+//     itself rather than trusting this label.
 //
 // It is also why the setup-state derivation reads the DRIVER ROW rather than the
 // schedule label: the authoritative fact must not be the one carried by the
 // write that is allowed to be absent.
-func (h *ownerStreamHook) provisionDriverAccess(ctx context.Context, userID string, v telemetry.FleetVehicle) {
-	vin := v.VIN
-
+func (h *ownerStreamHook) provisionDriverAccess(ctx context.Context, userID, vin string) {
 	// THE GATE IS ALREADY WRITTEN by the time this runs. UpsertOwnedVehicle
 	// recorded the driver-access row in the SAME transaction as the "Vehicle"
-	// row, from the access type carried on OwnedVehicleInput — Tesla's
-	// access_type VERBATIM, including the EMPTY string older Fleet responses
-	// have shipped, which FleetVehicle.IsOwner already treats as non-owner (fail
-	// closed) and which is stored as '' rather than invented so the column can
-	// still answer the only question it exists for: what did Tesla actually say?
+	// row, from the access signal carried on OwnedVehicleInput — Tesla's
+	// access_type mapped through the one exported spelling of the fail-closed
+	// rule, with the RAW token stored verbatim beside it so the column can still
+	// answer the only question it exists for: what did Tesla actually say?
 	//
 	// That atomicity is the point. This function is best-effort — everything it
 	// does now is explanation — precisely BECAUSE the one thing that must not be
 	// best-effort already happened, indivisibly, upstream.
-
+	//
 	// Seeded INSTEAD OF a push, which makes this the one schedule label in the
-	// system that describes a push that never happened. It is what lets the
-	// schedule row say why it is sitting there, and what keeps the MYR-592
-	// inactivity sweeper from "disconnecting" a car that was never connected.
+	// system that describes a push that never happened.
 	h.seedSetupSchedule(ctx, userID, vin, store.SetupOutcomeAwaitingOwnerAck)
+}
 
-	// Replaces `owner_vehicle_skipped reason=not_owner`. INFO, redacted VIN, and
-	// deliberately a DIFFERENT event name rather than a new reason on the old
-	// one: this is not a skip. A car was provisioned, and any operator or query
-	// reading the old event as "nothing happened" would now be wrong.
+// logDriverAccess emits the line that replaced `owner_vehicle_skipped
+// reason=not_owner`.
+//
+// INFO, redacted VIN, and deliberately a DIFFERENT event name rather than a new
+// reason on the old one: this is not a skip. A car was provisioned, and any
+// operator or query reading the old event as "nothing happened" would now be
+// wrong.
+//
+// It fires for BOTH gate states, and `acknowledged` is what separates them. An
+// acknowledged driver car goes on to be pushed at exactly like an owner's — but
+// it is still not owned by the person who linked it, and emitting
+// `owner_vehicle_owned` for it would make the one audit trail that can answer
+// "how did this car get here?" say something false.
+func (h *ownerStreamHook) logDriverAccess(userID, vin, accessType string, pending bool) {
 	h.logger.Info("owner_vehicle_driver_access",
 		slog.String("event", "owner_vehicle_driver_access"),
 		slog.String("user_id", userID),
 		slog.String("vin", redactVIN(vin)),
-		slog.String("access_type", v.AccessType))
+		slog.String("access_type", accessType),
+		slog.Bool("acknowledged", !pending))
 }

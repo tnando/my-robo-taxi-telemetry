@@ -46,8 +46,8 @@ func TestUpsertOwnedVehicle_SkipsTombstonedVIN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertOwnedVehicle: %v", err)
 	}
-	if out != store.VehicleSkippedTombstoned {
-		t.Errorf("outcome = %q, want skipped_tombstoned", out)
+	if out.Outcome != store.VehicleSkippedTombstoned {
+		t.Errorf("outcome = %q, want skipped_tombstoned", out.Outcome)
 	}
 	if n := countRows(t, `"Vehicle"`, `"teslaVehicleId"`, tvid); n != 0 {
 		t.Errorf("Vehicle rows = %d, want 0 (tombstoned, must not be inserted)", n)
@@ -72,8 +72,8 @@ func TestUpsertOwnedVehicle_NonTombstonedUpsertsNormally(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertOwnedVehicle: %v", err)
 	}
-	if out != store.VehicleOwned {
-		t.Errorf("outcome = %q, want owned", out)
+	if out.Outcome != store.VehicleOwned {
+		t.Errorf("outcome = %q, want owned", out.Outcome)
 	}
 	if n := countRows(t, `"Vehicle"`, `"teslaVehicleId"`, tvid); n != 1 {
 		t.Errorf("Vehicle rows = %d, want 1 (non-tombstoned upserts)", n)
@@ -102,8 +102,8 @@ func TestClearTombstone_ThenReadd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert (tombstoned): %v", err)
 	}
-	if out != store.VehicleSkippedTombstoned {
-		t.Fatalf("outcome = %q, want skipped_tombstoned", out)
+	if out.Outcome != store.VehicleSkippedTombstoned {
+		t.Fatalf("outcome = %q, want skipped_tombstoned", out.Outcome)
 	}
 
 	// Deliberate re-add: clear the tombstone.
@@ -123,8 +123,8 @@ func TestClearTombstone_ThenReadd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("upsert (after clear): %v", err)
 	}
-	if out != store.VehicleOwned {
-		t.Errorf("outcome = %q, want owned (car returns after clear)", out)
+	if out.Outcome != store.VehicleOwned {
+		t.Errorf("outcome = %q, want owned (car returns after clear)", out.Outcome)
 	}
 	if n := countRows(t, `"Vehicle"`, `"teslaVehicleId"`, tvid); n != 1 {
 		t.Errorf("Vehicle rows = %d, want 1 (car returned)", n)

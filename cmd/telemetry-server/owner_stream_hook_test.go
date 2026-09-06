@@ -23,7 +23,17 @@ func (f *fakeLister) ListVehicles(context.Context, string) ([]telemetry.FleetVeh
 type fakeUpserter struct {
 	inputs  []store.OwnedVehicleInput
 	outcome store.VehicleUpsertOutcome
-	err     error
+	// driverAcknowledged makes the fake report an ALREADY-ACKNOWLEDGED gate for
+	// the cars it files a driver row against. The gate state is otherwise
+	// DERIVED from the recorded input, exactly as the store derives it — a
+	// DRIVER signal writes a row and a fresh row is unacknowledged — so a test
+	// with a mixed fleet gets the right answer per vehicle instead of one
+	// blanket answer for the whole call.
+	driverAcknowledged bool
+	// downgrade makes the fake report AccessDowngradeObserved — the refusal the
+	// store returns when a non-OWNER signal arrives for an established owner row.
+	downgrade bool
+	err       error
 	// seededVINs / seededOutcomes record the link-time setup-state seed
 	// (MYR-491, widened by MYR-517), so a test can assert both that the row is
 	// written on EVERY door and that it carries the honest outcome.
@@ -42,23 +52,30 @@ func (f *fakeUpserter) driverAccessFor(t *testing.T, vin string) (accessType str
 	t.Helper()
 	for _, in := range f.inputs {
 		if in.VIN == vin {
-			return in.TeslaAccessType, in.IsOwnerAccess
+			return in.TeslaAccessType, in.Access == store.AccessSignalOwner
 		}
 	}
 	t.Fatalf("no upsert recorded for vin %s (inputs %+v)", vin, f.inputs)
 	return "", false
 }
 
-func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error) {
+func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertResult, error) {
 	f.inputs = append(f.inputs, in)
 	if f.err != nil {
-		return "", f.err
+		return store.VehicleUpsertResult{}, f.err
 	}
 	out := f.outcome
 	if out == "" {
 		out = store.VehicleOwned
 	}
-	return out, nil
+	present := in.Access == store.AccessSignalDriver
+	return store.VehicleUpsertResult{
+		Outcome:                 out,
+		VehicleID:               "veh_" + in.VIN,
+		DriverAccessPresent:     present,
+		DriverAccessPending:     present && !f.driverAcknowledged,
+		AccessDowngradeObserved: f.downgrade,
+	}, nil
 }
 
 func (f *fakeUpserter) SeedFleetConfigSchedule(_ context.Context, vin, outcome string, _ time.Time) error {
@@ -349,7 +366,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 			t.Errorf("stored access type = %q, want Tesla's own %q", accessType, "DRIVER")
 		}
 		if isOwner {
-			t.Error("IsOwnerAccess = true for a DRIVER listing — the gate would never be written")
+			t.Error("access signal = owner for a DRIVER listing — the gate would never be written")
 		}
 		// And the schedule says WHY the car is sitting there, rather than
 		// leaving a no-claim row that later reads as unexplained silence.
@@ -364,6 +381,40 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 		// a driver row filed against it.
 		if upsert.seededOutcomes[1] == store.SetupOutcomeAwaitingOwnerAck {
 			t.Errorf("owned car seeded %q, want the ordinary push outcome", upsert.seededOutcomes[1])
+		}
+	})
+
+	// MYR-599 REVIEW FINDING D. An ALREADY-ACKNOWLEDGED driver car is not the
+	// same case as an unacknowledged one, and the fork used to treat them as one.
+	//
+	// `awaiting_owner_ack` means "nothing has ever been pushed at this car". It
+	// is a member of store.fleetConfigAbsentOutcomes, so the MYR-592 inactivity
+	// sweeper skips any car carrying it. Re-seeded on every incidental AfterLink,
+	// that exemption became PERMANENT: an acknowledged driver car would stream
+	// and bill forever with the cost control switched off for it, and the label
+	// would be asserting "never configured" about a car that plainly was.
+	t.Run("an ACKNOWLEDGED driver car is pushed and seeded like an owner's", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
+			driverVehicle("1", validVIN, "A car I drive"),
+		}}
+		upsert := &fakeUpserter{driverAcknowledged: true}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(pusher.vins) != 1 || pusher.vins[0] != validVIN {
+			t.Errorf("pushed vins = %v, want the acknowledged driver car — the gate is OPEN, "+
+				"and refusing here would leave a consented car permanently unconfigured",
+				pusher.vins)
+		}
+		if len(upsert.seededOutcomes) != 1 {
+			t.Fatalf("seeded outcomes = %v, want one", upsert.seededOutcomes)
+		}
+		if upsert.seededOutcomes[0] == store.SetupOutcomeAwaitingOwnerAck {
+			t.Error("an acknowledged driver car was seeded awaiting_owner_ack — that label " +
+				"exempts it from the MYR-592 sweeper, and re-seeding it on every link " +
+				"disables the cost control for this whole population forever")
 		}
 	})
 
@@ -382,7 +433,7 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 		accessType, isOwner := upsert.driverAccessFor(t, validVIN)
 		if !isOwner {
-			t.Fatal("IsOwnerAccess = false for an OWNER listing — the stale row would survive")
+			t.Fatal("access signal != owner for an OWNER listing — the stale row would survive")
 		}
 		if accessType != "OWNER" {
 			t.Errorf("access type = %q, want %q", accessType, "OWNER")

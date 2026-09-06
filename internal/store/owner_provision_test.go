@@ -453,8 +453,8 @@ func TestOwnerProvisioner_UpsertOwnedVehicle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("first upsert: %v", err)
 		}
-		if out != store.VehicleOwned {
-			t.Errorf("outcome = %q, want owned", out)
+		if out.Outcome != store.VehicleOwned {
+			t.Errorf("outcome = %q, want owned", out.Outcome)
 		}
 		in.Name = "Renamed" // must not clobber an existing non-empty name
 		if _, err := prov.UpsertOwnedVehicle(ctx, in); err != nil {
@@ -493,8 +493,8 @@ func TestOwnerProvisioner_UpsertOwnedVehicle(t *testing.T) {
 		if err != nil {
 			t.Fatalf("upsert: %v", err)
 		}
-		if out != store.VehicleSkippedCrossUser {
-			t.Errorf("outcome = %q, want skipped_cross_user", out)
+		if out.Outcome != store.VehicleSkippedCrossUser {
+			t.Errorf("outcome = %q, want skipped_cross_user", out.Outcome)
 		}
 		var owner string
 		if err := testPool.QueryRow(ctx,

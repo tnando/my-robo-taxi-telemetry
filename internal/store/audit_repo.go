@@ -122,6 +122,21 @@ const (
 	// rendered text, which is a published document with a stable id; not the
 	// VIN, which is P1; not the owner, whom this platform cannot name.
 	AuditActionOwnerApprovalAcknowledged AuditAction = "vehicle.owner_approval_acknowledged"
+
+	// AuditActionDriverLinkSupersededByOwner records that a car provisioned by
+	// somebody who only DRIVES it was transferred to the account Tesla calls its
+	// OWNER, when that owner linked their own Tesla account (MYR-599).
+	//
+	// IT IS THE ONLY RECORD THE FORMER DRIVER HAS. The car simply leaves their
+	// list — there is no notification, no sheet and no undo — and their shares
+	// on it are revoked in the same transaction, so if they ever ask where it
+	// went this row is the answer. It is filed under THEIR user id for that
+	// reason: the data that changed was theirs.
+	//
+	// Metadata is the arriving owner's id and nothing else (CG-DL-5, P0-only) —
+	// two opaque cuids across the row and its metadata, no VIN (P1), and no list
+	// of the shares that were revoked.
+	AuditActionDriverLinkSupersededByOwner AuditAction = "vehicle.driver_link_superseded_by_owner"
 )
 
 // AuditLog targetType / initiator enum values used by Go-emitted rows
@@ -145,6 +160,11 @@ const (
 	// auditInitiatorSystemPruner marks an action initiated by the background
 	// retention pruning job (data-lifecycle.md §4.2 initiator enum).
 	auditInitiatorSystemPruner = "system_pruner"
+	// auditInitiatorSystemProvisioner marks an action taken by the link-time
+	// provisioning transaction rather than by a person: nobody pressed anything,
+	// a Tesla listing simply said something that changed who a car belongs to
+	// (MYR-599's owner-wins transfer).
+	auditInitiatorSystemProvisioner = "system_provisioner"
 )
 
 // AuditEntry mirrors the AuditLog table one-to-one. Every field maps to a

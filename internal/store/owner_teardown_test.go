@@ -550,8 +550,8 @@ func TestOwnerTeardown_RemoveThenSync_StaysGone(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpsertOwnedVehicle (sync): %v", err)
 	}
-	if out != store.VehicleSkippedTombstoned {
-		t.Errorf("sync outcome = %q, want skipped_tombstoned (car must stay gone)", out)
+	if out.Outcome != store.VehicleSkippedTombstoned {
+		t.Errorf("sync outcome = %q, want skipped_tombstoned (car must stay gone)", out.Outcome)
 	}
 	if n := countRows(t, `"Vehicle"`, `"teslaVehicleId"`, tvid); n != 0 {
 		t.Errorf("removed vehicle rows = %d, want 0 (must not reappear)", n)

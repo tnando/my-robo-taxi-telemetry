@@ -81,10 +81,10 @@ func (p *OwnerProvisioner) RecordDriverAccess(
 	return nil
 }
 
-// queryUpsertDriverAccessByVehicle / queryDeleteDriverAccessByVehicle are the
-// VEHICLE-ID-KEYED pair used INSIDE the provisioning transaction (MYR-599).
+// queryDeleteDriverAccessByVehicle is the VEHICLE-ID-KEYED delete used INSIDE
+// the provisioning transaction (MYR-599) and by the owner-wins transfer.
 //
-// WHY A SECOND PAIR EXISTS ALONGSIDE THE VIN-KEYED ONE ABOVE. The VIN-keyed
+// WHY IT IS KEYED BY ID AND ITS VIN-KEYED SIBLING IS NOT. The VIN-keyed
 // statements resolve the cuid through a SELECT on "Vehicle" because their caller
 // holds only a VIN. The provisioning transaction has just written that row and
 // has its id in hand from the upsert's RETURNING, so it needs no resolution —
@@ -92,16 +92,14 @@ func (p *OwnerProvisioner) RecordDriverAccess(
 // reading a row this transaction has not committed. Keying by id is also what
 // makes the write ATOMIC with the vehicle it gates.
 //
-// No `"userId"` guard is needed on these two, unlike their VIN-keyed siblings:
-// the id came from an upsert whose own WHERE clause already refused to touch a
-// car belonging to anybody else, so there is no window in which the owner could
-// have changed.
-const queryUpsertDriverAccessByVehicle = `
-INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type)
-VALUES ($1, $2, $3)
-ON CONFLICT (vehicle_id) DO UPDATE
-SET tesla_access_type = EXCLUDED.tesla_access_type`
-
+// The matching INSERT lives in owner_vehicle_driver_gate.go as
+// queryGateDriverAccessByVehicle, because it is not a plain upsert: it carries
+// the bound that stops a non-OWNER signal converting an established owner's car
+// into a gated one.
+//
+// No `"userId"` guard is needed here, unlike the VIN-keyed siblings: the id came
+// from an upsert whose own WHERE clause already refused to touch a car belonging
+// to anybody else, so there is no window in which the owner could have changed.
 const queryDeleteDriverAccessByVehicle = `
 DELETE FROM go_vehicle_driver_access WHERE vehicle_id = $1`
 
