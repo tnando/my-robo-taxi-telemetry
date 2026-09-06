@@ -120,6 +120,22 @@ const SetupOutcomeNone = ""
 // silent no-claim row that later reads as an unexplained silence.
 const SetupOutcomeAwaitingOwnerAck = "awaiting_owner_ack"
 
+// SetupOutcomeOwnerAccessRequired is the go_fleet_config_attempts.last_outcome
+// label meaning "Tesla REFUSED to create this car's telemetry config for this
+// authorization" — the `404 <VIN> not_found` answered to a config POST for a
+// VIN the same token can still LIST (MYR-599). Duplicated from
+// internal/telemetry.outcomeOwnerAccessRequired for the same reason its three
+// neighbours above are duplicated.
+//
+// IT BELONGS IN fleetConfigAbsentOutcomes FOR THE SAME REASON push_failed DOES,
+// and the reason is worth stating because the label reads like a permission
+// problem rather than a config-state one: a refused POST installed NOTHING. So
+// there is no config at Tesla to delete and nothing being billed, and the
+// MYR-592 sweeper that treated this car as "configured" would spend a pointless
+// Tesla DELETE and — far worse — push "your car has been disconnected" at
+// somebody whose car was never connected.
+const SetupOutcomeOwnerAccessRequired = "owner_access_required"
+
 // querySeedFleetConfigSchedule records, against the vehicle owning vin, that a
 // link-time provisioning pass happened and what (if anything) it observed.
 //

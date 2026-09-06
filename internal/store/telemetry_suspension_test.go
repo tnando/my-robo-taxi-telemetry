@@ -33,6 +33,7 @@ func cleanSuspensionTables(t *testing.T) {
 		"go_user_activity",
 		"go_vehicle_telemetry_suspensions",
 		"go_fleet_config_attempts",
+		"go_vehicle_driver_access",
 	} {
 		if _, err := testPool.Exec(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatalf("clean %s: %v", table, err)
@@ -233,6 +234,36 @@ func TestTelemetrySuspensionRepo_CandidateArms(t *testing.T) {
 			wantHit: true,
 			reason: "the empty outcome is what the hook seeds on the nil-error arm; " +
 				"exempting it would disable the feature for the healthiest cars in the fleet",
+		},
+		{
+			// MYR-599. NOTE THE SEED: activity and a driver row, and NO
+			// go_fleet_config_attempts row at all. That is the whole point —
+			// the `awaiting_owner_ack` label is best-effort (the link hook logs
+			// and shrugs when the seed write fails), so a driver car with no
+			// schedule row sails past the outcome list and would be warned that
+			// a car which never streamed is about to be disconnected.
+			name: "an unacknowledged driver-access car is not a candidate, even with NO schedule row",
+			seed: func(t *testing.T, vehicleID, ownerID string) {
+				seedActivity(t, ownerID, now.Add(-6*24*time.Hour))
+				seedDriverAccess(t, vehicleID, ownerID, false)
+			},
+			wantHit: false,
+			reason: "nothing was ever pushed at this car, so there is no config to remove " +
+				"and no disconnection to warn anybody about",
+		},
+		{
+			// The other direction, and it matters as much: once the gate is
+			// open the car is configured and billed like any other, so it must
+			// re-enter the sweeper's population. A blanket exclusion of every
+			// driver-access row would have exempted a whole class of cars from
+			// the cost control forever.
+			name: "an ACKNOWLEDGED driver-access car IS a candidate",
+			seed: func(t *testing.T, vehicleID, ownerID string) {
+				seedActivity(t, ownerID, now.Add(-6*24*time.Hour))
+				seedDriverAccess(t, vehicleID, ownerID, true)
+			},
+			wantHit: true,
+			reason:  "the gate is open, so this car streams and bills exactly like an owner's",
 		},
 		{
 			name: "an already-suspended car is not a candidate again",

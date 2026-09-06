@@ -47,6 +47,18 @@ func TestFleetConfigAbsentOutcomesCoverSetupLabels(t *testing.T) {
 			because: "the link-time hook seeds it INSTEAD OF pushing, so there is no config at Tesla to remove",
 		},
 		{
+			// MYR-599, and the row that was MISSING when this list first shipped.
+			// `owner_access_required` is the label a REFUSED push earns, and a
+			// refused push installs nothing — so the sweeper would otherwise
+			// have treated a car Tesla never configured as configured and
+			// billing, warned its owner that it was about to be disconnected,
+			// and then spent a Tesla DELETE for a config that never existed.
+			name:    "owner_access_required is excluded",
+			label:   SetupOutcomeOwnerAccessRequired,
+			wantIn:  true,
+			because: "Tesla refused the config POST, so nothing was installed and nothing is billed",
+		},
+		{
 			name:   "the empty outcome is NOT excluded",
 			label:  SetupOutcomeNone,
 			wantIn: false,
