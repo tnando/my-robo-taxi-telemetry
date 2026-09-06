@@ -94,9 +94,11 @@ const queryVehicleByID = `SELECT ` + vehicleSelectColumns + `,
 	gcs.trim_label, gcs.fsd_version,
 	` + rideShareEnabledExpr + `,
 	` + ownerNamedPredicate + `,
-	` + setupScheduleColumns + `
+	` + setupScheduleColumns + `,
+	` + catalogDriverAccessExpr + `
 FROM "Vehicle"
-LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` + setupScheduleJoin + `
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
+	setupScheduleJoin + driverAccessJoin + `
 WHERE "Vehicle"."id" = $1`
 
 // rideShareEnabledExpr is the single definition of "does this car accept ride
@@ -279,10 +281,11 @@ const queryVehiclesByUserList = `SELECT ` + vehicleListSummaryColumns + `,
 	` + catalogTrimLabelExpr + `,
 	` + catalogOwnerNameExpr + `,
 	` + catalogTelemetrySuspendedExpr + `,
-	` + setupScheduleColumns + `
+	` + setupScheduleColumns + `,
+	` + catalogDriverAccessExpr + `
 FROM "Vehicle"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
-	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + driverAccessJoin + `
 WHERE "userId" = $1
 ORDER BY "name", "vin"`
 

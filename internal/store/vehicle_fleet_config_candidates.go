@@ -81,6 +81,15 @@ type FleetConfigCandidate struct {
 //     is missing is inverted, and the consequence is resurrecting a car its
 //     owner deliberately removed. go_removed_vehicles carries `vin` for exactly
 //     this correlation.
+//   - the go_vehicle_driver_access NOT EXISTS (MYR-599) — CONSENT-WINS, and it
+//     is the strongest gate in this query because it is the only one that
+//     protects somebody who is not our user. A car linked by a DRIVER is
+//     provisioned like any other, but nothing may be pushed at it until that
+//     driver acknowledges the owner approved it, and the reconciler is the one
+//     actor here that would otherwise do so unattended, on a background pass,
+//     for as long as the car kept not streaming. Unlike the tombstone guard
+//     above it needs no OR: `vehicle_id` is this table's primary key and is
+//     never NULL, so the anti-join cannot open on a missing join key.
 //   - the attempt-schedule arm — a car is due when it has never been attempted
 //     or its backoff has elapsed. Ordering by OUR schedule rather than by
 //     "lastUpdated" is what stops unfixable cars permanently occupying the
@@ -130,6 +139,8 @@ WHERE length(v."vin") = 17
         FROM go_removed_vehicles rv
         WHERE rv.user_id = v."userId"
           AND (rv.tesla_vehicle_id = v."teslaVehicleId" OR rv.vin = v."vin")
+      )
+  AND NOT EXISTS (` + unacknowledgedDriverAccessGate + `
       )
 ORDER BY COALESCE(fa.next_attempt_at, TO_TIMESTAMP(0)) ASC, v."lastUpdated" ASC
 LIMIT $3`

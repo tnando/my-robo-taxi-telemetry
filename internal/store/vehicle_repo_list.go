@@ -159,6 +159,16 @@ type VehicleSummary struct {
 	// per row to find out. Zero value (Present false) means "no claim", which
 	// is the safe reading on any hand-built row.
 	SetupSchedule SetupSchedule
+
+	// DriverAccess is the car's go_vehicle_driver_access row (MYR-599), LEFT
+	// JOINed alongside the schedule. RAW STORAGE behind the derived
+	// VehicleSummary.teslaAccessType and the `awaiting_owner_acknowledgment`
+	// setup state. The catalog carries it for the same reason it carries the
+	// schedule: the picker and the Settings list must be able to say "you drive
+	// this car" and "waiting on your acknowledgment" without a per-row snapshot
+	// fetch. Zero value (Present false) reads as owner access, which is the safe
+	// reading on any hand-built row.
+	DriverAccess VehicleDriverAccess
 }
 
 // ListSummariesByUser returns the catalog rows for every vehicle owned
@@ -246,6 +256,7 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		status string
 		gps    summaryGPSScan
 		ss     setupScheduleScan
+		da     driverAccessScan
 		// The ladder's RAW answer (a full display name, or NULL). Reduced to
 		// its first token below rather than scanned straight onto the struct,
 		// so the only value that ever reaches VehicleSummary is the
@@ -276,11 +287,15 @@ func (r *VehicleRepo) scanVehicleSummaryRow(row rowScanner) (VehicleSummary, err
 		&ownerName,
 		&v.TelemetrySuspendedAt,
 	}, ss.dests()...)
+	// MYR-599: selected AFTER the setup block, so appended after it — the scan
+	// order is the SELECT order, not the struct order.
+	dests = append(dests, da.dests()...)
 	if err := row.Scan(dests...); err != nil {
 		return VehicleSummary{}, fmt.Errorf("scan vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
+	v.DriverAccess = da.value()
 	v.Latitude, v.Longitude = gps.resolve(r)
 	v.OwnerFirstName = ownerFirstNameToken(ownerName)
 	return v, nil

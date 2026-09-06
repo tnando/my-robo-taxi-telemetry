@@ -173,7 +173,12 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	// block in the same trailing `extra` list — the same ordering discipline,
 	// one bag per joined table.
 	var ss setupScheduleScan
-	v, err := r.scanVehicleRowExtra(row, append(cs.dests(), ss.dests()...)...)
+	// MYR-599: and a THIRD, appended after the schedule for the same reason —
+	// one bag per joined table, in SELECT order.
+	var da driverAccessScan
+	extra := append(cs.dests(), ss.dests()...)
+	extra = append(extra, da.dests()...)
+	v, err := r.scanVehicleRowExtra(row, extra...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Vehicle{}, ErrVehicleNotFound
 	}
@@ -182,6 +187,7 @@ func (r *VehicleRepo) scanVehicleByID(ctx context.Context, id string) (Vehicle, 
 	}
 	cs.applyTo(&v)
 	v.SetupSchedule = ss.value()
+	v.DriverAccess = da.value()
 	return v, nil
 }
 

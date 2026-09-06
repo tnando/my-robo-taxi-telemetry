@@ -80,10 +80,11 @@ const queryVehiclesSharedWithUser = `SELECT ` + sharedSummaryColumns + `,
 	` + catalogOwnerNameExpr + `,
 	` + catalogTelemetrySuspendedExpr + `,
 	` + setupScheduleColumns + `,
+	` + catalogDriverAccessExpr + `,
 	s.allow_rides
 FROM "Vehicle"` + sharedSummaryJoin + `
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
-	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + driverAccessJoin + `
 WHERE ($2::text[] IS NULL OR "Vehicle"."id" = ANY($2))
 ORDER BY "Vehicle"."name", "Vehicle"."vin"`
 
@@ -161,6 +162,7 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		status string
 		gps    summaryGPSScan
 		ss     setupScheduleScan
+		da     driverAccessScan
 		// Raw ladder answer; reduced to a first name below. Same discipline as
 		// the owner-side scan — the full name never lands on the struct.
 		ownerName *string
@@ -189,14 +191,17 @@ func (r *VehicleRepo) scanSharedVehicleSummaryRow(row rowScanner) (SharedVehicle
 		&ownerName,
 		&v.TelemetrySuspendedAt,
 	}, ss.dests()...)
-	// `allow_rides` is selected AFTER the setup block, so it is appended last —
-	// the scan order is the SELECT order, not the struct order.
+	// MYR-599's driver-access pair sits between the setup block and
+	// `allow_rides` in the SELECT, so it is appended between them here — the
+	// scan order is the SELECT order, not the struct order.
+	dests = append(dests, da.dests()...)
 	dests = append(dests, &v.AllowRides)
 	if err := row.Scan(dests...); err != nil {
 		return SharedVehicleSummary{}, fmt.Errorf("scan shared vehicle summary: %w", err)
 	}
 	v.Status = VehicleStatus(status)
 	v.SetupSchedule = ss.value()
+	v.DriverAccess = da.value()
 	v.Latitude, v.Longitude = gps.resolve(r)
 	v.OwnerFirstName = ownerFirstNameToken(ownerName)
 	return v, nil
