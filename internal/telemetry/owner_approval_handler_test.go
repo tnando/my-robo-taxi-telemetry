@@ -435,94 +435,86 @@ func TestOwnerApprovalHandlerStoreFailurePushesNothing(t *testing.T) {
 // MYR-599 REVIEW FINDING H: §7.29 MUST NOT 500 FOR A REQUEST THAT DURABLY
 // SUCCEEDED.
 //
-// The acknowledgment is committed by the time the post-stamp re-read runs — the
-// row is stamped, the audit row is written, the gate is open. If that re-read
-// fails, a 500 tells the client the request failed when it did not. The client's
-// only sensible response to a 500 is to keep showing the acknowledgment sheet
-// for a car whose consent is already on record, and to retry into a call that,
-// being idempotent, will record nothing and can fail here again.
+// By the time the post-stamp re-read runs the acknowledgment is committed — the
+// row is stamped, the audit row written, the gate open. The old code answered
+// 500 when that re-read failed, which tells the client the request failed when
+// it did not; the client's only sensible response is to keep showing the
+// acknowledgment sheet for a car whose consent is already on record, then retry
+// into a call that, being idempotent, records nothing and can fail here again.
 //
-// The honest answer is a 200 carrying the state that can still be derived: the
-// row in hand with the acknowledgment applied. It must NEVER be `configuring`,
-// because no push ran on this path — the completer is deliberately not invoked
-// once the row is unreadable.
-func TestOwnerApprovalHandlerAnswers200WhenTheRereadFails(t *testing.T) {
-	tests := []struct {
-		name      string
-		row       VehicleSnapshotRow
-		wantState string
-		because   string
-	}{
-		{
-			name: "a car seeded awaiting_owner_ack answers owner_access_required",
-			row: driverRow(func(r *VehicleSnapshotRow) {
-				r.SetupSchedule = VehicleSetupSchedule{
-					Present: true, LastOutcome: outcomeAwaitingOwnerAck,
-				}
-			}),
-			wantState: SetupStateOwnerAccessRequired,
-			because: "the ordinary case — the seed label makes no claim once the gate is open, " +
-				"and Tesla's config POST is owner-only, so a refusal is exactly what the push " +
-				"we could not run would have met",
-		},
-		{
-			name: "a pre-existing awaiting_virtual_key schedule is answered as it stands",
-			row: driverRow(func(r *VehicleSnapshotRow) {
-				r.SetupSchedule = VehicleSetupSchedule{
-					Present:       true,
-					LastOutcome:   outcomeAwaitingKey,
-					LastAttemptAt: setupNow.Add(-time.Hour),
-				}
-			}),
-			wantState: SetupStateAwaitingVirtualKey,
-			because: "the schedule's own evidence survives the failed re-read and is a claim " +
-				"about a push that really did happen earlier",
-		},
-	}
+// The fix does NOT skip the push and answer a plausible state instead — that
+// would be the same sin in the opposite direction, since contracts v0.40.0
+// permits `owner_access_required` only on evidence that INCLUDES actually
+// seeing Tesla's 404. It inherits the re-read's one job locally (apply the
+// acknowledgment, the single fact this request definitely changed) and lets the
+// completer observe and report, exactly as on the ordinary path.
+func TestOwnerApprovalHandlerSurvivesAFailedReread(t *testing.T) {
+	rowWithSeed := driverRow(func(r *VehicleSnapshotRow) {
+		r.SetupSchedule = VehicleSetupSchedule{Present: true, LastOutcome: outcomeAwaitingOwnerAck}
+	})
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			// Succeeds for the authorize read, fails for the post-stamp re-read.
-			reader := &fakeSnapshotReader{
-				rows:     []VehicleSnapshotRow{tc.row},
-				err:      errors.New("db down"),
-				errAfter: 1,
-			}
-			rec := &fakeApprovalRecorder{recorded: true}
-			comp := &fakeCompleter{state: SetupState{State: SetupStateConfiguring}}
+	t.Run("the completer still runs, on a row with the acknowledgment applied", func(t *testing.T) {
+		// Succeeds for the authorize read, fails for the post-stamp re-read.
+		reader := &fakeSnapshotReader{
+			rows:     []VehicleSnapshotRow{rowWithSeed},
+			err:      errors.New("db down"),
+			errAfter: 1,
+		}
+		comp := &fakeCompleter{state: SetupState{State: SetupStateOwnerAccessRequired, Since: "t"}}
 
-			w := httptest.NewRecorder()
-			newApprovalHandler(reader, rec, comp).ServeHTTP(w, approvalRequest("veh-1", validAckBody))
+		w := httptest.NewRecorder()
+		newApprovalHandler(reader, &fakeApprovalRecorder{recorded: true}, comp).
+			ServeHTTP(w, approvalRequest("veh-1", validAckBody))
 
-			if w.Code != http.StatusOK {
-				t.Fatalf("status = %d, want 200 — the acknowledgment COMMITTED; reporting a "+
-					"failure strands the one piece of copy this feature exists for (body %s)",
-					w.Code, w.Body.String())
-			}
-			var body setupCompletionResponse
-			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-				t.Fatalf("decode body: %v", err)
-			}
-			if body.SetupState.State != tc.wantState {
-				t.Errorf("setupState.state = %q, want %q (%s)",
-					body.SetupState.State, tc.wantState, tc.because)
-			}
-			if body.SetupState.State == SetupStateAwaitingOwnerAcknowledgment {
-				t.Error("answered awaiting_owner_acknowledgment to the very call that satisfied " +
-					"it — the row in hand is pre-stamp, and the acknowledgment must be applied " +
-					"to it before deriving anything")
-			}
-			if body.SetupState.State == SetupStateConfiguring {
-				t.Error("answered `configuring` with no fresh row — nothing was pushed on this " +
-					"path, so a progress claim is fabricated")
-			}
-			if got := comp.calls.Load(); got != 0 {
-				t.Errorf("completer calls = %d, want 0 — the push paths gate on a row, and the "+
-					"row is exactly what we just failed to read", got)
-			}
-			if body.VehicleID != "veh-1" {
-				t.Errorf("vehicleId = %q, want veh-1", body.VehicleID)
-			}
-		})
-	}
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — the acknowledgment COMMITTED; reporting a failure "+
+				"strands the one piece of copy this feature exists for (body %s)",
+				w.Code, w.Body.String())
+		}
+		if got := comp.calls.Load(); got != 1 {
+			t.Fatalf("completer calls = %d, want 1 — skipping the push and naming a state "+
+				"instead would fabricate an observation contracts v0.40.0 requires be real", got)
+		}
+		if comp.lastRow().DriverAccess.PendingAcknowledgment() {
+			t.Error("the completer was handed the PRE-STAMP row, whose gate still reads shut — " +
+				"its step 0 would refuse and answer awaiting_owner_acknowledgment to the very " +
+				"call that satisfied it")
+		}
+		var body setupCompletionResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		if body.SetupState.State != SetupStateOwnerAccessRequired {
+			t.Errorf("setupState.state = %q, want the completer's own observed answer %q",
+				body.SetupState.State, SetupStateOwnerAccessRequired)
+		}
+		if body.VehicleID != "veh-1" {
+			t.Errorf("vehicleId = %q, want veh-1", body.VehicleID)
+		}
+	})
+
+	// ...and if the completer cannot observe anything either, the answer is
+	// §7.23's own vocabulary — a 502/503 the client can retry into an
+	// idempotent call — and never a 500 and never a fabricated state.
+	t.Run("a completer failure is reported in §7.23's vocabulary, not as a 500", func(t *testing.T) {
+		reader := &fakeSnapshotReader{
+			rows:     []VehicleSnapshotRow{rowWithSeed},
+			err:      errors.New("db down"),
+			errAfter: 1,
+		}
+		comp := &fakeCompleter{err: ErrSetupPushFailed}
+
+		w := httptest.NewRecorder()
+		newApprovalHandler(reader, &fakeApprovalRecorder{recorded: true}, comp).
+			ServeHTTP(w, approvalRequest("veh-1", validAckBody))
+
+		if w.Code == http.StatusInternalServerError {
+			t.Fatalf("status = 500 for a request whose acknowledgment committed (body %s)",
+				w.Body.String())
+		}
+		if w.Code != http.StatusBadGateway {
+			t.Errorf("status = %d, want 502 — the same answer the ordinary path gives for a "+
+				"push that did not land", w.Code)
+		}
+	})
 }
