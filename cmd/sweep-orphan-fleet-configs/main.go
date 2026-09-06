@@ -83,9 +83,17 @@ func run() int {
 		return exitFatal
 	}
 
+	// MYR-599: annotate each reported VIN with the access type it was linked
+	// under. A post-pass over the finished report rather than a widening of the
+	// sweep's own queries — see access.go for why it lives here, and for why
+	// most lines legitimately read `unknown`. Errors land in the report; the
+	// annotation never fails the run.
+	annotated := annotateDriverAccess(ctx,
+		store.NewVehicleRepo(pool, store.NoopMetrics{}), rep)
+
 	enc := json.NewEncoder(os.Stdout)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(rep); err != nil {
+	if err := enc.Encode(annotated); err != nil {
 		fmt.Fprintf(os.Stderr, "sweep-orphan-fleet-configs: write report: %s\n", err)
 		return exitFatal
 	}
