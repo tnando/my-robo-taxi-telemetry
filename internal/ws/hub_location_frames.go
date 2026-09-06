@@ -21,9 +21,18 @@ import "log/slog"
 // pinned to the ONE moment that reliably locates a person — where they were
 // when they set off. Twice a day, that is a home and a workplace.
 //
-// `drive_ended` and `connectivity` are unaffected and still ride Broadcast:
-// neither carries a coordinate (drive_ended summarises distance, duration and
-// speeds; see driveEndedPayload).
+// `drive_ended` RIDES THIS PATH TOO, and for a related but distinct reason. It
+// carries no coordinate — it summarises distance, duration and the two speeds —
+// but since the narrowing a plain `viewer` gets no drives on any surface (§7.2
+// is owner-and-participant; §7.30.7 is what a trip adds), so those four numbers
+// are a behavioural record of somebody's driving reaching a person who is not
+// entitled to the drive at all. Its redacted frame ZEROES them rather than
+// dropping them, because all four are schema-required; see
+// redactedDriveEnded.
+//
+// `connectivity` is unaffected and still rides Broadcast: it says only that the
+// car's socket came up or went down, which is availability and is exactly what
+// a plain viewer is FOR.
 //
 // WHY TWO PRE-MARSHALED FRAMES RATHER THAN A MASK PASS. These payloads are
 // typed structs, not the `map[string]any` internal/mask projects, and giving
@@ -81,9 +90,10 @@ func (h *Hub) BroadcastByLocationAccess(vehicleID string, located, redacted []by
 
 // noLocationSentinel is the coordinate a redacted frame carries in place of a
 // real one: the documented (0, 0) no-fix sentinel from
-// vehicle-state-schema.md §2.3, the same value mask.ApplyLocationSentinels
-// uses on the vehicle_update surface. Stated here as a named constant so the
-// two surfaces cannot drift onto different "nothing known" values.
+// vehicle-state-schema.md §2.3 — the same value the mask table's own
+// substitution (internal/mask/sentinels.go) writes on the vehicle_update
+// surface. Stated here as a named constant so the two surfaces cannot drift
+// onto different "nothing known" values.
 const noLocationSentinel = 0.0
 
 // redactedStartLocation is the startLocation a viewer's drive_started carries.
@@ -91,4 +101,25 @@ const noLocationSentinel = 0.0
 // reference to a shared value it might later mutate.
 func redactedStartLocation() startLocation {
 	return startLocation{Latitude: noLocationSentinel, Longitude: noLocationSentinel}
+}
+
+// redactedDriveEnded is the drive_ended a role without live-location access
+// receives: the same frame, with the four summary numbers zeroed.
+//
+// ZEROED RATHER THAN DROPPED because `distance`, `durationSeconds`, `avgSpeed`
+// and `maxSpeed` are all in DriveEndedPayload's `required` list under
+// `additionalProperties: false` — removing a key makes the whole document
+// undecodable on a strictly-typed client, taking `vehicleId` and `driveId` down
+// with the numbers that were the only thing at issue. The same collision the
+// vehicle_state sentinels resolve, resolved the same way.
+//
+// The IDs and the timestamp survive: the event is that a drive ENDED, which a
+// viewer already infers from the car's status, and a frame that could not name
+// which drive would be strictly less useful without being any more private.
+func redactedDriveEnded(full driveEndedPayload) driveEndedPayload {
+	full.Distance = 0
+	full.DurationSeconds = 0
+	full.AvgSpeed = 0
+	full.MaxSpeed = 0
+	return full
 }

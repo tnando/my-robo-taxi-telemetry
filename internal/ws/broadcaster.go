@@ -216,7 +216,7 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 		b.flushGroup(groupNavigation, payload.VIN, navFields)
 	}
 
-	msg, err := marshalWSMessage(msgTypeDriveEnded, driveEndedPayload{
+	ended := driveEndedPayload{
 		VehicleID:       vehicleID,
 		DriveID:         payload.DriveID,
 		Distance:        payload.Stats.Distance,
@@ -224,7 +224,8 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 		AvgSpeed:        payload.Stats.AvgSpeed,
 		MaxSpeed:        payload.Stats.MaxSpeed,
 		Timestamp:       payload.EndedAt.Format(time.RFC3339),
-	})
+	}
+	msg, err := marshalWSMessage(msgTypeDriveEnded, ended)
 	if err != nil {
 		b.logger.Error("broadcaster.handleDriveEnded: marshal failed",
 			slog.String("event_id", event.ID),
@@ -233,7 +234,41 @@ func (b *Broadcaster) handleDriveEnded(ctx context.Context, event events.Event) 
 		return
 	}
 
-	b.hub.Broadcast(vehicleID, msg)
+	// MYR-602 — THE SUMMARY IS DRIVE DATA, and this frame went out role-blind
+	// alongside drive_started. Since the narrowing, a plain `viewer` gets no
+	// drives at all: §7.2's list is owner-and-participant, and §7.30.7 is what
+	// a trip ADDS. Yet every viewer subscribed to the car was still told, twice
+	// a day, exactly how far it went, for how long, and how fast it was driven
+	// — a behavioural record of somebody's driving assembled from a stream they
+	// were not supposed to be reading.
+	//
+	// THE EVENT ITSELF STAYS, for drive_started's reason: a viewer already sees
+	// the car's `status` flip out of driving, so suppressing the frame would
+	// only make the two surfaces disagree about whether anything happened. Only
+	// the four numbers are withheld — and they are withheld by ZEROING rather
+	// than by dropping, because all four are in DriveEndedPayload's `required`
+	// list under `additionalProperties: false`. Removing them does not narrow
+	// the frame; it makes the document undecodable for every installed build,
+	// which is the same collision the vehicle_state sentinels resolve the same
+	// way (internal/mask/sentinels.go).
+	//
+	// A CONSUMER CANNOT TELL "withheld" FROM "a drive of no distance" BY
+	// READING THE VALUE — they are the same bytes by design — and MUST branch
+	// on the role it holds, exactly as rest-api.md §5 already requires of it
+	// for the location sentinels.
+	redacted, err := marshalWSMessage(msgTypeDriveEnded, redactedDriveEnded(ended))
+	if err != nil {
+		// The full frame is fine; only the redaction failed. Sending the full
+		// one to everybody would be the leak this exists to close, so the
+		// viewers get nothing this time and the owner still gets their frame —
+		// fail closed, and say so. Same posture as drive_started's.
+		b.logger.Error("broadcaster.handleDriveEnded: redacted marshal failed; viewers withheld",
+			slog.String("event_id", event.ID),
+			slog.Any("error", err),
+		)
+	}
+
+	b.hub.BroadcastByLocationAccess(vehicleID, msg, redacted)
 }
 
 // handleConnectivity transforms a ConnectivityEvent into a connectivity

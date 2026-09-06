@@ -33,6 +33,16 @@ func TestParseRole(t *testing.T) {
 	}{
 		{name: "owner", input: "owner", want: RoleOwner},
 		{name: "viewer", input: "viewer", want: RoleViewer},
+		// THE TWO MYR-602 ROLES, spelled out here as well as reached through
+		// TestAllRolesParse. That test proves the two ENUMERATIONS agree with
+		// each other; these cases pin the exact wire strings, which is a
+		// different fact — a rename that moved both enumerations together
+		// would satisfy the first and break every client that has already
+		// shipped reading `role`.
+		{name: "ride_member", input: "ride_member", want: RoleRideMember},
+		{name: "trip_participant", input: "trip_participant", want: RoleTripParticipant},
+		{name: "rideMember camelCase rejected", input: "rideMember", wantErr: ErrUnknownRole},
+		{name: "tripParticipant camelCase rejected", input: "tripParticipant", wantErr: ErrUnknownRole},
 		{name: "empty rejected", input: "", wantErr: ErrUnknownRole},
 		{name: "uppercase rejected", input: "Owner", wantErr: ErrUnknownRole},
 		{name: "limited_viewer (FR-5.5 future) rejected in v1", input: "limited_viewer", wantErr: ErrUnknownRole},

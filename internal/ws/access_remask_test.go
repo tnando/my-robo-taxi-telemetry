@@ -278,3 +278,181 @@ func readVehicleUpdateFields(t *testing.T, conn *websocket.Conn) map[string]any 
 	}
 	return pl.Fields
 }
+
+// TestAccessRevalidator_RemaskResendsTheSnapshot is finding 10: a re-mask that
+// changes only future frames is HALF a change, and it is half in both
+// directions.
+//
+// A WebSocket client holds a MERGED state assembled from every frame it has
+// received. Narrowed, its last REAL coordinate is never overwritten, because
+// from then on a location-only delta projects to nothing but sentinels and is
+// suppressed by IsSubstantiveExcludingSentinels — correctly, since its arrival
+// alone would be a "this car is streaming" beacon. Promoted, the SENTINEL zeros
+// its connect-time snapshot delivered are never corrected until the car happens
+// to move, which a parked car never does.
+//
+// Both are answered by re-delivering the snapshot through the NEW mask.
+func TestAccessRevalidator_RemaskResendsTheSnapshot(t *testing.T) {
+	const vehicleID = "veh-1"
+	base := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name    string
+		startAt time.Time
+		moveTo  time.Time
+		// wantLat is the latitude the re-delivered snapshot must carry.
+		wantLat float64
+		why     string
+	}{
+		{
+			name:    "narrowed: the stale real coordinate is overwritten with the sentinel",
+			startAt: base.Add(time.Hour),
+			moveTo:  base.Add(25 * time.Hour),
+			wantLat: 0,
+			why: "the client would otherwise show the car frozen at its last real " +
+				"position for the whole life of the connection",
+		},
+		{
+			name:    "promoted: the sentinel zeros are overwritten with the real coordinate",
+			startAt: base.Add(-time.Hour),
+			moveTo:  base.Add(time.Hour),
+			wantLat: 37.7749,
+			why: "a parked car sends no location group, so the participant's map would " +
+				"show Null Island for as long as it stayed still",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := &fakeSnapshotReader{snapshots: gpsOnlySnapshot()}
+			hub := NewHub(newSilentLogger(), NoopHubMetrics{}, WithVehicleSnapshotReader(reader))
+			t.Cleanup(hub.Stop)
+
+			authn := &clockedAuth{
+				userID:      "participant",
+				vehicleIDs:  []string{vehicleID},
+				now:         tt.startAt,
+				windowStart: base,
+				windowEnd:   base.Add(24 * time.Hour),
+			}
+			srv := newTestServer(t, hub, authn)
+			t.Cleanup(srv.Close)
+
+			conn := dialAndAuth(t, srv.URL, "tok")
+			defer conn.Close(websocket.StatusNormalClosure, "test done")
+			waitForClients(t, hub, 1)
+
+			// The connect-time snapshot's own GPS frame, read rather than
+			// drained: a read that times out on this transport CLOSES the
+			// socket, so the test consumes exactly what it expects.
+			first, ok := readUntilField(t, conn, "latitude")
+			if !ok {
+				t.Fatal("the handshake delivered no snapshot carrying `latitude`")
+			}
+			if first == tt.wantLat {
+				t.Fatalf("the handshake already delivered latitude %v, so this case "+
+					"cannot show that the RE-MASK delivered anything", first)
+			}
+
+			authn.advanceTo(tt.moveTo)
+			NewAccessRevalidator(hub, authn, 0, newSilentLogger()).SweepOnce(context.Background())
+
+			lat, ok := readUntilField(t, conn, "latitude")
+			if !ok {
+				t.Fatalf("the re-mask delivered no snapshot carrying `latitude`; %s", tt.why)
+			}
+			if lat != tt.wantLat {
+				t.Errorf("latitude after the re-mask = %v, want %v; %s", lat, tt.wantLat, tt.why)
+			}
+		})
+	}
+}
+
+// readUntilField reads frames until one carries the named field, or the socket
+// goes quiet.
+func readUntilField(t *testing.T, conn *websocket.Conn, field string) (float64, bool) {
+	t.Helper()
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_, raw, err := conn.Read(ctx)
+		cancel()
+		if err != nil {
+			return 0, false
+		}
+		var msg wsMessage
+		if err := json.Unmarshal(raw, &msg); err != nil {
+			t.Fatalf("unmarshal frame: %v", err)
+		}
+		if msg.Type != msgTypeVehicleUpdate {
+			continue
+		}
+		var pl vehicleUpdatePayload
+		if err := json.Unmarshal(msg.Payload, &pl); err != nil {
+			t.Fatalf("unmarshal payload: %v", err)
+		}
+		v, present := pl.Fields[field]
+		if !present {
+			continue
+		}
+		f, ok := v.(float64)
+		if !ok {
+			t.Fatalf("%s = %v (%T), want a number", field, v, v)
+		}
+		return f, true
+	}
+}
+
+// TestBroadcastMasked_ViewerGetsNothingFromALocationOnlyFrame is the shape the
+// re-mask re-delivery exists BECAUSE of, asserted directly.
+//
+// The production broadcast path injects `lastUpdated` into every non-nav frame
+// before masking (nav_broadcast.go), so a GPS-group flush reaches the mask as
+// {latitude, longitude, heading, lastUpdated} — and for a plain viewer that
+// projects to three sentinels plus an envelope key, which is not empty. Only
+// IsSubstantiveExcludingSentinels suppresses it, and it must: the values say
+// nothing, but the frame's ARRIVAL, once a second, says the car is streaming
+// right now — the MYR-435 timing leak rebuilt out of zeros.
+//
+// The consequence, and the reason the sweep re-delivers a snapshot: a client
+// narrowed from trip_participant to viewer will never again be sent a frame
+// that could correct the real coordinate it is already holding.
+func TestBroadcastMasked_ViewerGetsNothingFromALocationOnlyFrame(t *testing.T) {
+	hub := NewHub(newSilentLogger(), NoopHubMetrics{})
+	t.Cleanup(hub.Stop)
+
+	viewer := testClient(hub, "cviewer")
+	viewer.vehicleIDs = []string{"veh-1"}
+	viewer.subscribed = map[string]struct{}{"veh-1": {}}
+	viewer.setRoles(map[string]auth.Role{"veh-1": auth.RoleViewer})
+
+	participant := testClient(hub, "cparticipant")
+	participant.vehicleIDs = []string{"veh-1"}
+	participant.subscribed = map[string]struct{}{"veh-1": {}}
+	participant.setRoles(map[string]auth.Role{"veh-1": auth.RoleTripParticipant})
+
+	hub.BroadcastMasked("veh-1", mask.ResourceVehicleState,
+		time.Now().UTC().Format(time.RFC3339),
+		// EXACTLY the production shape: the GPS atomic group, plus the
+		// freshness key the broadcast path adds to every non-nav frame.
+		map[string]any{
+			"latitude":    37.7749,
+			"longitude":   -122.4194,
+			"heading":     float64(90),
+			"lastUpdated": "2026-09-06T12:00:00Z",
+		},
+	)
+
+	assertNoFrame(t, viewer)
+
+	got := drainOne(t, participant)
+	if got.Type != msgTypeVehicleUpdate {
+		t.Fatalf("participant frame type = %q, want %q", got.Type, msgTypeVehicleUpdate)
+	}
+	var pl vehicleUpdatePayload
+	if err := json.Unmarshal(got.Payload, &pl); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	if pl.Fields["latitude"] != 37.7749 {
+		t.Errorf("a trip participant inside the window must receive the real coordinate: %v", pl.Fields)
+	}
+}

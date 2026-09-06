@@ -72,7 +72,13 @@ package auth
 // mutation for the revocation nudge to hang off and the 60-second
 // AccessRevalidator sweep is the enforcement — see internal/ws/
 // access_revalidator.go, which MYR-602 also taught to re-mask rather than only
-// to kick.
+// to kick. That re-mask does three things, and all three are load-bearing for
+// this leg: it re-resolves the role under the CLIENT'S OWN LOCK (so a narrowing
+// publish cannot be overwritten by a concurrent pass holding a pre-narrowing
+// answer), it memoizes one resolution per (user, vehicle) per pass (so every
+// tab of one person is judged against the same answer), and it re-delivers the
+// vehicle's SNAPSHOT through the new mask (so the change reaches the state the
+// client is already holding, not only the frames it has yet to receive).
 //
 // THREE PREDICATES, EACH LOAD-BEARING:
 //

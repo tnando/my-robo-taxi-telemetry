@@ -145,3 +145,88 @@ func TestBroadcastByLocationAccess_NilRedactedWithholds(t *testing.T) {
 			msg.Type, msgTypeDriveEnded)
 	}
 }
+
+// TestDriveEndedSummaryIsRoleSplit is finding 6.
+//
+// `drive_ended` carries no coordinate, so it was left on the role-blind path —
+// but since MYR-602 narrowed `viewer`, a plain share-holder gets no drives on
+// ANY surface (§7.2's list is owner-and-participant; §7.30.7 is what a trip
+// adds). Every viewer subscribed to the car was nonetheless told, twice a day,
+// exactly how far it went, for how long, and how fast it was driven: a
+// behavioural record of somebody's driving assembled off a stream they are not
+// entitled to read.
+//
+// The four numbers are ZEROED rather than dropped, because all four are in
+// DriveEndedPayload's `required` list under `additionalProperties: false` —
+// dropping a key makes the document undecodable for every installed build. The
+// same collision the vehicle_state sentinels resolve, resolved the same way.
+func TestDriveEndedSummaryIsRoleSplit(t *testing.T) {
+	const vehicleID = "veh-1"
+
+	full := driveEndedPayload{
+		VehicleID:       vehicleID,
+		DriveID:         "cdrive_1",
+		Distance:        12.4,
+		DurationSeconds: 1830,
+		AvgSpeed:        24.4,
+		MaxSpeed:        58,
+		Timestamp:       "2026-09-06T12:00:00Z",
+	}
+	located, err := marshalWSMessage(msgTypeDriveEnded, full)
+	if err != nil {
+		t.Fatalf("marshal located: %v", err)
+	}
+	redacted, err := marshalWSMessage(msgTypeDriveEnded, redactedDriveEnded(full))
+	if err != nil {
+		t.Fatalf("marshal redacted: %v", err)
+	}
+
+	tests := []struct {
+		name         string
+		role         auth.Role
+		wantDistance float64
+		wantMaxSpeed float64
+	}{
+		{"owner reads the summary", auth.RoleOwner, 12.4, 58},
+		{"ride member reads the summary", auth.RoleRideMember, 12.4, 58},
+		{"trip participant reads the summary", auth.RoleTripParticipant, 12.4, 58},
+		{"plain viewer reads zeroes", auth.RoleViewer, 0, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hub := NewHub(newSilentLogger(), NoopHubMetrics{})
+			t.Cleanup(hub.Stop)
+
+			client := testClient(hub, "cuser")
+			client.vehicleIDs = []string{vehicleID}
+			client.subscribed = map[string]struct{}{vehicleID: {}}
+			client.setRoles(map[string]auth.Role{vehicleID: tt.role})
+
+			hub.BroadcastByLocationAccess(vehicleID, located, redacted)
+
+			got := drainOne(t, client)
+			if got.Type != msgTypeDriveEnded {
+				t.Fatalf("frame type = %q, want %q", got.Type, msgTypeDriveEnded)
+			}
+			var pl driveEndedPayload
+			if err := json.Unmarshal(got.Payload, &pl); err != nil {
+				t.Fatalf("unmarshal payload: %v", err)
+			}
+			if pl.Distance != tt.wantDistance || pl.MaxSpeed != tt.wantMaxSpeed {
+				t.Errorf("distance=%v maxSpeed=%v, want %v/%v",
+					pl.Distance, pl.MaxSpeed, tt.wantDistance, tt.wantMaxSpeed)
+			}
+			// THE EVENT ITSELF SURVIVES for every role. A viewer already sees
+			// the car's `status` leave driving, so suppressing the frame would
+			// only make the two surfaces disagree about whether anything
+			// happened — and the ids are what make it about a drive at all.
+			if pl.DriveID != "cdrive_1" || pl.VehicleID != vehicleID {
+				t.Errorf("ids were redacted too: %+v", pl)
+			}
+			if pl.Timestamp != full.Timestamp {
+				t.Errorf("timestamp = %q, want it preserved", pl.Timestamp)
+			}
+		})
+	}
+}

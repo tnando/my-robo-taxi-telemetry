@@ -62,6 +62,22 @@ type Client struct {
 	// for a role table would mean a caller masked as two different tiers on
 	// two vehicles in the same frame.
 	roles atomic.Pointer[roleTable]
+	// rolesMu serialises READ-MODIFY-WRITE of the table above. The atomic
+	// pointer makes a single publish tear-free; it does nothing at all about
+	// two writers that each read the old table, each compute a new one from
+	// it, and each publish — the second silently discarding the first.
+	//
+	// That is not hypothetical here. The AccessRevalidator's SweepOnce is
+	// reachable from three places at once (its own 60-second ticker, and the
+	// trips service's nudge on every window edge and every participant added),
+	// and its re-mask is exactly such a read-modify-write. Two overlapping
+	// passes could therefore have a NARROWING publish overwritten by a
+	// concurrent pass holding a pre-narrowing resolution — leaving a
+	// participant whose window closed with live location until something else
+	// happened to re-mask them. Held across the resolve as well as the publish,
+	// so the losing pass re-reads the database after the winner's write rather
+	// than replaying a decision made before it.
+	rolesMu sync.Mutex
 	// defaultRole is the fallback role consulted ONLY when allVehicles=true
 	// and the per-vehicle roles table has no entry for the requested
 	// vehicleID. Set by the handshake to auth.RoleOwner for the dev-mode
@@ -148,6 +164,25 @@ func (c *Client) setRoles(m map[string]auth.Role) {
 		table[vid] = role
 	}
 	c.roles.Store(&table)
+}
+
+// withRoles runs fn under the per-client role lock, handing it the currently
+// published table and publishing whatever fn returns.
+//
+// The ONE supported way to change a published table. fn MUST NOT mutate the
+// table it is given (see roleTable) and MUST NOT block indefinitely — it holds
+// a lock the next re-mask of this session waits on. Returning nil publishes
+// nothing, which is how "no change" is expressed without a second return value.
+func (c *Client) withRoles(fn func(roleTable) map[string]auth.Role) bool {
+	c.rolesMu.Lock()
+	defer c.rolesMu.Unlock()
+
+	next := fn(c.rolesSnapshot())
+	if next == nil {
+		return false
+	}
+	c.setRoles(next)
+	return true
 }
 
 // rolesSnapshot returns the currently published table. Never nil.
