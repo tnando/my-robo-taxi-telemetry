@@ -137,15 +137,12 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		// not carried here — the gates need one bit and the snapshot emits neither.
 		OwnerNamed: v.OwnerNamed,
 
-		// MYR-491 fleet-config setup schedule — raw, from the second side-table
-		// join on this read. Mapped through the same helper the two catalog
-		// adapters use so all three surfaces feed the derivation identically.
+		// The two side-table joins on this read, both raw and both mapped
+		// through the same helpers the three catalog adapters use, so every
+		// surface feeds the derivations identically (MYR-491, MYR-599). The
+		// driver-access row is also what every config-push gate consults, so
+		// dropping it here would not mis-render a row — it would OPEN the gate.
 		SetupSchedule: setupScheduleRow(v.SetupSchedule),
-
-		// MYR-599 driver-access row — raw, from the third side-table join on
-		// this read. Mapped through the same helper the three catalog adapters
-		// use. This is the field every config-push gate reads, so a drop here
-		// would not merely mis-render a row: it would open the gate.
-		DriverAccess: driverAccessRow(v.DriverAccess),
+		DriverAccess:  driverAccessRow(v.DriverAccess),
 	}
 }

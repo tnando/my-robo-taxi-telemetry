@@ -91,6 +91,7 @@ const (
 	setupOutcomeForced       = outcomeForcedRepush
 	setupOutcomeForcedFailed = outcomeForcedRepushFail
 	setupOutcomeOwnerAccess  = outcomeOwnerAccessRequired
+	setupOutcomeOwnerAck     = outcomeAwaitingOwnerAck
 )
 
 // setupQuietHorizon is how stale a vehicle row must be before the derivation
@@ -225,6 +226,22 @@ func deriveSetupState(
 			return setupStateAt(SetupStateConfiguring, s.SignedCommandAt, now)
 		}
 		return setupStateAt(SetupStateAwaitingVirtualKey, s.LastAttemptAt, now)
+
+	case setupOutcomeOwnerAck:
+		// MYR-599. EXPLICITLY NO CLAIM, and written as its own arm rather than
+		// left to the default for the same reason the `""` seed is: silence
+		// that was reasoned about should not be indistinguishable from silence
+		// nobody considered.
+		//
+		// The label means "this car was linked by a driver and nothing was
+		// pushed at it". The WIRE answer for that condition is
+		// `awaiting_owner_acknowledgment` — and it has already been returned,
+		// far above, from the DRIVER ROW, which is the authoritative source and
+		// the thing §7.29 clears. Reaching here means the row is gone or
+		// acknowledged while a stale schedule label survives, and in that case
+		// the schedule is simply out of date: claiming anything from it would
+		// contradict the row that outranks it.
+		return nil
 
 	case setupOutcomeOwnerAccess:
 		// MYR-599. Tesla refused to configure this VIN for this account

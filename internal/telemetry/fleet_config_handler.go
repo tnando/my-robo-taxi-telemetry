@@ -30,8 +30,8 @@ type FleetConfigHandler struct {
 	// configuration rather than a supported production one.
 	driverAccess DriverAccessGate
 	fleet        *FleetAPIClient
-	endpoint  EndpointConfig
-	logger    *slog.Logger
+	endpoint     EndpointConfig
+	logger       *slog.Logger
 }
 
 // NewFleetConfigHandler creates a handler that pushes fleet telemetry config
