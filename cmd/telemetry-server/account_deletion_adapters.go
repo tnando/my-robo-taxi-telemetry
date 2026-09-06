@@ -140,6 +140,15 @@ func (a *accountDataDeleterAdapter) DeleteRemovedVehicleTombstones(ctx context.C
 	return a.deleter.DeleteRemovedVehicleTombstones(ctx, userID)
 }
 
+// DeleteVehicleDriverAccess drops the account's driver-access rows (MYR-599,
+// §3.1 step 8f) — the standing "this car is driver-linked" claim and the open
+// push gate that goes with it. Ordered after the per-vehicle teardown, which
+// deletes one per car in its own transaction. The acknowledgment EVIDENCE lives
+// on in the AuditLog and is untouched here.
+func (a *accountDataDeleterAdapter) DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteVehicleDriverAccess(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -171,6 +180,7 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		UserActivityRowsDeleted:         counts.UserActivityRowsDeleted,
 		TeslaTokenKeepaliveRowsDeleted:  counts.TeslaTokenKeepaliveRowsDeleted,
 		RemovedVehicleTombstonesDeleted: counts.RemovedVehicleTombstonesDeleted,
+		VehicleDriverAccessRowsDeleted:  counts.VehicleDriverAccessRowsDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

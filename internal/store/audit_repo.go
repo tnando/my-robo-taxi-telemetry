@@ -104,6 +104,24 @@ const (
 	// AuditActionDrivesPruned records a batch of drives deleted by the
 	// NFR-3.27 retention pruning job.
 	AuditActionDrivesPruned AuditAction = "drives_pruned"
+
+	// AuditActionOwnerApprovalAcknowledged records that the person who linked a
+	// car they only DRIVE on Tesla's side stated that the car's owner approved
+	// adding it (MYR-599, rest-api.md §7.24).
+	//
+	// THIS ROW IS THE POINT OF THE FEATURE, not bookkeeping around it. The
+	// platform cannot verify the owner's approval with Tesla — no API exposes
+	// it — so what it holds instead is an attributable, append-only record that
+	// a named account, at a named instant, was shown a named version of the
+	// text and agreed. It is what would be produced if an owner ever objected,
+	// and it is deliberately the ONE part of this feature that outlives the
+	// account: the standing go_vehicle_driver_access row goes with a deletion
+	// (step 8f), the audit row does not (data-lifecycle.md §3).
+	//
+	// Metadata is the copy VERSION and nothing else (CG-DL-5, P0-only). Not the
+	// rendered text, which is a published document with a stable id; not the
+	// VIN, which is P1; not the owner, whom this platform cannot name.
+	AuditActionOwnerApprovalAcknowledged AuditAction = "vehicle.owner_approval_acknowledged"
 )
 
 // AuditLog targetType / initiator enum values used by Go-emitted rows

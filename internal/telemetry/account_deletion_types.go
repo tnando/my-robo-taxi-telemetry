@@ -100,6 +100,12 @@ type AccountDataDeleter interface {
 	// position-constrained member of the 8-family: the per-vehicle teardown
 	// writes a tombstone per car, so this must run after it.
 	DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error)
+	// DeleteVehicleDriverAccess drops the account's driver-access rows
+	// (MYR-599, data-lifecycle.md §3.1 step 8f). The SECOND
+	// position-constrained member of the 8-family, for the same reason as 8e:
+	// the per-vehicle teardown deletes these rows with the car, so this must
+	// run after it.
+	DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -156,6 +162,10 @@ type AccountDeletionCounts struct {
 	// removed (MYR-596) — one per car this person ever removed, 0 for the
 	// large majority who never removed one.
 	RemovedVehicleTombstonesDeleted int
+	// VehicleDriverAccessRowsDeleted counts the driver-access rows removed
+	// (MYR-599) — one per car this person linked but did not own, 0 for the
+	// large majority who only ever linked their own.
+	VehicleDriverAccessRowsDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.

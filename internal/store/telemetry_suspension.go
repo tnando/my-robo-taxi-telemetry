@@ -68,7 +68,14 @@ import (
 // carrying it is configured and billing. Listing the empty label here would
 // exempt exactly the healthiest cars in the fleet and quietly disable the
 // feature for most of it.
-const fleetConfigAbsentOutcomes = `('awaiting_virtual_key', 'push_failed', 'token_failed', 'read_failed', 'skipped_other')`
+//
+// `awaiting_owner_ack` (MYR-599) joined the list for the plainest reason of
+// all: the link-time hook seeds it INSTEAD OF pushing, so a car carrying it has
+// never had a config created and there is nothing at Tesla to delete. Omitting
+// it would cost a pointless Tesla DELETE and — far worse — a "your car has been
+// disconnected" push to a driver whose car was never connected in the first
+// place, about a state they cannot fix by reconnecting.
+const fleetConfigAbsentOutcomes = `('awaiting_virtual_key', 'push_failed', 'token_failed', 'read_failed', 'skipped_other', 'awaiting_owner_ack')`
 
 // InactiveOwnerVehicle is one candidate row: a configured, unsuspended vehicle
 // whose owner has not authenticated since the warning threshold.

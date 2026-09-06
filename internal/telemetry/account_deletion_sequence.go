@@ -463,6 +463,26 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 	}
 	counts.RemovedVehicleTombstonesDeleted = tombstones
 
+	// (8f) The driver-access rows (MYR-599). The SECOND position-constrained
+	// member of the family, and constrained by the same mechanism as 8e: the
+	// per-vehicle teardown deletes a car's driver-access row in the transaction
+	// that deletes the car, so anything this finds is what the teardown could
+	// not reach — a row whose "Vehicle" was already gone when the sequence
+	// started, or one for a car step 3 skipped. Placed after 8e so the two
+	// constrained steps sit together and neither can drift above step 3.
+	//
+	// Why they go at all: the row is a standing per-vehicle claim — "this car
+	// is driver-linked" plus, once acknowledged, an OPEN CONFIG-PUSH GATE. Both
+	// are meaningless without the account and dangerous if a vehicle cuid were
+	// ever reused. The ACKNOWLEDGMENT ITSELF survives as the
+	// `vehicle.owner_approval_acknowledged` AuditLog row, which is the durable
+	// record and deliberately outlives the account (§3). P0 hygiene like 8d/8e.
+	driverAccess, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteVehicleDriverAccess)
+	if err != nil {
+		return &accountDeletionError{step: "delete_vehicle_driver_access", cause: err}
+	}
+	counts.VehicleDriverAccessRowsDeleted = driverAccess
+
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
 	// because it is what authenticates a re-run if step 10 fails.
