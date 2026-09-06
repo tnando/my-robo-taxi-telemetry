@@ -87,6 +87,17 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.autoArrivalEnabled = autoArrival
 
+	// TRIPS_ENABLED is the MYR-602 kill-switch for the whole live trips half:
+	// the window sweeper and the leg detector. It is loaded here beside the
+	// other two detector switches because it gates the same KIND of thing —
+	// machinery that acts on a car's telemetry with nobody asking — and an
+	// operator reading this file should see all three together.
+	trips, err := parseKillSwitchEnv("TRIPS_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.tripsEnabled = trips
+
 	// ARRIVAL_FLASH_ENABLED is the MYR-542 arrival-greeting kill-switch: three
 	// headlight flashes when the car is observed at a waypoint. It sits after
 	// AUTO_ARRIVAL_ENABLED because it is strictly downstream of it — the flash

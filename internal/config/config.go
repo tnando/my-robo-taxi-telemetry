@@ -40,6 +40,8 @@ type Config struct {
 	ridePrunerEnabled bool
 	// autoArrivalEnabled is the MYR-538 auto-arrival kill-switch.
 	autoArrivalEnabled bool
+	// tripsEnabled is the MYR-602 trips kill-switch.
+	tripsEnabled bool
 	// arrivalFlashEnabled is the MYR-542 arrival light-flash kill-switch.
 	arrivalFlashEnabled bool
 	// telemetryInactivitySuspensionEnabled is the MYR-592 owner-inactivity
@@ -361,6 +363,27 @@ func (c *Config) RidePrunerEnabled() bool { return c.ridePrunerEnabled }
 // needs a way to stop it that does not wait for a deploy. Defaults to true; set
 // AUTO_ARRIVAL_ENABLED=false to disable.
 func (c *Config) AutoArrivalEnabled() bool { return c.autoArrivalEnabled }
+
+// TripsEnabled is the MYR-602 trips kill-switch. When false the trip sweeper
+// and the leg detector are not constructed at all — no ticker, no telemetry
+// subscription, no candidate reads — and the trip endpoints answer 503.
+//
+// WHAT TURNING IT OFF DOES AND DOES NOT DO. It stops the platform ACTING on
+// trips: no window opens or closes, no leg begins, no card is raised. It does
+// NOT revoke access that is already resolved, because access is derived from
+// the trip rows by a query this switch does not reach — a participant inside an
+// open window keeps seeing the car until the window's own end, which is the
+// safe direction for a switch whose purpose is to stop the machinery rather
+// than to punish the people using it.
+//
+// It exists because trips are the second feature in this service that pushes a
+// phone on a TIMER rather than in answer to a tap, and the first that starts a
+// Live Activity nobody asked for at that instant. If the leg detector ever
+// begins firing wrongly in the field — a car whose destination flaps, a
+// telemetry regression — the damage is a lock screen full of cards on somebody
+// else's phone, and the operator needs a way to stop it that does not wait for
+// a deploy. Defaults to true; set TRIPS_ENABLED=false to disable.
+func (c *Config) TripsEnabled() bool { return c.tripsEnabled }
 
 // ArrivalFlashEnabled is the MYR-542 arrival-greeting kill-switch: three
 // headlight flashes when a ride's car is observed at a waypoint (the

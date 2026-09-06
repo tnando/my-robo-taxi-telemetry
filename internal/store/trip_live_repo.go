@@ -9,6 +9,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/myrobotaxi/telemetry/internal/cryptox"
 )
 
 // The LIVE half of trips (MYR-602): the reads and writes the trip sweeper, the
@@ -154,6 +156,28 @@ SET ended_notified_at = NOW(), updated_at = NOW()
 WHERE id = $1 AND ended_notified_at IS NULL
 RETURNING id`
 
+// querySettleTripStartNow claims the START transition for ONE named trip whose
+// window is open — the seam the CREATE handler calls when `startsAt` is already
+// in the past, which is how the legs of a road trip already driven join a trip
+// retroactively.
+//
+// The window predicate is KEPT here, unlike its end-side sibling: an end is
+// claimed on the strength of a column the caller just wrote, whereas a start
+// has no such write behind it — the trip simply is or is not open — and
+// announcing the start of a trip that has not begun would be the one direction
+// this stamp can never take back.
+const querySettleTripStartNow = `
+UPDATE go_trips
+SET started_notified_at = NOW(), updated_at = NOW()
+WHERE id = $1
+  AND started_notified_at IS NULL
+  AND starts_at <= NOW()
+  AND NOW() < LEAST(ends_at, COALESCE(ended_at, ends_at))
+RETURNING id`
+
+// queryTripName reads a trip's sealed name, for the Live Activity card.
+const queryTripName = `SELECT name_enc FROM go_trips WHERE id = $1`
+
 // queryActiveTripForVehicle answers the leg detector's per-frame question:
 // does this car have an OPEN trip window right now, and if so which?
 //
@@ -185,16 +209,26 @@ LIMIT $1`
 
 // TripLiveRepo is the timer-and-telemetry-side repository for trips.
 type TripLiveRepo struct {
-	pool   *pgxpool.Pool
-	logger *slog.Logger
+	pool      *pgxpool.Pool
+	encryptor cryptox.Encryptor
+	metrics   Metrics
+	logger    *slog.Logger
 }
 
-// NewTripLiveRepo builds the repository over the given pool.
-func NewTripLiveRepo(pool *pgxpool.Pool, logger *slog.Logger) *TripLiveRepo {
+// NewTripLiveRepo builds the repository. The encryptor is required for the same
+// reason TripLegRepo's is: `name_enc` is NOT NULL and P1, so a repo that could
+// not open it would return an empty name on every card rather than say why.
+func NewTripLiveRepo(pool *pgxpool.Pool, enc cryptox.Encryptor, metrics Metrics, logger *slog.Logger) (*TripLiveRepo, error) {
+	if enc == nil {
+		return nil, fmt.Errorf("store.NewTripLiveRepo: nil encryptor; go_trips.name_enc is P1 and NOT NULL")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &TripLiveRepo{pool: pool, logger: logger}
+	if metrics == nil {
+		metrics = NoopMetrics{}
+	}
+	return &TripLiveRepo{pool: pool, encryptor: enc, metrics: metrics, logger: logger}, nil
 }
 
 // ErrTripNotFound reports that no trip row matched. Returned by TripAudienceFor
@@ -265,6 +299,42 @@ func (r *TripLiveRepo) ClaimTripEndNow(ctx context.Context, tripID string) (bool
 		return false, nil
 	default:
 		return false, fmt.Errorf("store.ClaimTripEndNow(trip=%s): %w", tripID, err)
+	}
+}
+
+// ClaimTripStartNow claims the start transition for one trip whose window is
+// already open, reporting whether THIS caller won it. False means somebody
+// already did — the sweeper's own pass — and is not an error.
+func (r *TripLiveRepo) ClaimTripStartNow(ctx context.Context, tripID string) (bool, error) {
+	var claimed string
+	err := r.pool.QueryRow(ctx, querySettleTripStartNow, tripID).Scan(&claimed)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("store.ClaimTripStartNow(trip=%s): %w", tripID, err)
+	}
+}
+
+// TripNameFor decrypts one trip's name.
+//
+// P1 USER CONTENT. The only consumer is the Live Activity's content-state,
+// which is addressed by a token scoped to one card on one device; it must never
+// reach an alert body, a push title or a log line. Fail-soft on a decrypt
+// failure, like every other label read in this package: "" routes the card to a
+// name-less rendering rather than failing the whole push.
+func (r *TripLiveRepo) TripNameFor(ctx context.Context, tripID string) (string, error) {
+	var nameEnc *string
+	err := r.pool.QueryRow(ctx, queryTripName, tripID).Scan(&nameEnc)
+	switch {
+	case err == nil:
+		return encStringToLabel(nameEnc, r.encryptor, r.logger, r.metrics, "name_enc"), nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return "", fmt.Errorf("store.TripNameFor(trip=%s): %w", tripID, ErrTripNotFound)
+	default:
+		return "", fmt.Errorf("store.TripNameFor(trip=%s): %w", tripID, err)
 	}
 }
 
