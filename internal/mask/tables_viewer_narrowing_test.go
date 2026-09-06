@@ -70,10 +70,16 @@ var removedFromViewers = map[string][]string{
 	},
 }
 
-// keptForViewers is what the viewing/riding features consume. Asserted
+// keptForLiveRoles is what the viewing/riding features consume. Asserted
 // POSITIVELY so that an over-zealous future narrowing — "remove more, it's
 // safer" — breaks a test instead of quietly breaking the rider map.
-var keptForViewers = []string{
+//
+// MYR-602 RENAMED THIS from keptForViewers and retargeted it, because the set
+// it describes is no longer what a plain viewer gets. Everything here still
+// reaches a `ride_member` and a `trip_participant`; the first two groups no
+// longer reach a plain accepted share. keptForEveryNonOwner below is the part
+// that survived for everybody.
+var keptForLiveRoles = []string{
 	// Where the car is.
 	"latitude", "longitude", "heading", "speed",
 	"locationName", "locationAddress",
@@ -82,6 +88,23 @@ var keptForViewers = []string{
 	"destinationLatitude", "destinationLongitude",
 	"etaMinutes", "tripDistanceRemaining", "navRouteCoordinates",
 	"driveTrailCoordinates",
+	// Which car it is.
+	"vehicleId", "name", "model", "year", "color", "trim", "licensePlate",
+	// Whether it can make the trip.
+	"chargeLevel", "chargeState", "estimatedRange", "timeToFull",
+	// Whether it is available.
+	"status", "rideShareEnabled", "serviceEstimatedEndAt",
+	// Whether what I am looking at is live.
+	"lastUpdated",
+}
+
+// keptForEveryNonOwner is what a PLAIN VIEWER — an accepted share with no ride
+// and no open trip window — must still receive after MYR-602.
+//
+// It exists so the narrowing has a floor. A share that renders nothing at all
+// is not a share, and the picker row a rider taps to book still has to say
+// which car this is, whether it can make the trip and whether it is available.
+var keptForEveryNonOwner = []string{
 	// Which car it is.
 	"vehicleId", "name", "model", "year", "color", "trim", "licensePlate",
 	// Whether it can make the trip.
@@ -194,12 +217,46 @@ func TestViewerFrameOmitsMediaNowPlayingBlockSpecifically(t *testing.T) {
 // that also took out the map or the charge level would satisfy every test above
 // while destroying the feature.
 func TestViewerFrameKeepsWhatRidingNeeds(t *testing.T) {
-	keys := projectJSONKeys(t, auth.RoleViewer)
+	for _, role := range auth.LiveLocationRoles() {
+		t.Run(role.String(), func(t *testing.T) {
+			keys := projectJSONKeys(t, role)
+			for _, f := range keptForLiveRoles {
+				if _, present := keys[f]; !present {
+					t.Errorf("%s JSON is missing %q — a caller inside a ride or a trip "+
+						"window keeps location, route, identity, charge, availability "+
+						"and freshness (MYR-435, MYR-602)", role, f)
+				}
+			}
+		})
+	}
+}
 
-	for _, f := range keptForViewers {
+// TestPlainViewerFrameKeepsTheCatalogFloor is the same positive assertion for
+// the narrowed role: MYR-602 took the map away, and it must not have taken the
+// car with it.
+func TestPlainViewerFrameKeepsTheCatalogFloor(t *testing.T) {
+	keys := projectJSONKeys(t, auth.RoleViewer)
+	for _, f := range keptForEveryNonOwner {
 		if _, present := keys[f]; !present {
-			t.Errorf("viewer JSON is missing %q — viewers keep location, route, "+
-				"identity, charge, availability and freshness (MYR-435)", f)
+			t.Errorf("plain viewer JSON is missing %q — the narrowing was scoped to the "+
+				"location and navigation groups, not to the car's identity or "+
+				"availability (MYR-602)", f)
+		}
+	}
+}
+
+// TestPlainViewerFrameOmitsEveryLiveLocationField is the RAW-JSON-KEY form of
+// the MYR-602 narrowing, and the form that actually matches the contract a
+// client depends on: the key is not in the bytes (rest-api.md §5.1,
+// absent-not-nulled). A struct-level assertion would pass just as happily
+// against `"latitude": null`, which still leaks a value-shaped default into a
+// decoder — and for a coordinate, 0 is a real place.
+func TestPlainViewerFrameOmitsEveryLiveLocationField(t *testing.T) {
+	keys := projectJSONKeys(t, auth.RoleViewer)
+	for _, f := range vehicleStateLiveLocationFields {
+		if _, present := keys[f]; present {
+			t.Errorf("plain viewer JSON still carries %q — MYR-602 restricts live "+
+				"location and navigation to an active ride or an open trip window", f)
 		}
 	}
 }

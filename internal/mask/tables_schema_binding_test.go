@@ -110,7 +110,12 @@ func TestEverySchemaFieldIsClassified(t *testing.T) {
 	props := vehicleStateSchemaProperties(t)
 
 	owner := For(ResourceVehicleState, auth.RoleOwner)
-	viewer := For(ResourceVehicleState, auth.RoleViewer)
+	// MYR-602: the classification partition is owner-vs-NON-OWNER, so the
+	// non-owner side is the WIDEST non-owner arm — the live-viewer list the two
+	// window-scoped roles carry. Testing it against the narrowed plain-viewer
+	// list instead would demand that every location field be declared
+	// owner-only, which is exactly what it is not.
+	viewer := For(ResourceVehicleState, auth.RoleTripParticipant)
 
 	ownerOnly := make(map[string]struct{}, len(vehicleStateOwnerOnlyFields))
 	for _, f := range vehicleStateOwnerOnlyFields {
@@ -122,7 +127,8 @@ func TestEverySchemaFieldIsClassified(t *testing.T) {
 		if !owner.allows(field) {
 			t.Errorf("%q is a property of vehicle-state.schema.json but is absent from "+
 				"vehicleStateOwnerFields — it would reach NO role. Add it to the owner "+
-				"list, then classify it viewer-visible or owner-only (MYR-435)", field)
+				"list, then classify it viewer-visible, live-location-only or "+
+				"owner-only (MYR-435, MYR-602)", field)
 			continue
 		}
 		_, isViewer := viewer.Allowed[field]
@@ -134,7 +140,9 @@ func TestEverySchemaFieldIsClassified(t *testing.T) {
 	if len(unclassified) > 0 {
 		sort.Strings(unclassified)
 		t.Errorf("schema fields reaching owners but classified for NEITHER role: %v — "+
-			"add each to vehicleStateViewerFields or vehicleStateOwnerOnlyFields",
+			"add each to vehicleStateViewerFields (every non-owner role), "+
+			"vehicleStateLiveLocationFields (ride_member/trip_participant only) or "+
+			"vehicleStateOwnerOnlyFields",
 			unclassified)
 	}
 }
@@ -196,8 +204,22 @@ func TestOwnerListCarriesNoUndocumentedWireName(t *testing.T) {
 // group is entirely owner-only — but the test states the invariant, not today's
 // arrangement, so either outcome passes as long as the group is not SPLIT.
 func TestViewerMaskNeverSplitsAnAtomicGroup(t *testing.T) {
+	for _, role := range []auth.Role{auth.RoleViewer, auth.RoleRideMember, auth.RoleTripParticipant} {
+		t.Run(role.String(), func(t *testing.T) { assertNoSplitAtomicGroup(t, role) })
+	}
+}
+
+// assertNoSplitAtomicGroup is the body of the guard, parameterised by role.
+//
+// MYR-602 made this a loop rather than a single check, and the plain-viewer arm
+// is the one that needed it: the narrowing removed two WHOLE declared groups
+// (Speed/GPS and Navigation), and removing PART of either would have produced a
+// viewer receiving a heading with no coordinates — the precise failure
+// vehicle-state-schema.md §2.4 forbids.
+func assertNoSplitAtomicGroup(t *testing.T, role auth.Role) {
+	t.Helper()
 	props := vehicleStateSchemaProperties(t)
-	viewer := For(ResourceVehicleState, auth.RoleViewer)
+	viewer := For(ResourceVehicleState, role)
 
 	groups := make(map[string][]string)
 	for field, spec := range props {
@@ -223,11 +245,11 @@ func TestViewerMaskNeverSplitsAnAtomicGroup(t *testing.T) {
 			}
 		}
 		if len(visible) > 0 && len(hidden) > 0 {
-			t.Errorf("viewer mask SPLITS the %q atomic group: visible=%v hidden=%v. "+
+			t.Errorf("the %s mask SPLITS the %q atomic group: visible=%v hidden=%v. "+
 				"vehicle-state-schema.md §2.4 requires members to travel together — a "+
-				"viewer receiving part of a group cannot render any of it honestly. "+
+				"caller receiving part of a group cannot render any of it honestly. "+
 				"Either keep the whole group or withhold the whole group.",
-				group, visible, hidden)
+				role, group, visible, hidden)
 		}
 	}
 }

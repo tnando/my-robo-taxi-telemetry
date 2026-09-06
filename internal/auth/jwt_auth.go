@@ -42,6 +42,12 @@ type JWTAuthenticator struct {
 	// source is unwired and membership grants nothing, the same fail-closed
 	// reading `shares` gets.
 	rides rideMembershipLookup
+	// trips resolves LIVE trip-window participation (MYR-602) — the fourth
+	// source of vehicle access, and the only one whose grant ends because a
+	// CLOCK passed an instant rather than because a row changed. Nil means the
+	// source is unwired and a trip grants nothing, the same fail-closed reading
+	// `shares` and `rides` get.
+	trips tripParticipationLookup
 	// es256 optionally verifies ES256 tokens minted by the identity module
 	// (ADR-001 §3). Nil => HS256-only (legacy behaviour, unchanged).
 	es256 ES256KeyResolver
@@ -94,6 +100,11 @@ func NewJWTAuthenticator(secret, issuer, audience string, pool *pgxpool.Pool, op
 		// The same querier serves the MYR-540 group-ride membership source, so
 		// a member's access resolves out of the box too.
 		rides: querier,
+		// …and the MYR-602 trip-window source. Wiring all four sources on the
+		// DB-backed constructor is what keeps "which access legs are live?" a
+		// property of the deployment rather than of which options main.go
+		// remembered to pass.
+		trips: querier,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -173,8 +184,8 @@ func (a *JWTAuthenticator) GetUserVehicles(ctx context.Context, userID string) (
 	return ids, nil
 }
 
-// ResolveRole returns the caller's role (owner | viewer) for the given
-// vehicle. Used by both the WebSocket per-role projection
+// ResolveRole returns the caller's role (owner | trip_participant |
+// ride_member | viewer) for the given vehicle. Used by both the WebSocket per-role projection
 // (websocket-protocol.md §4.6) and the REST handler-layer mask
 // (rest-api.md §5.1).
 //

@@ -92,26 +92,50 @@ func (h *VehiclesListHandler) appendSharedRows(ctx context.Context, userID strin
 	return resp
 }
 
-// viewerSummaryMap projects one shared vehicle through the VIEWER
-// VehicleSummary mask.
+// viewerSummaryMap projects one shared vehicle through the plain VIEWER
+// VehicleSummary mask. The narrow spelling every pre-MYR-602 caller wants.
+func viewerSummaryMap(row VehicleCatalogRow, grant auth.ShareGrant, now time.Time) map[string]any {
+	return nonOwnerSummaryMap(row, grant, now, auth.RoleViewer)
+}
+
+// nonOwnerSummaryMap projects one non-owned vehicle through the mask for the
+// caller's RESOLVED role — `viewer`, `ride_member` or `trip_participant`.
 //
 // The mask is the real gate, not the struct: a field added to vehicleSummary
-// without a matching allow-list entry is dropped from viewer rows rather than
-// silently leaked. Used by both the list merge and the redeem response so a
-// redeemer cannot see one field more on the join screen than in their catalog a
-// second later.
+// without a matching allow-list entry is dropped rather than silently leaked.
+// Used by every non-owner merge leg and by the redeem response, so a redeemer
+// cannot see one field more on the join screen than in their catalog a second
+// later.
 //
-// The v1 viewer allow-list subtracts NOTHING from the owner list and adds
-// `sharePermission` — including `name`, the owner-curated nickname the rider UI
-// renders as "{Owner}'s {Vehicle}". That is not incidental: every field
+// MYR-602 SPLIT THE ROLE IN TWO PLACES AT ONCE, and keeping the two apart is
+// the whole job of this function:
+//
+//   - THE MASK ROLE is the resolved internal role. It decides the FIELDS, and
+//     since MYR-602 that decision differs: a plain viewer's row carries no
+//     `location`, a ride member's and a trip participant's do. Passing
+//     RoleViewer here for a ride member — which is what this function did
+//     before the split — would silently take the coordinate away from every
+//     rider mid-ride, with every owner-side test still green.
+//   - THE WIRE ROLE is what `VehicleSummary.role` says, and it stays the v1
+//     enum `owner | viewer` (vehicle-summary.schema.json). The internal names
+//     are an RBAC implementation detail; emitting one would break every client
+//     decoding a closed enum, for a distinction the client already reads off
+//     `activeTripId` and `hasActiveRide`. wireRole is the ONE projection, and
+//     TestWireRoleNeverEmitsAnInternalRoleName pins that it is total.
+//
+// The v1 viewer allow-list otherwise subtracts nothing from the owner list and
+// adds `sharePermission` — including `name`, the owner-curated nickname the
+// rider UI renders as "{Owner}'s {Vehicle}". Every field
 // vehicle-summary.schema.json marks `required` must survive this projection, or
 // the rows this function emits are invalid against the shape their own consumer
 // decodes. Asserted in vehicles_list_viewer_schema_test.go.
-func viewerSummaryMap(row VehicleCatalogRow, grant auth.ShareGrant, now time.Time) map[string]any {
-	summary := newVehicleSummary(&row, auth.RoleViewer, grant, now)
+func nonOwnerSummaryMap(
+	row VehicleCatalogRow, grant auth.ShareGrant, now time.Time, maskRole auth.Role,
+) map[string]any {
+	summary := newVehicleSummary(&row, maskRole, grant, now)
 	projected, _ := mask.Apply(
 		summary.toMaskMap(),
-		mask.For(mask.ResourceVehicleSummary, auth.RoleViewer),
+		mask.For(mask.ResourceVehicleSummary, maskRole),
 	)
 	return projected
 }

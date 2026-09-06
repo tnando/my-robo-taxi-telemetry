@@ -7,7 +7,9 @@ package auth
 
 // queryUserVehicleIDs fetches the caller's full VEHICLE ACCESS SET — the
 // vehicles they own, UNIONed with the vehicles somebody has shared with them
-// (MYR-91 viewer merge / MYR-184 sharing).
+// (MYR-91 viewer merge / MYR-184 sharing), the vehicle of a live group ride
+// they joined (MYR-540) and the vehicle of an open trip window they are a
+// participant of (MYR-602).
 //
 // Before MYR-184 the access set was ownership alone, which is why the `viewer`
 // role existed in the mask matrix without a single row that could produce it.
@@ -61,6 +63,39 @@ package auth
 // dark mid-ride. If it were ever WIDENED (say, by losing the status filter), a
 // stranger keeps live GPS on somebody's car forever. The status predicate is the
 // one that carries the risk, and it has a test of its own.
+// A FOURTH LEG LANDED IN MYR-602: the vehicle of a trip whose WINDOW IS OPEN
+// RIGHT NOW and on which the caller is a live participant.
+//
+// It is the closest sibling of leg 3 and differs in exactly one way that
+// matters: a ride ends when a status changes, whereas a trip ends when the
+// CLOCK passes an instant. Nothing writes a row at that moment, so there is no
+// mutation for the revocation nudge to hang off and the 60-second
+// AccessRevalidator sweep is the enforcement — see internal/ws/
+// access_revalidator.go, which MYR-602 also taught to re-mask rather than only
+// to kick.
+//
+// THREE PREDICATES, EACH LOAD-BEARING:
+//
+//   - THE WINDOW: `starts_at <= NOW() AND NOW() < COALESCE(ended_at, ends_at)`,
+//     half-open, matching store.Trip.StatusAt exactly. COALESCE is what makes
+//     the owner's early end take effect here with no second column to read.
+//     ACCESS IS PURELY THE WINDOW (client ruling, 2026-09-05): it is not
+//     conditioned on a leg being underway, on the car's status, or on a
+//     destination being set. A parked car with no route inside an open window
+//     streams to its participants, exactly as it does to its owner.
+//   - THE MEMBERSHIP: `left_at IS NULL`. A participant who left, or whom the
+//     owner removed, drops out on the next lookup with nothing to sweep.
+//   - THE SHARE JOIN: the participant must STILL hold a live accepted,
+//     unsuspended grant on that same car. This is what makes "trip access can
+//     never outlive the share" structural rather than a cleanup job. Note it
+//     carries the same `status = 'accepted' AND suspended_at IS NULL` pair as
+//     leg 2 — the sixth copy of the suspension predicate catalogued in
+//     internal/store/vehicle_share_access_queries.go.
+//
+// Failure direction if this leg were dropped: a participant's map goes dark
+// mid-trip. If it were widened by losing the window, a person keeps live GPS on
+// somebody's car forever — so the window predicate carries the risk, and it has
+// a test of its own.
 const queryUserVehicleIDs = `
 SELECT "id" FROM "Vehicle" WHERE "userId" = $1
 UNION
@@ -69,7 +104,34 @@ WHERE accepted_by_user_id = $1 AND status = 'accepted' AND suspended_at IS NULL
 UNION
 SELECT r.vehicle_id FROM go_ride_members m
 JOIN go_ride_requests r ON r.id = m.ride_id
-WHERE m.user_id = $1 AND r.status NOT IN ('completed', 'declined', 'cancelled')`
+WHERE m.user_id = $1 AND r.status NOT IN ('completed', 'declined', 'cancelled')
+UNION
+SELECT t.vehicle_id FROM go_trip_participants p
+JOIN go_trips t ON t.id = p.trip_id
+JOIN go_vehicle_shares s
+  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+ AND s.status = 'accepted' AND s.suspended_at IS NULL
+WHERE p.user_id = $1 AND p.left_at IS NULL
+  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)`
+
+// queryActiveTripParticipation is the per-vehicle form of leg 4, and it carries
+// the SAME predicates character-for-character for the reason stated above
+// queryRideMembershipOnVehicle: a set that admits a vehicle while the role
+// resolution denies it produces a client that subscribes and then receives a
+// deny-all projection.
+//
+// READ-ONLY. Served by idx_go_trip_participants_user_live and
+// idx_go_trips_vehicle_window.
+const queryActiveTripParticipation = `
+SELECT EXISTS (
+	SELECT 1 FROM go_trip_participants p
+	JOIN go_trips t ON t.id = p.trip_id
+	JOIN go_vehicle_shares s
+	  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+	 AND s.status = 'accepted' AND s.suspended_at IS NULL
+	WHERE p.user_id = $1 AND t.vehicle_id = $2 AND p.left_at IS NULL
+	  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+)`
 
 // queryRideMembershipOnVehicle answers the per-vehicle form of the same
 // question: does this caller hold a LIVE group-ride membership on a ride being

@@ -317,13 +317,23 @@ func TestVehiclesListHandler_LocationOnWire(t *testing.T) {
 	}
 }
 
-// TestViewerSummaryCarriesLocation is the assertion MYR-515 turns on.
+// TestViewerSummaryCarriesLocation is the assertion MYR-515 turns on, RESCOPED
+// BY MYR-602 to the roles that still hold the coordinate.
 //
-// The viewer is the party the field exists for: the picker ranks SHARED cars by
-// pickup ETA, and a viewer cannot fetch a per-row /snapshot (403 by design,
-// MYR-432/449). If the viewer mask ever stops projecting this, the picker
-// silently loses per-row ETAs for every row but the watched one — with every
-// owner-side test still green.
+// MYR-515's argument was that a viewer cannot fetch a per-row /snapshot (403 by
+// design, MYR-432/449), so the catalog is the picker's only ETA input; if the
+// projection stops emitting this, the picker silently loses per-row ETAs for
+// every row but the watched one, with every owner-side test still green. That
+// argument is unchanged — but MYR-602 narrowed WHO it is about. A standing
+// share no longer carries live location at all (client decision, 2026-09-05),
+// so the parties this test now protects are the window-scoped ones: a rider
+// mid-ride and a participant inside an open trip window. Both reach this
+// function through nonOwnerSummaryMap with their own mask role.
+//
+// The plain viewer's side of the same coin — the coordinate is GONE, and gone
+// as an ABSENT KEY rather than a null — is TestPlainViewerSummaryOmitsLocation
+// below. The two must be read together: this one alone would pass on a
+// projection that leaked the coordinate to everybody.
 func TestViewerSummaryCarriesLocation(t *testing.T) {
 	now := time.Date(2026, 8, 9, 13, 53, 0, 0, time.UTC)
 	lat, lng := 37.7749, -122.4194
@@ -336,13 +346,13 @@ func TestViewerSummaryCarriesLocation(t *testing.T) {
 			Status: "parked", Latitude: &lat, Longitude: &lng,
 		}
 
-		projected := viewerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now)
+		projected := nonOwnerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now, auth.RoleTripParticipant)
 
 		loc, ok := projected["location"]
 		if !ok {
-			t.Fatalf("the VIEWER projection dropped `location`. This is the role the "+
-				"field exists for — a viewer cannot fetch a per-row /snapshot; keys: %v",
-				keysOfRow(projected))
+			t.Fatalf("the window-scoped projection dropped `location`. These are the "+
+				"roles the field exists for — they cannot fetch a per-row /snapshot; "+
+				"keys: %v", keysOfRow(projected))
 		}
 		obj, isObj := loc.(map[string]any)
 		if !isObj {
@@ -361,11 +371,11 @@ func TestViewerSummaryCarriesLocation(t *testing.T) {
 			Latitude: &zero, Longitude: &zero,
 		}
 
-		projected := viewerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now)
+		projected := nonOwnerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now, auth.RoleRideMember)
 
 		loc, ok := projected["location"]
 		if !ok {
-			t.Fatalf("the VIEWER projection dropped `location`; keys: %v", keysOfRow(projected))
+			t.Fatalf("the window-scoped projection dropped `location`; keys: %v", keysOfRow(projected))
 		}
 		if loc != nil {
 			t.Errorf("viewer location = %v, want null — the sentinel collapse is not an "+
@@ -399,4 +409,74 @@ func serveVehiclesList(t *testing.T, rows []VehicleCatalogRow) []map[string]any 
 		t.Fatalf("decode: %v. Body: %s", err, rec.Body.String())
 	}
 	return resp.Items
+}
+
+// TestPlainViewerSummaryOmitsLocation is MYR-602's catalog narrowing at the
+// wire: a standing accepted share, with no ride and no open trip window, gets
+// NO coordinate on its picker row.
+//
+// ABSENT, NOT NULL, and that distinction is the whole test. A `"location":
+// null` would satisfy a struct-level assertion and still tell a client "the
+// server holds no fix on this car" — which is a claim about the vehicle, not
+// about the caller's permission, and it is false. rest-api.md §5.1 requires a
+// denied field to be absent from the bytes, and this is the surface where the
+// two readings diverge, because null is already a MEANINGFUL value here
+// (MYR-515's no-fix sentinel collapse).
+func TestPlainViewerSummaryOmitsLocation(t *testing.T) {
+	now := time.Date(2026, 9, 5, 13, 53, 0, 0, time.UTC)
+	lat, lng := 37.7749, -122.4194
+
+	row := VehicleCatalogRow{
+		ID: "clshared602000000000", VIN: "7SAXCDE2NTF000001", Name: "Amruth's X Plaid",
+		Model: "Model X", Year: 2026, Color: "UltraRed", LastUpdated: now,
+		Status: "parked", Latitude: &lat, Longitude: &lng,
+	}
+
+	projected := viewerSummaryMap(row, auth.ShareGrant{AllowRides: true}, now)
+
+	if _, present := projected["location"]; present {
+		t.Errorf("the plain-viewer projection still carries `location` = %v — MYR-602 "+
+			"restricts the catalog coordinate to an active ride or an open trip "+
+			"window; keys: %v", projected["location"], keysOfRow(projected))
+	}
+	// Non-vacuity: the row must still be a usable picker card.
+	for _, f := range []string{"vehicleId", "name", "status", "chargeLevel", "sharePermission"} {
+		if _, present := projected[f]; !present {
+			t.Errorf("the plain-viewer projection lost %q — the narrowing was scoped to "+
+				"the coordinate, not to the car", f)
+		}
+	}
+}
+
+// TestWireRoleNeverEmitsAnInternalRoleName pins the ONE projection between the
+// four-value internal RBAC vocabulary and the two-value wire enum.
+//
+// The failure it exists to prevent is quiet and total: `VehicleSummary.role` is
+// a CLOSED enum in vehicle-summary.schema.json, so a client decoding it into a
+// Swift enum or a TypeScript union rejects an unrecognised member and fails the
+// whole row. A single leaked "ride_member" would blank a rider's picker on
+// every shipped build, and no server-side test that only checks field presence
+// would notice.
+//
+// Iterated over auth.AllRoles() rather than a hand-written list, so a fifth
+// role added later is covered the moment it exists.
+func TestWireRoleNeverEmitsAnInternalRoleName(t *testing.T) {
+	for _, role := range auth.AllRoles() {
+		t.Run(role.String(), func(t *testing.T) {
+			got := wireRole(role)
+			switch got {
+			case string(auth.RoleOwner), string(auth.RoleViewer):
+			default:
+				t.Fatalf("wireRole(%q) = %q, which is not a member of the v1 enum "+
+					"{owner, viewer}", role, got)
+			}
+			if role != auth.RoleOwner && role != auth.RoleViewer && got == string(role) {
+				t.Errorf("wireRole(%q) leaked the INTERNAL role name onto the wire", role)
+			}
+			if role == auth.RoleOwner && got != string(auth.RoleOwner) {
+				t.Errorf("wireRole(owner) = %q — an owner must never be reported as a "+
+					"viewer; that would hide their own car's owner affordances", got)
+			}
+		})
+	}
 }

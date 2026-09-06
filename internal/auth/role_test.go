@@ -62,3 +62,57 @@ func TestParseRole(t *testing.T) {
 		})
 	}
 }
+
+// TestAllRolesParse pins that the two enumerations of the role vocabulary —
+// AllRoles' slice and ParseRole's switch — describe the same set.
+//
+// They are separate on purpose (one is an ordered list, the other a total
+// function), and separate enumerations of one set are exactly what drift. A
+// role added to only one of them produces either a role no test iterates or a
+// role no wire input can name, and neither failure is loud on its own.
+func TestAllRolesParse(t *testing.T) {
+	seen := make(map[Role]bool, len(AllRoles()))
+	for _, role := range AllRoles() {
+		if seen[role] {
+			t.Errorf("AllRoles() lists %q twice", role)
+		}
+		seen[role] = true
+		parsed, err := ParseRole(string(role))
+		if err != nil {
+			t.Errorf("ParseRole(%q) = %v — AllRoles names a role ParseRole rejects", role, err)
+		}
+		if parsed != role {
+			t.Errorf("ParseRole(%q) = %q, want %q", role, parsed, role)
+		}
+	}
+	// The other direction: nothing ParseRole accepts may be missing from the
+	// list. Checked against the roles this package declares as constants.
+	for _, role := range []Role{RoleOwner, RoleViewer, RoleRideMember, RoleTripParticipant} {
+		if !seen[role] {
+			t.Errorf("%q is a declared role that AllRoles() omits — every for-every-role "+
+				"test silently skips it", role)
+		}
+	}
+}
+
+// TestSeesLiveLocationMatchesLiveLocationRoles keeps the predicate and the list
+// in agreement. The mask table is built from the list; the audit tests branch on
+// the predicate. If they disagree, a role gets the location group from one and
+// is asserted not to have it by the other.
+func TestSeesLiveLocationMatchesLiveLocationRoles(t *testing.T) {
+	inList := make(map[Role]bool, len(LiveLocationRoles()))
+	for _, role := range LiveLocationRoles() {
+		inList[role] = true
+		if role == RoleOwner {
+			t.Error("LiveLocationRoles() includes the owner — the list is the NON-OWNER " +
+				"exception set, and including the owner would let a narrowing of it " +
+				"read as a narrowing of owner access")
+		}
+	}
+	for _, role := range AllRoles() {
+		want := inList[role] || role == RoleOwner
+		if got := role.SeesLiveLocation(); got != want {
+			t.Errorf("%q.SeesLiveLocation() = %v, want %v", role, got, want)
+		}
+	}
+}

@@ -49,6 +49,18 @@ type rideMembershipLookup interface {
 	IsRidingVehicle(ctx context.Context, userID, vehicleID string) (bool, error)
 }
 
+// tripParticipationLookup is the consumer-site interface ResolveVehicleAccess
+// uses to read the MYR-602 trip-window source. A third KIND of access again,
+// kept apart from the other two for the same reason they are kept apart from
+// each other: a window-scoped grant and a standing one must not be able to
+// acquire each other's capabilities through a shared code path.
+type tripParticipationLookup interface {
+	// IsActiveTripParticipant reports whether userID is a live participant of a
+	// trip on vehicleID whose window is OPEN RIGHT NOW. Errors are lookup
+	// failures, never denials: "no" is (false, nil).
+	IsActiveTripParticipant(ctx context.Context, userID, vehicleID string) (bool, error)
+}
+
 // shareLookup is the consumer-site interface ResolveVehicleAccess uses to read
 // an accepted share grant. Defined here so tests can swap the DB-backed
 // implementation for a stub, mirroring vehicleOwnerLookup.
@@ -60,18 +72,29 @@ type shareLookup interface {
 	GetShareGrant(ctx context.Context, userID, vehicleID string) (ShareGrant, error)
 }
 
-// ResolveVehicleAccess resolves the caller's role for a vehicle AND, for a
-// viewer, the capability set that role carries.
+// ResolveVehicleAccess resolves the caller's role for a vehicle AND, for every
+// non-owner role, the capability set their share grant carries.
 //
-// Three outcomes, and only three:
+// FIVE outcomes since MYR-602, resolved STRONGEST FIRST:
 //
-//   - owner  — (RoleOwner, ShareGrant{}, nil). An owner holds no grant; they
-//     hold everything. The returned grant is the ZERO VALUE, which
-//     is the most restrictive one, so a caller that forgets to
-//     branch on the role denies rather than over-grants. Branch on
-//     the role first.
-//   - viewer — (RoleViewer, grant, nil) when a live accepted share exists.
-//   - denied — (Role(""), ShareGrant{}, ErrNoVehicleAccess).
+//   - owner            — (RoleOwner, ShareGrant{}, nil). An owner holds no
+//     grant; they hold everything. The returned grant is the ZERO VALUE, which
+//     is the most restrictive one, so a caller that forgets to branch on the
+//     role denies rather than over-grants. Branch on the role first.
+//   - trip_participant — (RoleTripParticipant, grant, nil) inside an open trip
+//     window. `grant` is the caller's own share grant, which they still hold —
+//     the trip elevates the ROLE, it does not replace the relationship.
+//   - ride_member      — (RoleRideMember, grant, nil) while riding.
+//   - viewer           — (RoleViewer, grant, nil) on a live accepted share with
+//     no window open. NARROWED BY MYR-602: this role no longer receives the
+//     location or navigation groups. See internal/mask/tables.go.
+//   - denied           — (Role(""), ShareGrant{}, ErrNoVehicleAccess).
+//
+// THE ELEVATED SOURCES ARE PROBED BEFORE THE SHARE ANSWERS, and that ordering
+// is the whole correctness of MYR-602's narrowing. Every trip participant is
+// by construction also a share-holder, so resolving the share first — as this
+// function did before — would return RoleViewer for every participant and the
+// window would grant nothing at all.
 //
 // A SUSPENDED GRANT IS THE DENIED CASE, not a viewer with an empty capability
 // set (MYR-369). The distinction matters: a suspended grant must be
@@ -93,66 +116,126 @@ func (a *JWTAuthenticator) ResolveVehicleAccess(ctx context.Context, userID, veh
 		return RoleOwner, ShareGrant{}, nil
 	}
 
-	if a.shares == nil {
-		// No share lookup configured — fail closed. The pre-MYR-184
-		// behaviour of returning RoleViewer here is exactly the hole this
-		// change exists to close.
-		return a.resolveRidingMember(ctx, userID, vehicleID, ErrNoVehicleAccess)
+	// The grant is read FIRST but no longer decides the role on its own. It is
+	// read first because it is the CAPABILITY carrier: a share-holder who is
+	// also on a trip keeps allow_rides, and resolving the elevated role without
+	// this read would silently downgrade them to the zero-value grant for the
+	// length of the window.
+	//
+	// `held` IS NOT DERIVABLE FROM `grant`, and that is the whole reason it is
+	// returned separately. ShareGrant's zero value has Suspended=false, so
+	// ShareGrant{}.Active() is TRUE — "no grant at all" and "a live grant with
+	// no flags set" are the same bytes. Before MYR-602 the distinction was
+	// carried by GetShareGrant's ERROR, which the elevated probes now have to
+	// run past; collapsing it into the zero value would admit every
+	// authenticated stranger as a viewer on every vehicle.
+	grant, held, shareErr := a.shareGrant(ctx, userID, vehicleID)
+	if shareErr != nil {
+		return Role(""), ShareGrant{}, shareErr
 	}
 
-	grant, err := a.shares.GetShareGrant(ctx, userID, vehicleID)
-	if err != nil {
-		if errors.Is(err, ErrNoVehicleAccess) {
-			// MYR-540: a share is not the only way to be a non-owner with
-			// business here. Before denying, ask whether the caller is RIDING in
-			// this car right now on a group ride they joined.
-			return a.resolveRidingMember(ctx, userID, vehicleID, ErrNoVehicleAccess)
-		}
-		return Role(""), ShareGrant{}, fmt.Errorf("auth.ResolveVehicleAccess(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+	// THE ELEVATED SOURCES, PROBED BEFORE THE SHARE IS ALLOWED TO ANSWER.
+	//
+	// Order between these two does not affect the field set — the two roles
+	// share one allow-list by construction (see auth.LiveLocationRoles) — so
+	// what the order picks is the PROVENANCE reported to the handlers, and
+	// trip participation is the more specific of the two (it is what admits a
+	// caller to the window's drives; membership admits them to none).
+	if a.tripParticipant(ctx, userID, vehicleID) {
+		return RoleTripParticipant, grant, nil
 	}
-	// SECOND, INDEPENDENT SUSPENSION GATE. The statement already excludes
-	// suspended rows, so this cannot fire through the DB-backed lookup — it
-	// fires for a stub, a future lookup implementation, or a statement
-	// somebody edits. An access-control invariant that holds only because
-	// one WHERE clause is correct is one edit from not holding.
-	if !grant.Active() {
+	if a.ridingMember(ctx, userID, vehicleID) {
+		return RoleRideMember, grant, nil
+	}
+
+	if !held || !grant.Active() {
+		// TWO INDEPENDENT DENIALS SHARING ONE ANSWER, which is the point: a
+		// suspended grant must be indistinguishable from no grant at all
+		// (MYR-369).
+		//
+		// The `!held` arm is the real gate for a stranger. The `!grant.Active()`
+		// arm is the SECOND, INDEPENDENT SUSPENSION GATE: the statement already
+		// excludes suspended rows, so it cannot fire through the DB-backed
+		// lookup — it fires for a stub, a future lookup implementation, or a
+		// statement somebody edits. An access-control invariant that holds only
+		// because one WHERE clause is correct is one edit from not holding.
 		return Role(""), ShareGrant{}, ErrNoVehicleAccess
 	}
 	return RoleViewer, grant, nil
 }
 
-// resolveRidingMember is the MYR-540 GROUP-RIDE MEMBERSHIP source of viewer
-// access, consulted only after ownership and shares have both declined.
+// shareGrant reads the accepted grant, reporting "no grant" as (zero, false,
+// nil) rather than as an error so the caller can go on to probe the elevated
+// sources.
 //
-// It returns the ZERO-VALUE ShareGrant, and that is the whole tier decision: a
-// member gets the base capability every live viewer has — the catalog row, the
-// snapshot, the WebSocket subscription, all under the MYR-435 viewer mask — and
-// nothing more. In particular GrantsRides() is false, so riding along in a car
-// never becomes permission to summon it.
+// THE BOOLEAN IS LOAD-BEARING and cannot be inferred from the grant: see the
+// `held` paragraph in ResolveVehicleAccess.
 //
-// WHY IT IS LAST. Ownership and an accepted share are STANDING relationships and
-// membership is a transient one, so resolving in that order means the person
-// who both owns a share on the car and happens to be riding in it keeps the
-// grant they actually hold — flags and all — instead of being downgraded to the
-// bare membership tier for the length of one ride.
+// A TRANSPORT failure is still an error: a database blip must not be reported
+// as an absent grant, because that would silently strip a share-holder of the
+// capabilities the ride gates read from it — and, symmetrically, must not be
+// reported as a PRESENT one.
+func (a *JWTAuthenticator) shareGrant(ctx context.Context, userID, vehicleID string) (ShareGrant, bool, error) {
+	if a.shares == nil {
+		// No share lookup configured — fail closed. The pre-MYR-184 behaviour
+		// of returning RoleViewer here is exactly the hole that change closed.
+		// The elevated probes still run: a ride member or trip participant
+		// needs no share lookup to be resolved, and denying them here would
+		// make an unwired share source silently disable group rides too.
+		return ShareGrant{}, false, nil
+	}
+	grant, err := a.shares.GetShareGrant(ctx, userID, vehicleID)
+	switch {
+	case err == nil:
+		return grant, true, nil
+	case errors.Is(err, ErrNoVehicleAccess):
+		return ShareGrant{}, false, nil
+	default:
+		return ShareGrant{}, false, fmt.Errorf("auth.ResolveVehicleAccess(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+	}
+}
+
+// ridingMember is the MYR-540 GROUP-RIDE MEMBERSHIP probe.
 //
-// FAILS CLOSED, and unlike the share lookup above it does so by returning the
-// caller's own denial rather than a lookup error: this probe runs on a path that
-// was ALREADY going to deny, so a database blip here must not convert a denial
-// into a 500 on a request that has no access anyway. A genuine member whose
-// probe failed is denied for this request and admitted on the retry, which is
-// the same bound the 5-minute access-set cache already imposes.
-func (a *JWTAuthenticator) resolveRidingMember(
-	ctx context.Context, userID, vehicleID string, denial error,
-) (Role, ShareGrant, error) {
+// FAILS CLOSED, and it does so by returning false rather than an error: this
+// probe runs on a path that has a correct answer without it (the share tier, or
+// a denial), so a database blip here must not convert a request into a 500. A
+// genuine member whose probe failed is served the narrower role for this
+// request and the elevated one on the retry, which is the same bound the
+// 5-minute access-set cache already imposes.
+func (a *JWTAuthenticator) ridingMember(ctx context.Context, userID, vehicleID string) bool {
 	if a.rides == nil {
-		return Role(""), ShareGrant{}, denial
+		return false
 	}
 	riding, err := a.rides.IsRidingVehicle(ctx, userID, vehicleID)
-	if err != nil || !riding {
-		return Role(""), ShareGrant{}, denial
+	return err == nil && riding
+}
+
+// tripParticipant is the MYR-602 TRIP-WINDOW probe, with the same fail-closed
+// posture and for the same reason as ridingMember.
+//
+// WINDOW-ONLY. It asks whether the clock is inside an open window on a live
+// membership backed by a live share — never whether a leg is underway, whether
+// the car is moving, or whether it has a destination. A parked car inside the
+// window resolves RoleTripParticipant and streams its position, which is the
+// stated product behaviour (client ruling, 2026-09-05).
+func (a *JWTAuthenticator) tripParticipant(ctx context.Context, userID, vehicleID string) bool {
+	if a.trips == nil {
+		return false
 	}
-	return RoleViewer, ShareGrant{}, nil
+	participant, err := a.trips.IsActiveTripParticipant(ctx, userID, vehicleID)
+	return err == nil && participant
+}
+
+// IsActiveTripParticipant reports whether userID is a live participant of an
+// OPEN trip window on vehicleID (MYR-602). A closed window matches nothing,
+// which is how trip access ends without anything having to revoke it.
+func (q *pgVehicleQuerier) IsActiveTripParticipant(ctx context.Context, userID, vehicleID string) (bool, error) {
+	var participant bool
+	if err := q.pool.QueryRow(ctx, queryActiveTripParticipation, userID, vehicleID).Scan(&participant); err != nil {
+		return false, fmt.Errorf("pgVehicleQuerier.IsActiveTripParticipant(user=%s, vehicle=%s): %w", userID, vehicleID, err)
+	}
+	return participant, nil
 }
 
 // IsRidingVehicle reports whether userID is a member of a LIVE group ride being

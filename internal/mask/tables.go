@@ -42,9 +42,38 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// physical car and links to its location history, while a plate is
 	// the label the rider is standing on the curb reading. Both are
 	// P1; the asymmetry is about who needs the value, not about tier.
+	// MYR-602 (CLIENT DECISION, 2026-09-05) SPLIT THE NON-OWNER ARM IN TWO and
+	// NARROWED the plain-viewer half. Thomas's ruling: "you should really only
+	// see live location during an active trip shared with a user" (or an
+	// accepted active ride).
+	//
+	// This SUPERSEDES MYR-435's reasoning for keeping the navigation group on
+	// `viewer` ("where is this car taking me is the other half of the
+	// shared-viewing feature"). That argument was about a party who is watching
+	// a journey; the client's position is that a STANDING share is not that
+	// party — it is durable and remote, and most of the time the grantee is at
+	// home while the owner drives alone. Being on a ride, or inside a trip
+	// window the owner opened, IS that party.
+	//
+	// So there are now three non-owner arms and only two field lists:
+	//
+	//   viewer           — the catalog/availability fields. NO location group,
+	//                      NO navigation group. What is left answers "which car
+	//                      is this, can it make a trip, is it available".
+	//   ride_member      — vehicleStateLiveViewerFields, which is EXACTLY the
+	//   trip_participant   pre-MYR-602 viewer set. Ride tracking is unchanged
+	//                      by construction: same list, same bytes.
+	//
+	// The two elevated roles SHARE ONE LIST deliberately. Both mean "this
+	// person is party to where the car is going right now", and one list is
+	// what stops the two drifting into a distinction nobody intended. They stay
+	// separate ROLES because they carry different provenance, which is what
+	// decides drive access (§7.2–§7.4).
 	ResourceVehicleState: {
-		auth.RoleOwner:  setFromFields(vehicleStateOwnerFields),
-		auth.RoleViewer: setFromFields(vehicleStateViewerFields),
+		auth.RoleOwner:           setFromFields(vehicleStateOwnerFields),
+		auth.RoleViewer:          setFromFields(vehicleStateViewerFields),
+		auth.RoleRideMember:      setFromFields(vehicleStateLiveViewerFields),
+		auth.RoleTripParticipant: setFromFields(vehicleStateLiveViewerFields),
 	},
 
 	// rest-api.md §5.2.0 — Vehicles list (vehicle summary). Owners and
@@ -71,9 +100,26 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	//
 	// The viewer merge is live (MYR-184), so this projection runs on
 	// every list call from anyone who has redeemed an invite.
+	// MYR-602: `location` — the catalog row's last-known coordinate (MYR-515) —
+	// leaves the plain-viewer arm for the same reason the snapshot's GPS group
+	// does. The two MUST move together: MYR-515's own justification for putting
+	// a coordinate on the catalog was that "the viewer already receives
+	// latitude/longitude at FULL PRECISION on the streaming path, for exactly
+	// these vehicles", and that premise is what MYR-602 retracted. Leaving it
+	// here would make the catalog the weaker surface setting the real privacy
+	// bound — the exact failure MYR-515 warned about under ON COARSENING.
+	//
+	// CONSEQUENCE, STATED RATHER THAN DISCOVERED: the rider client derives its
+	// "N min away" pickup ETA by routing from this coordinate
+	// (RoadPickupETAStore, MYR-577). A plain viewer therefore has no input for
+	// it and the client renders no estimate. THE SERVER DOES NOT FABRICATE ONE
+	// — there is no server-side route solver, and inventing a number here to
+	// fill the hole would be worse than the honest absence.
 	ResourceVehicleSummary: {
-		auth.RoleOwner:  setFromFields(vehicleSummaryOwnerFields),
-		auth.RoleViewer: setFromFields(vehicleSummaryViewerFields),
+		auth.RoleOwner:           setFromFields(vehicleSummaryOwnerFields),
+		auth.RoleViewer:          setFromFields(vehicleSummaryViewerFields),
+		auth.RoleRideMember:      setFromFields(vehicleSummaryLiveViewerFields),
+		auth.RoleTripParticipant: setFromFields(vehicleSummaryLiveViewerFields),
 	},
 
 	// rest-api.md §5.2.2 — Drive list (drive summary). Owners and
@@ -82,9 +128,18 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// / endAddress / endLocation are deliberately NOT in this
 	// resource — they are returned by the drive detail endpoint
 	// (§5.2.3) to keep list payloads lean.
+	// MYR-602 adds `trip_participant`, and it is the ONLY non-owner role that
+	// reaches a drives ENDPOINT at all. MYR-369 made drive history owner-only
+	// and that stands for `viewer` and `ride_member`, whose entries here are
+	// unreachable by routing. A trip participant is admitted, and only to
+	// drives whose startedAt falls inside their own window — a bound enforced
+	// at the handler, not here, because a mask can hide fields and cannot hide
+	// a row. The FIELD set is identical for every role: what differs between
+	// them is WHICH DRIVES they may ask for, never what a drive says.
 	ResourceDriveSummary: {
-		auth.RoleOwner:  setFromFields(driveSummaryFields),
-		auth.RoleViewer: setFromFields(driveSummaryFields),
+		auth.RoleOwner:           setFromFields(driveSummaryFields),
+		auth.RoleViewer:          setFromFields(driveSummaryFields),
+		auth.RoleTripParticipant: setFromFields(driveSummaryFields),
 	},
 
 	// rest-api.md §5.2.3 — Drive detail. Owner and viewer share the
@@ -94,16 +149,18 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// is intentionally NOT here — it has its own resource (§5.2.4 /
 	// ResourceDriveRoute) for lazy-fetch reasons (heavy payload).
 	ResourceDriveDetail: {
-		auth.RoleOwner:  setFromFields(driveDetailFields),
-		auth.RoleViewer: setFromFields(driveDetailFields),
+		auth.RoleOwner:           setFromFields(driveDetailFields),
+		auth.RoleViewer:          setFromFields(driveDetailFields),
+		auth.RoleTripParticipant: setFromFields(driveDetailFields),
 	},
 
 	// rest-api.md §5.2.4 — Drive route. Both roles see the full
 	// polyline; a partial route would defeat FR-5.1. Only one field:
 	// routePoints.
 	ResourceDriveRoute: {
-		auth.RoleOwner:  setFromFields(driveRouteFields),
-		auth.RoleViewer: setFromFields(driveRouteFields),
+		auth.RoleOwner:           setFromFields(driveRouteFields),
+		auth.RoleViewer:          setFromFields(driveRouteFields),
+		auth.RoleTripParticipant: setFromFields(driveRouteFields),
 	},
 
 	// rest-api.md §5.2.5 — Invite endpoints. Owner-only at the
@@ -377,13 +434,6 @@ var vehicleStateViewerFields = []string{
 	// pair travels together.
 	"status",
 	"gearPosition",
-	// Speed / GPS atomic group — the entire point of a shared live map.
-	"speed",
-	"heading",
-	"latitude",
-	"longitude",
-	"locationName",
-	"locationAddress",
 	// Service window and the ride-sharing switch. Both are operational
 	// availability of the car, and the viewer is the party they are ABOUT: a
 	// rider who cannot see them discovers a paused car from a 409 after
@@ -415,9 +465,47 @@ var vehicleStateViewerFields = []string{
 	// `fsdMilesSinceReset` are both `required` in vehicle-state.schema.json.
 	"odometerMiles",
 	"fsdMilesSinceReset",
-	// Navigation atomic group — "where is this car taking me" is the other half
-	// of the shared-viewing feature (FR-5.1).
+	// THE LOCATION AND NAVIGATION GROUPS USED TO BE HERE. MYR-602 moved them to
+	// vehicleStateLiveViewerFields below — see that list for the client
+	// decision and the per-group reasoning. Nothing was DELETED: every one of
+	// those fields still reaches a ride member and a trip participant, which is
+	// why they are absent from vehicleStateOwnerOnlyFields too.
+	//
+	// Wire freshness marker. A viewer must be able to tell live from stale —
+	// arguably more so now that the row says less.
+	"lastUpdated",
+}
+
+// vehicleStateLiveLocationFields is the LOCATION + NAVIGATION set that MYR-602
+// took away from a standing share and gave only to the two window-scoped roles.
+//
+// It is written out ONCE, here, and composed into the elevated list below,
+// rather than duplicated into two role lists. That is the whole point: the
+// security question "which fields say where this car is and where it is going?"
+// has exactly one answer in this package, and a field added to the vehicle
+// state can be classified against it rather than reasoned about twice.
+//
+// Both atomic groups travel WHOLE (rest-api.md §5.4). `speed` and `heading` are
+// in the Speed/GPS group with the coordinates and are not separable from them;
+// splitting a declared x-atomic-group is its own contract violation, asserted by
+// TestViewerMaskNeverSplitsAnAtomicGroup.
+var vehicleStateLiveLocationFields = []string{
+	// Speed / GPS atomic group — the entire point of a shared live map.
+	"speed",
+	"heading",
+	"latitude",
+	"longitude",
+	"locationName",
+	"locationAddress",
+	// Navigation atomic group — "where is this car taking me".
 	"destinationName",
+	// `destinationAddress` IS included, and MYR-602's spec text originally said
+	// it should not be ("name + coordinates suffice; address stays
+	// owner-only"). It was corrected in review for a plain reason: a ride
+	// member receives it TODAY, and a trip participant shares that list by
+	// construction, so excluding it here would have made a trip participant see
+	// LESS than the pre-MYR-602 viewer they replace — a narrowing nobody asked
+	// for, dressed as a widening.
 	"destinationAddress",
 	"destinationLatitude",
 	"destinationLongitude",
@@ -434,12 +522,26 @@ var vehicleStateViewerFields = []string{
 	"navTripDistanceRemaining",
 	// The accumulated live GPS trail behind the car on the map. Distinct from
 	// the DRIVES resource, which MYR-369 made owner-only — this is the live
-	// polyline of the trip the viewer is watching or sitting in, not the
-	// vehicle's stored history.
+	// polyline of the journey being watched, not the vehicle's stored history.
 	"driveTrailCoordinates",
-	// Wire freshness marker. A viewer must be able to tell live from stale.
-	"lastUpdated",
 }
+
+// vehicleStateLiveViewerFields is the allow-list for `ride_member` and
+// `trip_participant` — the plain-viewer list PLUS the location and navigation
+// groups.
+//
+// IT IS BYTE-FOR-BYTE THE PRE-MYR-602 VIEWER SET, and that identity is the
+// migration safety property: ride tracking (MYR-540) sees exactly what it saw
+// before, so a rider's map, ETA ladder and route line are untouched by the
+// narrowing. TestLiveRolesMatchThePreMYR602ViewerSet pins it.
+//
+// A trip participant holds this list FOR THE WHOLE WINDOW — parked, driving
+// with a destination, driving without one. Access is the window and nothing
+// else (client ruling, 2026-09-05); legs govern only the Live Activity.
+var vehicleStateLiveViewerFields = append(
+	append([]string(nil), vehicleStateViewerFields...),
+	vehicleStateLiveLocationFields...,
+)
 
 // vehicleStateOwnerOnlyFields enumerates every owner field that MYR-435 (and
 // MYR-279 before it, for `vin`) withholds from viewers. It exists so the
@@ -752,10 +854,49 @@ var vehicleSummaryOwnerFields = []string{
 // The owner list is COPIED before the append: appending straight onto it would
 // share backing array with vehicleSummaryOwnerFields and could overwrite an
 // owner entry the next time the owner list grows.
-var vehicleSummaryViewerFields = append(
-	append([]string(nil), vehicleSummaryOwnerFields...),
-	"sharePermission",
+// MYR-602 SUBTRACTS `location` — the first subtraction this list has ever
+// carried, and the reason it is now built by filtering rather than by a bare
+// append. See the ResourceVehicleSummary entry for the client decision and for
+// why the catalog coordinate had to move together with the streaming one.
+//
+// `location` is OPTIONAL in schemas/vehicle-summary.schema.json (nullable, and
+// already absent for a car that has never reported a position), so removing it
+// here cannot make a viewer row invalid against its own schema — the exact
+// failure mode the `name` paragraph above records.
+var vehicleSummaryViewerFields = removeField(
+	append(
+		append([]string(nil), vehicleSummaryOwnerFields...),
+		"sharePermission",
+	),
+	vehicleSummaryLiveLocationField,
 )
+
+// vehicleSummaryLiveLocationField is the single catalog field MYR-602 reserves
+// to the window-scoped roles. Named as a constant rather than written twice so
+// the subtraction below and the addition above cannot drift.
+const vehicleSummaryLiveLocationField = "location"
+
+// vehicleSummaryLiveViewerFields is the `ride_member` / `trip_participant`
+// catalog allow-list: the plain-viewer list with `location` put back. It is
+// byte-for-byte the pre-MYR-602 viewer list.
+var vehicleSummaryLiveViewerFields = append(
+	append([]string(nil), vehicleSummaryViewerFields...),
+	vehicleSummaryLiveLocationField,
+)
+
+// removeField returns a copy of fields with name removed. It exists so a
+// subtraction in this file is a stated operation with a name rather than a
+// hand-maintained second copy of a list that would drift the first time the
+// original grew.
+func removeField(fields []string, name string) []string {
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != name {
+			out = append(out, f)
+		}
+	}
+	return out
+}
 
 // driveSummaryFields is the per-row drive-list allow-list shared by
 // owner and viewer per rest-api.md §5.2.2.
