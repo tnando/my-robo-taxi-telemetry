@@ -177,12 +177,14 @@ func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) 
 
 	now := t.now()
 	state := tripContentState(tc, now)
+	// The LEG is REQUIRED in the attributes: without it the created card has no
+	// anchor to register its own update token against and can never be updated
+	// or ended — and the iOS struct declares it non-optional, so a payload
+	// missing it fails the decode and raises no card at all.
 	start := &TripActivityStart{
-		TripID:    tc.TripID,
-		VehicleID: tc.VehicleID,
-		// The LEG, without which the created card has no anchor to register
-		// its own update token against and can never be updated or ended.
+		TripID:      tc.TripID,
 		LegID:       tc.LegID,
+		VehicleID:   tc.VehicleID,
 		VehicleName: tc.VehicleName,
 	}
 

@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// §7.30.10 / §7.30.11 — the LEG anchor of §7.21's per-Activity path.
+// §7.21.7 — the LEG anchor of §7.21's per-Activity path,
+// `POST`/`DELETE /api/trip-legs/{legId}/activity-token`.
 //
 // The routes exist because push-to-start is only half a mechanism without them:
 // §7.30.8 registers the token that lets the server CREATE a card, ActivityKit
@@ -18,8 +20,11 @@ import (
 
 const legTestID = "cleg_01j9x8h2k4m6n8p0q2r4s6t9"
 
+// legTokenPath carries NO TRIP ID, deliberately: a leg belongs to exactly one
+// trip, so the authorization is resolved from the leg rather than restated by
+// the client.
 func legTokenPath() string {
-	return "/api/trips/" + tripTestID + "/legs/" + legTestID + "/activity-token"
+	return "/api/trip-legs/" + legTestID + "/activity-token"
 }
 
 // TestLegActivityTokenRegisters is the happy path, and it pins the two things
@@ -28,7 +33,11 @@ func legTokenPath() string {
 func TestLegActivityTokenRegisters(t *testing.T) {
 	const token = "8f3a91c0deadbeefcafef00dfeedface" //nolint:gosec // G101: a fixed test fixture, not a credential.
 
-	store := &fakeTripStore{trip: fixtureTrip()}
+	store := &fakeTripStore{
+		trip:            fixtureTrip(),
+		legAccessTripID: tripTestID,
+		legAccessOpen:   true,
+	}
 	handler := newTripTestHandler(t, store, true)
 
 	rec := tripRequest(t, handler, http.MethodPost, legTokenPath(),
@@ -41,8 +50,8 @@ func TestLegActivityTokenRegisters(t *testing.T) {
 		t.Fatalf("store saw %d leg registrations, want 1", store.legTokenCalls)
 	}
 	if store.lastLegTripID != tripTestID || store.lastLegID != legTestID {
-		t.Errorf("store got trip=%q leg=%q, want %q/%q — the leg must be scoped to the "+
-			"trip or a leg id from another journey would register a card on it",
+		t.Errorf("store got trip=%q leg=%q, want %q/%q — the trip id must come from the "+
+			"ACCESS PROBE, never from the caller, and the write must re-assert it",
 			store.lastLegTripID, store.lastLegID, tripTestID, legTestID)
 	}
 	if store.lastLegToken != token || !store.lastLegSandbox {
@@ -70,7 +79,9 @@ func TestLegActivityTokenRegisters(t *testing.T) {
 // trip read — and the refusal is 404, so the endpoint is not an oracle for trip
 // ids either.
 func TestLegActivityTokenRequiresMembership(t *testing.T) {
-	store := &fakeTripStore{err: ErrTripNotFound}
+	// The probe refuses: unknown leg, or a leg on somebody else's trip. ONE
+	// answer for both, so the endpoint cannot be used to discover leg ids.
+	store := &fakeTripStore{legAccessErr: ErrTripNotFound}
 	handler := newTripTestHandler(t, store, true)
 
 	rec := tripRequest(t, handler, http.MethodPost, legTokenPath(),
@@ -84,25 +95,67 @@ func TestLegActivityTokenRequiresMembership(t *testing.T) {
 	}
 }
 
-// TestLegActivityTokenRefusesAClosedLeg. The store's own guard asks two
-// questions in one statement — is the leg this trip's, and is it still open —
-// and both answer with the same sentinel on purpose: distinguishing them would
-// tell a caller whether a leg id they guessed exists on somebody's trip.
+// TestLegActivityTokenRefusesAClosedLeg is the OTHER refusal, and the two must
+// stay distinguishable.
+//
+// A stranger gets 404 and stops. A genuine MEMBER whose leg has ended gets 409
+// and ends the card locally — they hold a real card for a real leg of a real
+// trip, and telling them it does not exist would be false. Collapsing the two
+// would either confirm a guessed leg id to a stranger or make a legitimate
+// refusal unreadable.
+//
+// Both arms are covered: the probe reporting a closed leg, and the WRITE
+// refusing after a probe that said open — the race the SQL guard exists for.
 func TestLegActivityTokenRefusesAClosedLeg(t *testing.T) {
-	store := &fakeTripStore{trip: fixtureTrip(), legRegisterErr: ErrLiveActivityClosed}
+	tests := []struct {
+		name  string
+		store *fakeTripStore
+	}{
+		{
+			name:  "the probe reports the leg closed",
+			store: &fakeTripStore{legAccessTripID: tripTestID, legAccessOpen: false},
+		},
+		{
+			name: "the leg closes between the probe and the write",
+			store: &fakeTripStore{
+				legAccessTripID: tripTestID, legAccessOpen: true,
+				legRegisterErr: ErrLiveActivityClosed,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := newTripTestHandler(t, tt.store, true)
+			rec := tripRequest(t, handler, http.MethodPost, legTokenPath(),
+				`{"activityToken":"abc123"}`)
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("status = %d, want 409. Body: %s", rec.Code, rec.Body.String())
+			}
+			assertNoLegSubCode(t, rec)
+		})
+	}
+}
+
+// assertNoLegSubCode pins that the 409 carries no sub-code, matching §7.21.1's
+// own refusal: the client's action is the same whichever half of the guard
+// fired — end the Activity locally.
+func assertNoLegSubCode(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if sub := decodeTripError(t, rec).SubCode; sub != nil && *sub != "" {
+		t.Errorf("subCode = %q, want none", *sub)
+	}
+}
+
+func TestLegActivityTokenRefusalCarriesNoSubCode(t *testing.T) {
+	store := &fakeTripStore{legAccessTripID: tripTestID, legAccessOpen: false}
 	handler := newTripTestHandler(t, store, true)
 
 	rec := tripRequest(t, handler, http.MethodPost, legTokenPath(),
 		`{"activityToken":"abc123"}`)
-
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("status = %d, want 409. Body: %s", rec.Code, rec.Body.String())
+		t.Fatalf("status = %d, want 409", rec.Code)
 	}
-	// NO SUB-CODE, matching §7.21.1's own refusal: the client's action is the
-	// same whichever half of the guard fired — end the Activity locally.
-	if sub := decodeTripError(t, rec).SubCode; sub != nil && *sub != "" {
-		t.Errorf("subCode = %q, want none", *sub)
-	}
+	assertNoLegSubCode(t, rec)
 }
 
 // TestLegActivityTokenValidatesTheToken. The bound and the charset are §7.21.1's
@@ -122,15 +175,16 @@ func TestLegActivityTokenValidatesTheToken(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := &fakeTripStore{trip: fixtureTrip()}
+			store := &fakeTripStore{legAccessTripID: tripTestID, legAccessOpen: true}
 			handler := newTripTestHandler(t, store, true)
 
 			rec := tripRequest(t, handler, http.MethodPost, legTokenPath(), tt.body)
 			if rec.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400. Body: %s", rec.Code, rec.Body.String())
 			}
-			if store.legTokenCalls != 0 {
-				t.Errorf("a refused body still reached the store")
+			if store.legTokenCalls != 0 || store.legAccessCalls != 0 {
+				t.Errorf("a refused body still reached the store; the body is validated " +
+					"BEFORE the probe, so a malformed request costs no query")
 			}
 			// The refusal names the FIELD, never the VALUE: an error message is
 			// the one place a P1 value most reliably reaches a log without
@@ -148,7 +202,7 @@ func TestLegActivityTokenValidatesTheToken(t *testing.T) {
 // participant who has just LEFT must still be able to clear their registration
 // — and after leaving they no longer pass the membership read.
 func TestLegActivityTokenEndIsIdempotentAndUngated(t *testing.T) {
-	store := &fakeTripStore{err: ErrTripNotFound, legEnded: false}
+	store := &fakeTripStore{legAccessErr: ErrTripNotFound, legEnded: false}
 	handler := newTripTestHandler(t, store, true)
 
 	rec := tripRequest(t, handler, http.MethodDelete, legTokenPath(), "")
@@ -158,6 +212,10 @@ func TestLegActivityTokenEndIsIdempotentAndUngated(t *testing.T) {
 	}
 	if store.legEndCalls != 1 {
 		t.Fatalf("store saw %d end calls, want 1", store.legEndCalls)
+	}
+	if store.legAccessCalls != 0 {
+		t.Error("the DELETE ran the access probe; it must not — a participant who has " +
+			"just LEFT the trip would then be unable to clear their own registration")
 	}
 	var body activityEndedResponse
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
@@ -185,7 +243,7 @@ func TestLegActivityTokenEndReportsATransportFailure(t *testing.T) {
 // TestLegActivityTokenRoutesAnswer503WhenTripsAreOff. The kill switch switches
 // the feature off WHOLE, and these two routes are part of it.
 func TestLegActivityTokenRoutesAnswer503WhenTripsAreOff(t *testing.T) {
-	handler := newTripTestHandler(t, &fakeTripStore{trip: fixtureTrip()}, false)
+	handler := newTripTestHandler(t, &fakeTripStore{legAccessTripID: tripTestID, legAccessOpen: true}, false)
 
 	for _, method := range []string{http.MethodPost, http.MethodDelete} {
 		rec := tripRequest(t, handler, method, legTokenPath(), `{"activityToken":"abc123"}`)

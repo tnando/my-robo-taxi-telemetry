@@ -24,14 +24,21 @@ import (
 //	GET    /api/trips/{tripId}/drives
 //	POST   /api/trips/{tripId}/activity-start-token
 //	DELETE /api/trips/{tripId}/activity-start-token
-//	POST   /api/trips/{tripId}/legs/{legId}/activity-token
-//	DELETE /api/trips/{tripId}/legs/{legId}/activity-token
+//	POST   /api/trip-legs/{legId}/activity-token
+//	DELETE /api/trip-legs/{legId}/activity-token
 //
-// The last PAIR is the LEG anchor of §7.21's per-Activity path, and it is the
-// other half of push-to-start: §7.30.8 registers the token that lets the server
-// CREATE a card, and these file the per-Activity token that addresses the card
-// once it exists. Without them the server can raise a leg's card and never
-// update or end it.
+// The last PAIR is the LEG anchor of §7.21's per-Activity path (§7.21.7), and
+// it is the other half of push-to-start: §7.30.8 registers the token that lets
+// the server CREATE a card, and these file the per-Activity token that
+// addresses the card once it exists. Without them the server can raise a leg's
+// card and never update or end it.
+//
+// THEY ARE MOUNTED HERE rather than beside the ride token routes, and their
+// path is `/api/trip-legs/…` rather than a segment of `/api/trips/{tripId}/…`:
+// the anchor is a LEG, the authorization is resolved from the leg, and the kill
+// switch is TRIPS_ENABLED. A leg belongs to exactly one trip, so putting the
+// trip id in the path would ask the client to prove something the server
+// already knows.
 //
 // ALWAYS MOUNTED. The kill switch is passed INTO the handler rather than
 // deciding whether to register the routes, and the difference matters: an
@@ -80,8 +87,8 @@ func setupTripEndpoints(
 	deps.srv.HandleFunc("GET /api/trips/{tripId}/drives", handler.ServeDrives)
 	deps.srv.HandleFunc("POST /api/trips/{tripId}/activity-start-token", handler.ServeRegisterActivityToken)
 	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", handler.ServeDeleteActivityToken)
-	deps.srv.HandleFunc("POST /api/trips/{tripId}/legs/{legId}/activity-token", handler.ServeRegisterLegActivityToken)
-	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/legs/{legId}/activity-token", handler.ServeEndLegActivityToken)
+	deps.srv.HandleFunc("POST /api/trip-legs/{legId}/activity-token", handler.ServeRegisterLegActivityToken)
+	deps.srv.HandleFunc("DELETE /api/trip-legs/{legId}/activity-token", handler.ServeEndLegActivityToken)
 
 	logger.Info("trip endpoints enabled (§7.30)",
 		slog.Int("routes", 11),
@@ -178,11 +185,21 @@ func (a *tripStoreAdapter) DeleteTripActivityStartToken(ctx context.Context, tri
 	return translateTripError(a.repo.DeleteActivityStartToken(ctx, tripID, userID))
 }
 
-// The LEG anchor of §7.21's per-Activity path (§7.30.10 / §7.30.11). It reaches
-// a DIFFERENT repository from everything above — go_live_activities rather than
+// The LEG anchor of §7.21's per-Activity path (§7.21.7). All three reach a
+// DIFFERENT repository from everything above — go_live_activities rather than
 // go_trips — because the two tokens are two different things: the start token
 // is the app's capability to create a card, this one addresses one card that
 // already exists.
+func (a *tripStoreAdapter) TripLegAccess(
+	ctx context.Context, legID, userID string,
+) (tripID string, open bool, err error) {
+	if a.activities == nil {
+		return "", false, errLegActivityRegistryUnwired
+	}
+	tripID, open, err = a.activities.TripLegAccess(ctx, legID, userID)
+	return tripID, open, translateTripError(err)
+}
+
 func (a *tripStoreAdapter) RegisterTripLegActivityToken(
 	ctx context.Context, tripID, legID, userID, token string, sandbox bool,
 ) error {

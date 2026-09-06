@@ -45,7 +45,7 @@ func translateTripError(err error) error {
 	case errors.Is(err, store.ErrTripEnded):
 		return fmt.Errorf("%w: %w", telemetry.ErrTripEnded, err)
 	case errors.Is(err, store.ErrLiveActivityClosed):
-		// The LEG anchor's refusal (§7.30.10): the leg ended, or it is not this
+		// The LEG anchor's refusal (§7.21.7): the leg ended, or it is not this
 		// trip's. Translated here for the same reason the six above are — the
 		// handler package cannot see internal/store's sentinels — and onto the
 		// SAME handler sentinel the ride path uses, because the answer is the

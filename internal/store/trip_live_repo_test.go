@@ -411,7 +411,7 @@ func TestRegisterLegActivity_UpsertsOnTheLegUserPair(t *testing.T) {
 	}
 }
 
-// TestRegisterLegActivity_RefusesALegFromAnotherTrip is the §7.30.10 route's
+// TestRegisterLegActivity_RefusesALegFromAnotherTrip is the §7.21.7 route's
 // second guard, and it lives in the STATEMENT rather than in the handler.
 //
 // The handler establishes that the caller is on the TRIP. Nothing there
@@ -448,6 +448,113 @@ func TestRegisterLegActivity_RefusesALegFromAnotherTrip(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Errorf("%d rows were written against another trip's leg", len(rows))
+	}
+}
+
+// TestTripLegAccess_IsTheRouteGate covers §7.21.7's whole authorization, which
+// the route can express no other way: `/api/trip-legs/{legId}/activity-token`
+// carries no trip id, so who-may-register is resolved FROM the leg.
+//
+// The two refusals must stay distinguishable, and the test asserts both
+// directions: a stranger (and an unknown leg) get ErrTripNotFound so the
+// endpoint answers 404 identically for both and cannot be used to discover leg
+// ids; a genuine MEMBER whose leg has ended gets a row with open=false, which
+// the handler turns into the 409 that tells them to end the card locally.
+func TestTripLegAccess_IsTheRouteGate(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	const tripID, vehicleID, ownerID = "ctrip0602acc", "cveh0602acc", "cowner0602acc"
+	now := time.Now().UTC()
+	seedTripWindow(t, tripID, vehicleID, ownerID, now.Add(-time.Hour), now.Add(time.Hour))
+
+	// A live participant, and one whose grant the owner suspended.
+	for _, p := range []struct{ user, suspended string }{
+		{"cp0602acclive", ""},
+		{"cp0602accsusp", "now"},
+	} {
+		var suspendedAt any
+		if p.suspended != "" {
+			suspendedAt = now
+		}
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_vehicle_shares (id, vehicle_id, owner_user_id, label, permission,
+			   code, status, expires_at, accepted_by_user_id, suspended_at)
+			 VALUES ('sh_' || $1, $2, $3, 'Seeded', 'live', 'code_' || $1, 'accepted',
+			         NOW() + INTERVAL '30 days', $1, $4)
+			 ON CONFLICT (id) DO UPDATE SET suspended_at = $4`,
+			p.user, vehicleID, ownerID, suspendedAt); err != nil {
+			t.Fatalf("seed share for %s: %v", p.user, err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_trip_participants (trip_id, user_id, share_id)
+			 VALUES ($1, $2, 'sh_' || $2) ON CONFLICT (trip_id, user_id) DO UPDATE SET left_at = NULL`,
+			tripID, p.user); err != nil {
+			t.Fatalf("seed participant %s: %v", p.user, err)
+		}
+	}
+
+	legs := newTripLegRepo(t)
+	leg, err := legs.StartLeg(ctx, tripID, vehicleID, "Grand Canyon Village", now)
+	if err != nil {
+		t.Fatalf("StartLeg: %v", err)
+	}
+	activities := newLiveActivityRepo(t)
+
+	admitted := []struct {
+		name   string
+		userID string
+	}{
+		{"the owner, who holds no share on their own car", ownerID},
+		{"a live participant", "cp0602acclive"},
+	}
+	for _, tt := range admitted {
+		t.Run(tt.name, func(t *testing.T) {
+			gotTrip, open, err := activities.TripLegAccess(ctx, leg.ID, tt.userID)
+			if err != nil {
+				t.Fatalf("TripLegAccess: %v", err)
+			}
+			if gotTrip != tripID || !open {
+				t.Errorf("trip=%q open=%v, want %q/true", gotTrip, open, tripID)
+			}
+		})
+	}
+
+	refused := []struct {
+		name   string
+		legID  string
+		userID string
+	}{
+		{"a stranger", leg.ID, "cstranger0602"},
+		{"a SUSPENDED grantee, whose membership row is untouched", leg.ID, "cp0602accsusp"},
+		{"an unknown leg", "cleg_does_not_exist", ownerID},
+	}
+	for _, tt := range refused {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := activities.TripLegAccess(ctx, tt.legID, tt.userID)
+			if !errors.Is(err, store.ErrTripNotFound) {
+				t.Errorf("TripLegAccess = %v, want ErrTripNotFound — one answer for "+
+					"'no such leg' and 'not yours', so the route cannot be used to "+
+					"discover leg ids", err)
+			}
+		})
+	}
+
+	// A CLOSED leg for a genuine member is a DIFFERENT refusal: the row comes
+	// back, with open=false, and the handler answers 409 rather than 404.
+	if err := legs.EndLeg(ctx, leg.ID, now.Add(time.Minute), true); err != nil {
+		t.Fatalf("EndLeg: %v", err)
+	}
+	gotTrip, open, err := activities.TripLegAccess(ctx, leg.ID, "cp0602acclive")
+	if err != nil {
+		t.Fatalf("TripLegAccess on a closed leg = %v, want a row with open=false — a member "+
+			"holding a real card must be told to END it, not that it never existed", err)
+	}
+	if gotTrip != tripID || open {
+		t.Errorf("trip=%q open=%v, want %q/false", gotTrip, open, tripID)
 	}
 }
 

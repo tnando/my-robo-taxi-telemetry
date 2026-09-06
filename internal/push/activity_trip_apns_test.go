@@ -52,8 +52,8 @@ func TestPushToStartPayload(t *testing.T) {
 		ContentState:  tripContentState(tc, now),
 		Timestamp:     now,
 		Start: &TripActivityStart{
-			TripID: tc.TripID, VehicleID: tc.VehicleID,
-			LegID: tc.LegID, VehicleName: tc.VehicleName,
+			TripID: tc.TripID, LegID: tc.LegID,
+			VehicleID: tc.VehicleID, VehicleName: tc.VehicleName,
 		},
 	})
 
@@ -220,5 +220,47 @@ func TestTripActivityExpirations(t *testing.T) {
 				t.Errorf("expiration = %s after the send, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPushToStartAttributesAlwaysCarryLegID pins that `legId` is REQUIRED
+// rather than merely usually present.
+//
+// The iOS `TripActivityAttributes` declares it non-optional, so a payload
+// missing the key fails the decode and NO CARD APPEARS — deliberately, because
+// a card with no anchor could never be updated or ended, and a silently
+// un-endable card on a lock screen is worse than none. The failure mode this
+// guards is therefore an `omitempty` added to the struct in a tidy-up: an empty
+// leg id would then drop the key entirely and every card on that build would
+// silently stop being raised, with APNs answering 200 throughout.
+func TestPushToStartAttributesAlwaysCarryLegID(t *testing.T) {
+	now := time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
+	tc := tripLegFixture()
+
+	for _, legID := range []string{"leg-1", ""} {
+		aps := decodeAPS(t, ActivityNotification{
+			ActivityToken: "pts-token",
+			Event:         ActivityEventStart,
+			ContentState:  tripContentState(tc, now),
+			Timestamp:     now,
+			Start: &TripActivityStart{
+				TripID: tc.TripID, LegID: legID,
+				VehicleID: tc.VehicleID, VehicleName: tc.VehicleName,
+			},
+		})
+		attrs, ok := aps["attributes"].(map[string]any)
+		if !ok {
+			t.Fatalf("aps.attributes missing: %v", aps["attributes"])
+		}
+		got, present := attrs["legId"]
+		if !present {
+			t.Errorf("legId=%q was dropped from the attributes; the iOS struct declares it "+
+				"non-optional, so the device would fail the decode and no card would appear",
+				legID)
+			continue
+		}
+		if got != legID {
+			t.Errorf("legId = %v, want %q", got, legID)
+		}
 	}
 }

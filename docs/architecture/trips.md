@@ -286,9 +286,12 @@ app registers once per trip. The full envelope, the `attributes-type` constant,
 the three attributes, the content-state and the fifteen-minute expiration are
 specified in `rest-api.md` **§7.21.7**. The attributes are **four** — `tripId`,
 `vehicleId`, `vehicleName` and `legId` — and the last is not decoration: the
-card registers its own update token against the LEG (§7.30.10), and a device
-that was asleep when the leg opened cannot derive which leg its card is for.
-Without it the server can create a card and never update or end it.
+card registers its own update token against the LEG through the dedicated
+`POST /api/trip-legs/{legId}/activity-token` (§7.21.7), and a device that was
+asleep when the leg opened cannot derive which leg its card is for. It is
+REQUIRED, not optional: the iOS struct declares it non-optional, so a payload
+missing it fails the decode and no card appears — the deliberate direction,
+because a card with no anchor could never be updated or ended.
 
 **Two tables, two meanings of a `410`:**
 
@@ -408,11 +411,11 @@ Two smaller seams are wired the same fail-closed way and are worth knowing about
 - **`ErrLiveActivityRideClosed` is `ErrLiveActivityClosed`.** Both anchors return it and the HTTP answer is identical; only the name lied.
 - **`v1Roles` is derived from `auth.AllRoles`.** It listed two of four. The consequence was a map growth, but the declaration READS as an enumeration of the vocabulary and a reader would have believed it.
 - **`data-lifecycle.md` carries step 8g**, its four `account_deleted` counts, a retention-table row and a new §1.4.7 — the Go comments cited a section that did not exist.
-- **The per-Activity update token has a route.** `RegisterLegActivity` and `EndLegActivity` had no production caller at all, so the whole Live Activity half addressed zero rows: the server could raise a card and never update or end it. §7.30.10 / §7.30.11 are that route pair, and the push-to-start's `attributes` now carry `legId` so the device can name the anchor.
+- **The per-Activity update token has a route.** `RegisterLegActivity` and `EndLegActivity` had no production caller at all, so the whole Live Activity half addressed zero rows: the server could raise a card and never update or end it. `POST`/`DELETE /api/trip-legs/{legId}/activity-token` (§7.21.7) are that route pair — a DEDICATED path rather than a leg id smuggled into §7.21.1's ride route, and one carrying no trip id because a leg belongs to exactly one trip — and the push-to-start's `attributes` now carry a REQUIRED `legId` so the device can name the anchor.
 
 ## 13. References
 
-- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the eleven routes — nine trip routes plus the two LEG token routes of §7.30.10 / §7.30.11 — the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
+- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the nine trip routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
 - **Schemas:** [`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json), and the MYR-602 amendments to [`vehicle-summary.schema.json`](../contracts/schemas/vehicle-summary.schema.json) (`activeTripId`, the rewritten `location` RBAC text), [`vehicle-state.schema.json`](../contracts/schemas/vehicle-state.schema.json) (the per-field MYR-602 visibility notes) and [`live-activity.schema.json`](../contracts/schemas/live-activity.schema.json) (the `ride` \| `trip` kind).
 - **Classification:** [`data-classification.md`](../contracts/data-classification.md) §1.25–§1.28, §1.18 (`trip_leg_id`), §3.1 (two new encrypted columns), §3.2 (the push-to-start token), §6 (counts).
 - **Schema:** [`internal/store/migrations/0047_trips.up.sql`](../../internal/store/migrations/0047_trips.up.sql) — the header comment carries the four-table argument and the CG-DL-9 FK reasoning.

@@ -720,8 +720,8 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `GET` | `/api/trips/{tripId}/drives` | The window's drives in the §7.2 shape and with the §7.2 cursor — **the only non-owner drive read on the platform** (§7.30.7) | Bearer + owner or live participant of the trip | FR-3.2, FR-9.1, FR-9.2, MYR-602 |
 | `POST` | `/api/trips/{tripId}/activity-start-token` | Register (or rotate) this device's ActivityKit **push-to-start** token for the trip's per-leg Live Activity — `204`, upsert (§7.30.8) | Bearer + owner or live participant of the trip (**the membership read IS the gate**) | FR-9.3, NFR-3.21, MYR-602 |
 | `DELETE` | `/api/trips/{tripId}/activity-start-token` | Clear this caller's push-to-start token — `204`, idempotent, **no membership read** (§7.30.9) | Bearer (self); deletes only the caller's own row | FR-9.3, NFR-3.21, MYR-602 |
-| `POST` | `/api/trips/{tripId}/legs/{legId}/activity-token` | Register (or rotate) the ActivityKit **per-Activity update token** for the card running on this leg — `200 {registered, sandbox}`, upsert on `(leg, user)` (§7.30.10). **§7.21.1's shapes verbatim, with a leg anchor** | Bearer + owner or live participant of the trip (**the membership read IS the gate**) | FR-9.3, NFR-3.21, MYR-602 |
-| `DELETE` | `/api/trips/{tripId}/legs/{legId}/activity-token` | End this caller's card on the leg — `200 {ended}`, idempotent, **no membership read** (§7.30.11) | Bearer (self); ends only the caller's own card | FR-9.3, NFR-3.21, MYR-602 |
+| `POST` | `/api/trip-legs/{legId}/activity-token` | Register (or rotate) the ActivityKit **per-Activity update token** for the card running on this leg — `200 {registered, sandbox}`, upsert on `(leg, user)` (**§7.21.7**). **§7.21.1's body and responses verbatim, with a leg anchor and no trip id in the path** | Bearer + owner or live participant of the LEG'S trip, resolved from the leg; `404` to everyone else | FR-9.3, NFR-3.21, MYR-602 |
+| `DELETE` | `/api/trip-legs/{legId}/activity-token` | End this caller's card on the leg — `200 {ended}`, idempotent, **no access probe** (**§7.21.7**) | Bearer (self); ends only the caller's own card | FR-9.3, NFR-3.21, MYR-602 |
 | `POST` | `/api/auth/apple` | Native Sign in with Apple → ES256 access + refresh pair | None (pre-auth; per-IP rate-limited) | FR-6.1, MYR-193 |
 | `POST` | `/api/auth/refresh` | Single-use refresh-token rotation | Refresh token in body (pre-auth; per-IP rate-limited) | FR-6.2, MYR-193 |
 | `POST` | `/api/auth/revoke` | Revoke a refresh-token family (sign-out) | Refresh token in body (pre-auth; per-IP rate-limited) | MYR-193 |
@@ -5246,9 +5246,9 @@ A push-to-start rejection routed to the ride path's `dropActivity` would delete 
     "attributes-type": "TripActivityAttributes",
     "attributes": {
       "tripId": "ctrip_…",
+      "legId": "cleg_…",
       "vehicleId": "cveh_…",
-      "vehicleName": "Optimus",
-      "legId": "cleg_…"
+      "vehicleName": "Optimus"
     },
     "content-state": {
       "v": 1,
@@ -5268,18 +5268,24 @@ A push-to-start rejection routed to the ride path's `dropActivity` would delete 
 
 **Why those four attributes and no more.** Attributes are decoded ONCE and can never be updated, so a value belongs there only if it cannot change while the card is alive. `tripId` and `vehicleId` are identifiers the widget needs and cannot derive. `vehicleName` is there so the card is legible the instant it appears, before any update arrives; it is *also* in the content-state, so a nickname edit corrects it. **The TRIP NAME is deliberately NOT an attribute** even though it is equally static: it is P1 user content, and the content-state already carries it under a key the client reads on every push — one place, one classification argument.
 
-**`legId` IS THE KEY WITHOUT WHICH THE UPDATE PATH IS ONE-WAY, and it is the one addition this section makes over v0.41.0.** ActivityKit hands the app a per-Activity UPDATE token the moment the card is created, and the server has nowhere to file it: registration is anchored on the LEG (§7.30.10, `go_live_activities.trip_leg_id`), and **the device cannot derive which leg its card is for** — it was asleep when the leg opened, and a trip has many legs. Without it the server can create a card and never update or end it, so every leg's card would run to ActivityKit's own ~8-hour ceiling still saying the car was driving somewhere it reached hours before. It qualifies on the same never-changes rule the other three meet, exactly rather than conveniently: **an Activity IS one leg** — a new leg is a new card, and a card whose leg ended is ended. It is P0, an opaque server-minted id like the two beside it.
+**ALL FOUR ATTRIBUTES ARE REQUIRED.** The iOS `TripActivityAttributes` declares each of them non-optional, so a payload missing any one **fails the decode and no card appears** — deliberately, and the deliberate part is `legId`: a card raised without its anchor could never be updated or ended, and a silently un-endable card on a lock screen is worse than no card. The server emits all four unconditionally (no `omitempty` on any of them).
 
-> **CONTRACT NOTE (DV-27).** `legId` is not in contracts **v0.41.1**, whose `LiveActivityContentState` description still names `{tripId, vehicleId, vehicleName}` in prose. The attributes object is **not a JSON-Schema'd shape** on that file — it is described, not declared — so emitting a fourth key breaks no validation and no installed decoder (Swift ignores unknown attribute keys it does not declare). What is missing is the upstream documentation, and the iOS `TripActivityAttributes` struct must carry `legId` in the same release. **Changing the attributes struct is an iOS change and a server change together, never one of the two.**
+**`legId` IS THE KEY WITHOUT WHICH THE UPDATE PATH IS ONE-WAY, and it is the one addition this section makes over v0.41.1.** ActivityKit hands the app a per-Activity UPDATE token the moment the card is created, and the server has nowhere to file it: registration is anchored on the LEG (`POST /api/trip-legs/{legId}/activity-token` below, over `go_live_activities.trip_leg_id`), and **the device cannot derive which leg its card is for** — it was asleep when the leg opened, and a trip has many legs. Without it the server can create a card and never update or end it, so every leg's card would run to ActivityKit's own ~8-hour ceiling still saying the car was driving somewhere it reached hours before. It qualifies on the same never-changes rule the other three meet, exactly rather than conveniently: **an Activity IS one leg** — a new leg is a new card, and a card whose leg ended is ended. It is P0, an opaque server-minted id like the two beside it.
+
+> **CONTRACT NOTE (DV-27).** `legId` is not in contracts **v0.41.1**, whose `LiveActivityContentState` description still names `{tripId, vehicleId, vehicleName}` in prose. The attributes object is **not a JSON-Schema'd shape** on that file — it is described, not declared — so emitting a fourth key breaks no validation. What it DOES break is an installed build whose struct lacks it, in the other direction from the usual: because the field is non-optional on the iOS side, **server and client must ship together**, and until they have, a card is raised only for builds that declare it. That is the chosen failure — no card rather than an unmanageable one. **Changing the attributes struct is an iOS change and a server change in one release, never one of the two.**
 
 **`apns-expiration` is FIFTEEN MINUTES on a start**, and it is a third horizon rather than a reuse of either existing one (§7.21.4). Pinned to the 3-minute stale-date like an ordinary update, a phone in a tunnel at the moment a leg begins would never get the card and nothing would retry — the updater only pushes to Activities that already exist. Given the `end`'s day, a card would materialise for a leg that finished hours ago, with no update and no end coming, which is worse than never appearing. Fifteen minutes outlasts a tunnel and stays inside a plausible leg.
 
-**AFTER THE DEVICE STARTS THE ACTIVITY it registers the card's own update token through the EXISTING per-Activity path**, extended to accept a leg anchor — **`POST /api/trips/{tripId}/legs/{legId}/activity-token` (§7.30.10)**, with `DELETE` on the same path as §7.30.11. Both ids come straight off the attributes the push-to-start delivered, which is what `legId` is there for.
+##### The card's own update token — `POST` / `DELETE /api/trip-legs/{legId}/activity-token`
 
-**The request and response shapes are §7.21.1's and §7.21.2's VERBATIM** — same `activityToken` body key, same optional `sandbox`, same 1–256-character and hexadecimal validation, same `{registered, sandbox}` and `{ended}` responses, same `409` on a closed anchor, same never-echo-the-token rule. An installed client's ride and trip registration code is therefore ONE implementation with two URLs, which is the whole content of "the existing per-Activity path, extended".
+**AFTER THE DEVICE STARTS THE ACTIVITY it registers the card's own update token.** The `legId` it needs came in the attributes above, which is what that key is for.
+
+**A DEDICATED ROUTE, NOT AN OVERLOADED RIDE ONE.** The obvious alternative was to let §7.21.1's `/api/ride-requests/{id}/activity-token` accept a leg id in its path. It is **rejected**: that path's segment is typed by its name, the handler behind it resolves a RIDE and applies ride-shaped guards (a terminal status, a lapsed reservation), and a caller passing the other kind of id would meet a `404` whose meaning depended on which table the server happened to look in first. **Two anchors, two routes, one BODY** — which is where the sharing actually belongs.
+
+**THE PATH CARRIES NO TRIP ID, deliberately.** A leg belongs to exactly one trip, so requiring the client to restate it would ask it to prove something the server already knows — and a client that got the pair wrong would be refused for a reason with nothing to do with its card. **Who may register is resolved FROM the leg**, in one statement.
 
 ```
-POST /api/trips/ctrip_…/legs/cleg_…/activity-token
+POST /api/trip-legs/cleg_…/activity-token
 Authorization: Bearer <jwt>
 
 { "activityToken": "8f3a91c0…", "sandbox": true }
@@ -5287,9 +5293,29 @@ Authorization: Bearer <jwt>
 200 { "registered": true, "sandbox": true }
 ```
 
-The registration is guarded on the **LEG being open AND belonging to the named trip** (`ended_at IS NULL AND trip_id = …`), asked in the same statement so the two share one refusal and one race — the same question §7.21.1's guard asks about a ride, in the leg's vocabulary. A refusal is the same `409` with the same meaning: end the Activity locally. **The two conditions are deliberately indistinguishable in the response**, because telling them apart would say whether a leg id the caller guessed exists on somebody's trip. `alerted_phase` seeds at 0 rather than at a status-derived rung, because the six-rung ladder of §7.21.4 is a RIDE ladder and a leg has none of those states.
+```
+DELETE /api/trip-legs/cleg_…/activity-token
+Authorization: Bearer <jwt>
 
-**The POST is gated on trip membership and the DELETE is not**, exactly as §7.30.8 and §7.30.9 are, and for the same reason: registering grants the server permission to write to a phone's lock screen about this trip, while deleting only ever removes the caller's own row — and a participant who has just LEFT must still be able to clear their registration, which the membership read would refuse them.
+200 { "ended": true }
+```
+
+**The body and both responses are §7.21.1's and §7.21.2's VERBATIM** — the unchanged `RegisterLiveActivityRequest` `{activityToken, sandbox}`, the same 1–256-character and **hexadecimal** validation, the same `{registered, sandbox}` and `{ended}` shapes, the same never-echo-the-token rule. An installed client's ride and trip registration code is therefore **one implementation with two URLs**, which is the whole content of "the existing per-Activity path, extended".
+
+**THE TWO REFUSALS ARE DIFFERENT ANSWERS AND STAY DISTINGUISHABLE:**
+
+| Condition | Status | Meaning to the client |
+|---|---|---|
+| Unknown leg, **or** a leg on a trip the caller is not on | `404 not_found` | Stop. **One answer for both**, so the route cannot be used to discover leg ids |
+| The caller IS on the leg's trip, and the leg has **ended** | `409 conflict` (no sub-code) | **End the Activity locally** — the same instruction §7.21.1's `409` carries |
+
+Collapsing them would either confirm a guessed leg id to a stranger, or tell a member holding a real card that it never existed. The membership arm re-joins the live share (`status = 'accepted' AND suspended_at IS NULL`, `left_at IS NULL`) exactly as every other trips surface does, so a departed or suspended person is refused here as they are refused a push, a card and a coordinate; **the owner is admitted with no share**, holding none on their own car. The write then re-asserts the trip alongside `ended_at IS NULL`, so a leg that closes between the check and the write is refused by the statement rather than by a check that has already gone stale — the same `409`.
+
+`alerted_phase` seeds at 0 rather than at a status-derived rung, because the six-rung ladder of §7.21.4 is a RIDE ladder and a leg has none of those states.
+
+**The `POST` is gated and the `DELETE` is not**, exactly as §7.30.8 and §7.30.9 are, and for the same reason: registering grants the server permission to write to a phone's lock screen, while deleting only ever removes the caller's own row — and **a participant who has just LEFT must still be able to clear their registration**, which the gate would refuse them. `{ended: false}` covers both *"already ended"* and *"never registered"*, deliberately indistinguishable.
+
+**The kill switch applies.** `TRIPS_ENABLED=false` answers `503` here as on every §7.30 route: a feature that can be switched off has to be switched off whole.
 
 **The content-state is the SAME shape, parameterised.** `status` already carries the leg's state, `destination` already carries where the car is headed, `eta` already carries when it arrives, `asOf` already says when that was true. Two optional keys were added and `v` STAYS 1: `kind` (absent = `ride`, permanently) and `tripName`. An installed pre-v0.41.0 build decodes a leg's payload unchanged and renders it as the ride card it already knows — the correct degradation, because every field it reads still means what it meant.
 
@@ -6085,7 +6111,7 @@ Nine routes on one handler, and one sentence carries the feature: **a trip is a 
 
 **A trip creates NO new vehicle relationship.** Participants are chosen from the car's **already-accepted** `go_vehicle_shares` grants — that is where the picker's candidates come from — and the trip decides only what that existing grant *means between two instants*. The consequence is structural rather than procedural: **trip access can never outlive the share**, because every access query re-joins the live grant (`status = 'accepted' AND suspended_at IS NULL`) rather than trusting the participant row.
 
-**ONE HANDLER TYPE serves all eleven** (nine here, plus the two LEG token routes of §7.30.10 / §7.30.11), because all of them share the same three things — the token validator, the store, and the 404-not-403 rule below. Eleven constructors would be eleven chances to wire one of them without the rule. The composition root is [`cmd/telemetry-server/wiring_trips.go`](../../cmd/telemetry-server/wiring_trips.go); the aggregate is `store.TripRepo` (migration **0047**), and its classification is [`data-classification.md`](data-classification.md) §1.25–§1.28. The architecture note is [`docs/architecture/trips.md`](../architecture/trips.md).
+**ONE HANDLER TYPE serves all nine**, and the same type also serves the two LEG token routes of **§7.21.7** (`/api/trip-legs/{legId}/activity-token`) — mounted here rather than beside the ride token routes because their authorization is a trip's and their kill switch is `TRIPS_ENABLED`. All eleven share the same three things — the token validator, the store, and the 404-not-403 rule below — and eleven constructors would be eleven chances to wire one of them without the rule. The composition root is [`cmd/telemetry-server/wiring_trips.go`](../../cmd/telemetry-server/wiring_trips.go); the aggregate is `store.TripRepo` (migration **0047**), and its classification is [`data-classification.md`](data-classification.md) §1.25–§1.28. The architecture note is [`docs/architecture/trips.md`](../architecture/trips.md).
 
 ##### The 404-not-403 rule
 
@@ -6139,7 +6165,7 @@ An accepted **share** ([MYR-184](https://linear.app/myrobotaxi/issue/MYR-184)) b
 
 ##### Kill switch `TRIPS_ENABLED`
 
-Unset is ON. `TRIPS_ENABLED=false` makes **every one of the eleven routes** answer `503 service_unavailable`, reads included: a feature that can be switched off has to be switched off whole, and leaving `GET` alive would show an owner a live trip card whose every button returns an error. Anything `ParseBool` rejects **stops the process at boot** rather than being read as "off" — a typo that silently disabled a feature would be indistinguishable from an intentional shutdown.
+Unset is ON. `TRIPS_ENABLED=false` makes **every one of the nine routes — and the two §7.21.7 leg-token routes** — answer `503 service_unavailable`, reads included: a feature that can be switched off has to be switched off whole, and leaving `GET` alive would show an owner a live trip card whose every button returns an error. Anything `ParseBool` rejects **stops the process at boot** rather than being read as "off" — a typo that silently disabled a feature would be indistinguishable from an intentional shutdown.
 
 **`503`, NOT `404`.** The routes are **always mounted**; the switch is passed INTO the handler rather than deciding whether to register. An unmounted route is a `404`, which tells a client the feature does not exist — and some clients cache that decision. A mounted route with the switch off says *"not right now"*, which is the true thing. The switch is also checked **before authentication**: when the feature is off the answer is the same for everybody, and there is no reason to validate a token to say so.
 
@@ -6410,69 +6436,18 @@ No row removed is the same answer as one row removed.
 
 **And it would break the case the endpoint most needs to serve: a participant who has just LEFT must still be able to clear their token — and after leaving they no longer pass the membership read.** A registration that could be created and not withdrawn is a lock-screen capability with no off switch.
 
-#### 7.30.10 `POST /api/trips/{tripId}/legs/{legId}/activity-token` — register the card's update token
-
-> **Anchored:** FR-9.3, NFR-3.21. Implemented by [MYR-602](https://linear.app/myrobotaxi/issue/MYR-602). **DV-27: not in contracts v0.41.1** — the trip half of §7.21's per-Activity path, whose shapes it reuses exactly.
-
-**THE OTHER HALF OF PUSH-TO-START, and without it the leg card is a one-way surface.** §7.30.8 registers the token that lets the SERVER create a card; ActivityKit then hands the app a second, per-**Activity** token addressing that one running card, and this is where it is filed. With no route for it the server could raise a card and never update or end it — every leg's card holding its opening state until ActivityKit's own ~8-hour ceiling removed it, still saying the car was driving somewhere it reached hours before.
-
-**Two tokens, two tables, two meanings of a `410`** — see §7.21.7's table. Nothing on this route touches `go_trip_activity_tokens`.
-
-##### Request — §7.21.1's body, verbatim
-
-```json
-{ "activityToken": "8f3a91c0…", "sandbox": true }
-```
-
-`activityToken` is required, 1–256 characters, **hexadecimal** (the charset check is a security control as much as a validation: the value is interpolated into the APNs request path, and refusing a shape that could not address a device means the pathological input never enters the system). `sandbox` is optional and defaults to production. **Strict decode** — an unknown field is a `400`.
-
-##### Response — 200
-
-```json
-{ "registered": true, "sandbox": true }
-```
-
-**The token is never echoed.** It is a P1 capability and the caller already knows what it sent; echoing puts it in every client log and proxy trace. Same rule, same reason, as §7.21.1 and §7.17.
-
-##### The guard, and why its two halves are indistinguishable
-
-The upsert's own `SELECT` requires the leg to **belong to the named trip** AND to still be **open** (`ended_at IS NULL`) — two questions in one statement, so they share one refusal and one race. A miss is `409 conflict`, with **no sub-code**, meaning exactly what §7.21.1's `409` means: *end the Activity locally*.
-
-**The two halves answer alike ON PURPOSE.** Distinguishing "this leg has ended" from "this leg is not on your trip" would tell a caller whether a leg id they guessed exists on somebody else's journey. The client's action is the same either way.
-
-**Upsert on `(leg, user)`**, because ActivityKit rotates an Activity's update token mid-life and expects the server to switch to it. A rotation is an ordinary re-registration and it clears any end tombstone — a client that re-registers is telling us it has a live card again.
-
-**The membership read is the gate**, as on §7.30.8: registering authorises the server to write to this phone's lock screen about this trip, and `GET`'s `404`-for-non-members means the endpoint is not an oracle for trip ids either.
-
-#### 7.30.11 `DELETE /api/trips/{tripId}/legs/{legId}/activity-token` — end the caller's card
-
-> **Anchored:** FR-9.3, NFR-3.21. No request body. **DV-27**, as above.
-
-##### Response — 200, IDEMPOTENT
-
-```json
-{ "ended": false }
-```
-
-`false` covers both *"already ended"* and *"never registered"*, **deliberately indistinguishable**: the client's own end and a server-side end race by design and both are correct.
-
-**⚠ NO MEMBERSHIP READ, UNLIKE THE `POST`**, for §7.30.9's reason exactly — the operation only ever ends the caller's own card, so the worst a stranger achieves is ending a card they do not have, and a participant who has just LEFT must still be able to clear their registration.
-
-**A `200` is the answer to "there was nothing to end", never to "the database is down".** A transport failure is a `500`: telling a client its card was deregistered when it was not leaves the server pushing to it.
-
-##### Errors — one table for all eleven routes
+##### Errors — one table for all nine routes
 
 **ONE MAPPING FOR EVERY TRIP ENDPOINT**, so the same condition cannot answer `409` on one route and `400` on another — which is the drift that makes a client's error handling a per-endpoint special case.
 
 | HTTP | `error.code` | `subCode` | When |
 |------|--------------|-----------|------|
-| 400 | `invalid_request` | — | A malformed or unparseable body; **any unknown field** (strict decode); a body over 16 KiB; `startsAt`/`endsAt` not RFC 3339 (the refusal names the field); a window that is empty, inverted or longer than 30 days; an `endsAt` in the past on `PATCH` (**end the trip instead**); a name empty after trimming, over 60 **runes**, or carrying a control character; `?status=` not one of `scheduled`/`active`/`ended`; `?limit=` not an integer in [1, 100]; a malformed `?cursor=`; `pushToStartToken` empty or over 256 characters; `activityToken` empty, over 256 characters or **non-hexadecimal** (§7.30.10); a missing `{vehicleId}`, `{tripId}` or `{legId}` path value |
+| 400 | `invalid_request` | — | A malformed or unparseable body; **any unknown field** (strict decode); a body over 16 KiB; `startsAt`/`endsAt` not RFC 3339 (the refusal names the field); a window that is empty, inverted or longer than 30 days; an `endsAt` in the past on `PATCH` (**end the trip instead**); a name empty after trimming, over 60 **runes**, or carrying a control character; `?status=` not one of `scheduled`/`active`/`ended`; `?limit=` not an integer in [1, 100]; a malformed `?cursor=`; `pushToStartToken` empty or over 256 characters; a missing `{vehicleId}` or `{tripId}` path value |
 | 400 | `invalid_request` | `participant_not_shared` | One or more requested participants is **not a live accepted, unsuspended share-holder on this vehicle** (§7.30.1 create, §7.30.4 add). **DELIBERATELY UNSPECIFIC ABOUT WHICH ONE, AND ABOUT WHY** — "no such share", "a share on a different car", "an invite never redeemed" and "a suspended grant" are one answer, because naming the failing id would make the endpoint an oracle for other people's share ids. The client's action is the same in all four cases: re-fetch the roster and let the owner pick again |
 | 401 | `auth_failed` | — | Missing `Authorization` header, or an invalid/expired bearer |
 | 403 | `vehicle_not_owned` | — | **§7.30.1 ONLY.** The caller does not own the vehicle they tried to open a window on. The single `403` on this surface — see the 404-not-403 rule for why CREATE is the exception |
 | 404 | `not_found` | — | **An unknown trip id AND a trip the caller is not on — ONE answer, deliberately** (unknown, somebody else's, or one the caller has left). Also an unknown `{vehicleId}` on §7.30.1. **A client MUST NOT read `404` here as "this trip does not exist"**; it means *"there is no trip here that you may act on"* |
 | 409 | `conflict` | `trip_overlaps` | Another **scheduled-or-active** trip on the same vehicle already covers part of the requested window (§7.30.1, and §7.30.4 when `endsAt` moves). It earns a sub-code because the client's next move is specific and not derivable from `conflict` alone: send the owner back to the **date picker**, knowing that the CAR — not the trip, not the participants — is what is double-booked. The same reasoning that gave `time_conflict` its own sub-code on §7.8 |
-| 409 | `conflict` | — | **§7.30.10 ONLY.** The leg has ended, or it is not this trip's — one answer for both, so the endpoint cannot be used to probe whether a leg id exists. Instruction to the client: end the Activity locally, exactly as §7.21.1's `409` means |
 | 409 | `conflict` | `trip_ended` | A mutation of a trip whose window has already closed (§7.30.4). A bare `conflict` on a trip the owner is looking at right now is indistinguishable from a server bug and the client would retry; with this it can say the true thing — **the trip is over, start a new one** — which is also the only thing that would work |
 | 500 | `internal_error` | — | A store-layer failure. **Includes §7.30.6**, whose `204` is the answer to "you are not on this trip" and never to "the database is down" |
 | 503 | `service_unavailable` | — | `TRIPS_ENABLED=false`. **Every route, reads included**, checked **before** authentication. `503` and never `404` — see the kill-switch block |

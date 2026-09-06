@@ -167,21 +167,31 @@ type TripStore interface {
 	// DeleteTripActivityStartToken removes it. Idempotent.
 	DeleteTripActivityStartToken(ctx context.Context, tripID, userID string) error
 
+	// TripLegAccess resolves the caller's standing on ONE LEG (§7.21.7): which
+	// trip it belongs to, and whether the leg is still open.
+	//
+	// The route carries no trip id, so this is where the authorization comes
+	// from. ErrTripNotFound covers BOTH "no such leg" and "not your trip" —
+	// one answer, so the endpoint cannot be used to discover leg ids — while
+	// `open=false` is a different refusal to a genuine member and must stay
+	// distinguishable from it.
+	TripLegAccess(ctx context.Context, legID, userID string) (tripID string, open bool, err error)
+
 	// RegisterTripLegActivityToken files the per-ACTIVITY update token for one
-	// running card (§7.30.10). A DIFFERENT TOKEN AND A DIFFERENT TABLE from the
+	// running card (§7.21.7). A DIFFERENT TOKEN AND A DIFFERENT TABLE from the
 	// two above: those address the APP's capability to create a card, this
 	// addresses one card that already exists.
 	//
-	// The tripID is passed as well as the legID so the implementation can scope
-	// the leg to the trip in the same statement that guards on the leg being
-	// open — one refusal, one race, ErrLiveActivityClosed for both.
+	// The tripID comes from TripLegAccess, never from the caller, and the
+	// implementation re-asserts it alongside the open-leg guard so a leg that
+	// closed between the probe and the write is refused by the statement.
 	//
 	// Also a P1 CAPABILITY: never logged beyond a short prefix, never echoed,
 	// never in an error.
 	RegisterTripLegActivityToken(ctx context.Context, tripID, legID, userID, token string, sandbox bool) error
 
 	// EndTripLegActivityToken tombstones the caller's own card on a leg,
-	// reporting whether a live row matched (§7.30.11). Caller-scoped so nobody
+	// reporting whether a live row matched (§7.21.7). Caller-scoped so nobody
 	// can end another person's card, and idempotent: a miss is not an error.
 	EndTripLegActivityToken(ctx context.Context, legID, userID string) (bool, error)
 }

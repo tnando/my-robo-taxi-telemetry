@@ -30,76 +30,6 @@ import (
 // CAR, never the trip), and `destination_name_enc` is decrypted only where a
 // leg's copy or content-state needs it.
 
-// TripAudience is who a trips notification goes to, and what it is about.
-//
-// The owner is carried SEPARATELY from the participants rather than merged into
-// one list, because the two audiences differ per event: the three lifecycle
-// pushes go to participants only (the owner performed the action, or scheduled
-// it), while the two LEG pushes go to the owner as well — they are included in
-// the per-leg Live Activity by explicit product decision, and a card with no
-// banner behind it would be the only surface in the feature that is silent for
-// the person driving.
-type TripAudience struct {
-	TripID      string
-	VehicleID   string
-	OwnerUserID string
-	// ParticipantUserIDs are the LIVE participants: not departed, and still
-	// holding an accepted, unsuspended share. The share join is what makes
-	// "trip access can never outlive the share" structural here too — a
-	// notification is access, in the small.
-	ParticipantUserIDs []string
-}
-
-// queryTripAudience resolves one trip's recipients.
-//
-// The participant list is aggregated in SQL rather than fetched as rows,
-// because every caller wants exactly the slice and a second round trip per trip
-// on a 60-second sweep is a cost with no reader. array_remove strips the NULL
-// that array_agg produces for a trip whose participants have all left.
-//
-// THE SHARE JOIN IS AN ACCESS PREDICATE, not a filter for tidiness, and it is
-// the same pair (`status = 'accepted' AND suspended_at IS NULL`) that
-// auth.queryUserVehicleIDs and auth.queryActiveTripParticipation carry. A
-// suspended grantee must be indistinguishable from no grantee on EVERY surface,
-// and a push naming somebody's car is a surface.
-//
-// THE PREDICATE LIVES IN THE FILTER, NOT IN THE WHERE, AND THE DIFFERENCE IS A
-// TRIP THAT DISAPPEARS. Written as `WHERE p.user_id IS NULL OR s.id IS NOT
-// NULL` it is a predicate on the JOINED ROWS: a trip whose every participant's
-// share is suspended or unaccepted produces one row per participant, all of
-// them with a NULL `s.id` and a non-NULL `p.user_id`, so every row is
-// eliminated and the aggregate has no group to build — `ErrTripNotFound` for a
-// trip that plainly exists. The consequences are not cosmetic. The leg detector
-// reads the audience on EVERY frame of an open leg and returns on the error, so
-// the leg never closes, the card is never ended and the owner loses their
-// banner; `settleClaimed` loses the trip_ended fan-out on the same error.
-//
-// Moving it into array_agg's FILTER keeps the trip row alive with an EMPTY
-// participant list, which is the true answer: the trip exists, the owner is on
-// it, and nobody currently holds a live grant. The OWNER's pushes — the two leg
-// events — then still go out, and the participant-only pushes go to nobody,
-// which is what a suspended share is supposed to mean.
-const queryTripAudience = `
-SELECT t.vehicle_id,
-       t.owner_user_id,
-       COALESCE(
-           array_remove(
-               array_agg(p.user_id) FILTER (WHERE p.user_id IS NOT NULL AND s.id IS NOT NULL),
-               NULL
-           ),
-           '{}'
-       )
-FROM go_trips t
-LEFT JOIN go_trip_participants p
-       ON p.trip_id = t.id AND p.left_at IS NULL
-LEFT JOIN go_vehicle_shares s
-       ON s.vehicle_id = t.vehicle_id
-      AND s.accepted_by_user_id = p.user_id
-      AND s.status = 'accepted'
-      AND s.suspended_at IS NULL
-WHERE t.id = $1
-GROUP BY t.vehicle_id, t.owner_user_id`
-
 // queryClaimTripsToStart atomically claims the trips whose window has OPENED
 // and whose `trip_started` push has not gone out.
 //
@@ -197,35 +127,6 @@ RETURNING id`
 // queryTripName reads a trip's sealed name, for the Live Activity card.
 const queryTripName = `SELECT name_enc FROM go_trips WHERE id = $1`
 
-// queryActiveTripForVehicle answers the leg detector's per-frame question:
-// does this car have an OPEN trip window right now, and if so which?
-//
-// It is deliberately NOT keyed on a user — a leg belongs to the trip, not to a
-// viewer — and it returns at most one row because the create endpoint refuses
-// an overlapping window on the same vehicle (409 trip_overlaps). `LIMIT 1` is
-// the belt to that braces: two overlapping trips from a pre-guard row would
-// produce one leg on the older one rather than two Live Activities per journey.
-const queryActiveTripForVehicle = `
-SELECT id
-FROM go_trips
-WHERE vehicle_id = $1
-  AND starts_at <= NOW()
-  AND NOW() < LEAST(ends_at, COALESCE(ended_at, ends_at))
-ORDER BY starts_at
-LIMIT 1`
-
-// queryActiveTripVehicles lists every vehicle with an open window, for the leg
-// detector's candidate cache. Bounded, and DISTINCT because the same car cannot
-// legitimately hold two open windows but must not produce two cache entries if
-// it somehow does.
-const queryActiveTripVehicles = `
-SELECT DISTINCT ON (vehicle_id) vehicle_id, id
-FROM go_trips
-WHERE starts_at <= NOW()
-  AND NOW() < LEAST(ends_at, COALESCE(ended_at, ends_at))
-ORDER BY vehicle_id, starts_at
-LIMIT $1`
-
 // TripLiveRepo is the timer-and-telemetry-side repository for trips.
 type TripLiveRepo struct {
 	pool      *pgxpool.Pool
@@ -248,21 +149,6 @@ func NewTripLiveRepo(pool *pgxpool.Pool, enc cryptox.Encryptor, metrics Metrics,
 		metrics = NoopMetrics{}
 	}
 	return &TripLiveRepo{pool: pool, encryptor: enc, metrics: metrics, logger: logger}, nil
-}
-
-// TripAudienceFor resolves one trip's push recipients.
-func (r *TripLiveRepo) TripAudienceFor(ctx context.Context, tripID string) (TripAudience, error) {
-	out := TripAudience{TripID: tripID}
-	err := r.pool.QueryRow(ctx, queryTripAudience, tripID).
-		Scan(&out.VehicleID, &out.OwnerUserID, &out.ParticipantUserIDs)
-	switch {
-	case err == nil:
-		return out, nil
-	case errors.Is(err, pgx.ErrNoRows):
-		return TripAudience{}, fmt.Errorf("store.TripAudienceFor(trip=%s): %w", tripID, ErrTripNotFound)
-	default:
-		return TripAudience{}, fmt.Errorf("store.TripAudienceFor(trip=%s): %w", tripID, err)
-	}
 }
 
 // ClaimTripsToStart stamps and returns the trips whose window just opened.
@@ -350,56 +236,6 @@ func (r *TripLiveRepo) TripNameFor(ctx context.Context, tripID string) (string, 
 	default:
 		return "", fmt.Errorf("store.TripNameFor(trip=%s): %w", tripID, err)
 	}
-}
-
-// ActiveTripForVehicle returns the id of the vehicle's open trip window, or ""
-// when there is none. An absent window is the ordinary answer for most cars.
-func (r *TripLiveRepo) ActiveTripForVehicle(ctx context.Context, vehicleID string) (string, error) {
-	var tripID string
-	err := r.pool.QueryRow(ctx, queryActiveTripForVehicle, vehicleID).Scan(&tripID)
-	switch {
-	case err == nil:
-		return tripID, nil
-	case errors.Is(err, pgx.ErrNoRows):
-		return "", nil
-	default:
-		return "", fmt.Errorf("store.ActiveTripForVehicle(vehicle=%s): %w", vehicleID, err)
-	}
-}
-
-// ActiveTripVehicle pairs a car with the open trip window it is inside. Named
-// apart from TripVehicle (trip_view.go), which is the CATALOG subset a trip
-// read projects — this one is the leg detector's candidate row and carries
-// nothing but the two ids.
-type ActiveTripVehicle struct {
-	VehicleID string
-	TripID    string
-}
-
-// ActiveTripVehicles lists the cars with an open window, capped at limit. The
-// leg detector caches this rather than asking per frame.
-func (r *TripLiveRepo) ActiveTripVehicles(ctx context.Context, limit int) ([]ActiveTripVehicle, error) {
-	if limit <= 0 {
-		return nil, fmt.Errorf("store.ActiveTripVehicles: non-positive limit %d", limit)
-	}
-	rows, err := r.pool.Query(ctx, queryActiveTripVehicles, limit)
-	if err != nil {
-		return nil, fmt.Errorf("store.ActiveTripVehicles(limit=%d): %w", limit, err)
-	}
-	defer rows.Close()
-
-	var out []ActiveTripVehicle
-	for rows.Next() {
-		var tv ActiveTripVehicle
-		if err := rows.Scan(&tv.VehicleID, &tv.TripID); err != nil {
-			return nil, fmt.Errorf("store.ActiveTripVehicles: scan: %w", err)
-		}
-		out = append(out, tv)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.ActiveTripVehicles: iterate: %w", err)
-	}
-	return out, nil
 }
 
 // tripSweepTimeout bounds one claim or one audience read. Generous for an

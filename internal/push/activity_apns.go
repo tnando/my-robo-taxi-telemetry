@@ -124,24 +124,31 @@ const TripActivityAttributesType = "TripActivityAttributes"
 // is P1 user content, and the content-state already carries it under a key the
 // client reads on every push. One place, one classification argument.
 type tripActivityAttributes struct {
-	TripID      string `json:"tripId"`
+	TripID string `json:"tripId"`
+	// LegID is REQUIRED, not optional, and the requirement is the iOS side's:
+	// `TripActivityAttributes` declares it non-optional, so a payload missing
+	// the key FAILS THE DECODE and no card appears at all. That is the
+	// deliberate direction — a card with no anchor could never be updated or
+	// ended, and a silently un-endable card on a lock screen is worse than no
+	// card. No `omitempty`, therefore, on this or on any of its neighbours:
+	// every one of them is a value the widget needs before its first update.
+	//
+	// P0 — an opaque server-minted id, like the two below it. Placed second,
+	// beside the trip it narrows.
+	LegID       string `json:"legId"`
 	VehicleID   string `json:"vehicleId"`
 	VehicleName string `json:"vehicleName"`
-	// LegID is P0 — an opaque server-minted id, like the two above it. Last in
-	// the struct so the three keys that shipped before it hold their positions
-	// in a packet capture.
-	LegID string `json:"legId"`
 }
 
 // TripActivityStart is the addressing half of one push-to-start: which phone,
-// and which Activity to create on it.
+// and which Activity to create on it. All four fields become attributes, and
+// all four are REQUIRED on the wire — see tripActivityAttributes.
 type TripActivityStart struct {
-	// TripID, VehicleID and LegID go into the attributes.
-	TripID    string
-	VehicleID string
+	TripID string
 	// LegID is the anchor the created card registers its own update token
-	// against. See tripActivityAttributes.
-	LegID string
+	// against (§7.21.7). Without it the card can never be updated or ended.
+	LegID     string
+	VehicleID string
 	// VehicleName is the nickname the card shows before its first update.
 	VehicleName string
 }
@@ -177,9 +184,9 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 		aps.AttributesType = TripActivityAttributesType
 		aps.Attributes = &tripActivityAttributes{
 			TripID:      n.Start.TripID,
+			LegID:       n.Start.LegID,
 			VehicleID:   n.Start.VehicleID,
 			VehicleName: n.Start.VehicleName,
-			LegID:       n.Start.LegID,
 		}
 	}
 	// AN `end` NEVER RENDERS AN ALERT, whatever the caller asked for (MYR-418).

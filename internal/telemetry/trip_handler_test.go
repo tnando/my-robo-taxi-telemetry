@@ -39,14 +39,20 @@ type fakeTripStore struct {
 	tokenCalls  int
 	deleteCalls int
 
-	// The LEG anchor of §7.21's per-Activity path (§7.30.10 / §7.30.11).
+	// The LEG anchor of §7.21's per-Activity path (§7.21.7).
 	legTokenCalls  int
 	legEndCalls    int
+	legAccessCalls int
 	lastLegTripID  string
 	lastLegID      string
 	lastLegToken   string
 	lastLegSandbox bool
 	legRegisterErr error
+	// legAccess models store.TripLegAccess: the trip the leg belongs to,
+	// whether it is still open, and the refusal for a caller who is not on it.
+	legAccessTripID string
+	legAccessOpen   bool
+	legAccessErr    error
 	// legEndErr is separate from err so a test can express the DELETE's whole
 	// point: the trip read would refuse this caller, and the delete succeeds
 	// anyway because it only ever touches their own row.
@@ -96,6 +102,14 @@ func (f *fakeTripStore) RegisterTripActivityStartToken(context.Context, string, 
 func (f *fakeTripStore) DeleteTripActivityStartToken(context.Context, string, string) error {
 	f.deleteCalls++
 	return f.err
+}
+func (f *fakeTripStore) TripLegAccess(_ context.Context, legID, _ string) (string, bool, error) {
+	f.legAccessCalls++
+	f.lastLegID = legID
+	if f.legAccessErr != nil {
+		return "", false, f.legAccessErr
+	}
+	return f.legAccessTripID, f.legAccessOpen, nil
 }
 func (f *fakeTripStore) RegisterTripLegActivityToken(
 	_ context.Context, tripID, legID, _, token string, sandbox bool,
@@ -181,8 +195,8 @@ func newTripTestHandler(t *testing.T, store TripStore, enabled bool, opts ...Tri
 	mux.HandleFunc("GET /api/trips/{tripId}/drives", h.ServeDrives)
 	mux.HandleFunc("POST /api/trips/{tripId}/activity-start-token", h.ServeRegisterActivityToken)
 	mux.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", h.ServeDeleteActivityToken)
-	mux.HandleFunc("POST /api/trips/{tripId}/legs/{legId}/activity-token", h.ServeRegisterLegActivityToken)
-	mux.HandleFunc("DELETE /api/trips/{tripId}/legs/{legId}/activity-token", h.ServeEndLegActivityToken)
+	mux.HandleFunc("POST /api/trip-legs/{legId}/activity-token", h.ServeRegisterLegActivityToken)
+	mux.HandleFunc("DELETE /api/trip-legs/{legId}/activity-token", h.ServeEndLegActivityToken)
 	return mux
 }
 
@@ -232,8 +246,8 @@ func TestTripsKillSwitchAnswers503OnEveryRoute(t *testing.T) {
 		{http.MethodGet, "/api/trips/" + tripTestID + "/drives"},
 		{http.MethodPost, "/api/trips/" + tripTestID + "/activity-start-token"},
 		{http.MethodDelete, "/api/trips/" + tripTestID + "/activity-start-token"},
-		{http.MethodPost, "/api/trips/" + tripTestID + "/legs/cleg_1/activity-token"},
-		{http.MethodDelete, "/api/trips/" + tripTestID + "/legs/cleg_1/activity-token"},
+		{http.MethodPost, "/api/trip-legs/cleg_1/activity-token"},
+		{http.MethodDelete, "/api/trip-legs/cleg_1/activity-token"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
