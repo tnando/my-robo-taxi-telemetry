@@ -39,10 +39,16 @@ const tripListMaxLimit = 100
 // could not explain — a row saying `active` on a window that closed an hour ago
 // because a sweeper pass was missed.
 func tripStatusOf(t TripData, now time.Time) string {
-	end := t.EndsAt
-	if t.EndedAt != nil && t.EndedAt.Before(end) {
-		end = *t.EndedAt
+	// A STAMPED endedAt IS TERMINAL ON ITS OWN, matching store.Trip.StatusAt
+	// arm for arm. `endsAt` is a scheduled instant; `endedAt` records that the
+	// owner's end ALREADY HAPPENED, and its only writer is `SET ended_at =
+	// NOW()`. Comparing it against this process's clock spans two machines and
+	// reported a closed window as open for the length of the skew — 76 ms
+	// against a local container, and there is no bound on it in production.
+	if t.EndedAt != nil {
+		return tripStatusEnded
 	}
+	end := t.EndsAt
 	switch {
 	case now.Before(t.StartsAt):
 		return tripStatusScheduled
@@ -136,6 +142,18 @@ func derefIntOrNil(v *int) any {
 // time.Time, so a malformed date is a 400 naming the field instead of the
 // decoder's own message about the whole body.
 type createTripBody struct {
+	// VehicleID is REQUIRED by the schema and is NOT the authority — the path
+	// is. It is accepted here because the decode is STRICT: omitting the field
+	// from this struct would make every conformant request a 400 for carrying
+	// a field the contract says it must carry.
+	//
+	// A MISMATCH IS REFUSED rather than ignored. Silently preferring the path
+	// would mean a client that got its own body wrong creates a trip on a
+	// different car than it asked for and finds out from a support ticket; the
+	// two values disagreeing is a client bug, and saying so is the useful
+	// answer. Ownership is checked against the PATH either way, so the
+	// mismatch can never be an escalation — only a confusion.
+	VehicleID      string   `json:"vehicleId"`
 	Name           string   `json:"name"`
 	StartsAt       string   `json:"startsAt"`
 	EndsAt         string   `json:"endsAt"`
@@ -144,11 +162,17 @@ type createTripBody struct {
 
 // parseCreate validates and converts the body.
 //
-// `vehicleId` is deliberately NOT read from the body even though
-// CreateTripRequest carries it: the PATH is the authority, and a request whose
-// body named a different car would otherwise have two answers to which car it
-// is about. The schema keeps the field for the SDKs' single-shape typing.
+// THE PATH IS THE AUTHORITY for which car this is about. CreateTripRequest
+// also carries `vehicleId` — for the SDKs' single-shape typing — and it is
+// accepted, checked for agreement, and then discarded. A request whose body
+// named a different car has two answers to a question with one, and the useful
+// response is to say so rather than to quietly pick one.
 func (h *TripHandler) parseCreate(w http.ResponseWriter, vehicleID, userID string, body createTripBody) (TripCreateInput, bool) {
+	if body.VehicleID != "" && body.VehicleID != vehicleID {
+		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest,
+			"vehicleId in the body must match the one in the path")
+		return TripCreateInput{}, false
+	}
 	startsAt, ok := h.parseInstant(w, "startsAt", body.StartsAt)
 	if !ok {
 		return TripCreateInput{}, false

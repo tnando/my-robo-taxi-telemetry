@@ -42,6 +42,18 @@ var migration0025Columns = map[string]string{
 	// Migration 0029 (MYR-398, the v3 card) — the island auto-expand
 	// high-water mark. Same reason it is in this map and not its own.
 	"alerted_phase": "smallint",
+	// Migration 0047 (MYR-602) — the SECOND ANCHOR. A Live Activity row is
+	// keyed to the thing it is ABOUT, and until trips that was always a ride;
+	// a trip leg is the second kind of thing. The two are mutually exclusive
+	// and the schema says so: 0047 drops NOT NULL from `ride_request_id` and
+	// adds go_live_activities_one_anchor, a CHECK that EXACTLY ONE of the two
+	// is set — which is STRICTER than the constraint it replaces, so no state
+	// the old schema forbade is permitted by the new one.
+	//
+	// Listed in this map for the same reason the 0027 and 0029 columns are:
+	// the undocumented-column check below walks the whole table, and a second
+	// map would let the two drift.
+	"trip_leg_id": "text",
 }
 
 // liveActivityColumnTypes introspects the installed go_live_activities columns.

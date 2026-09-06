@@ -251,10 +251,22 @@ FROM go_trips t WHERE t.id = $1`
 // queryTripVehicle reads the catalog subset the trip card renders, so a
 // participant's card needs no second call. READ-ONLY against the Prisma-owned
 // relation, which CG-DL-9 permits.
+// THE TRIM PAIR RIDES THE go_vehicle_control_state JOIN, not the "Vehicle" row,
+// and that is not an implementation detail to look up twice: `trim_label` (the
+// display-safe label Tesla returns) and `trim` (the raw badge code) are both
+// Go-owned columns on the side table, exactly where the catalog and the
+// snapshot read them from. Selecting them off "Vehicle" is a column that does
+// not exist, which is how this statement failed the first time it ran.
+//
+// LEFT JOIN, because a car with no control-state row yet is a real state — a
+// vehicle linked seconds ago — and a trip card for it must render with a null
+// trim rather than not render at all.
 const queryTripVehicle = `
-SELECT v."id", v."name", v."model", v."year", v."color", v."vin", v."trimLabel", v."trim"
+SELECT v."id", v."name", v."model", v."year", v."color", v."vin",
+       gcs.trim_label, gcs.trim
 FROM "Vehicle" v
 JOIN go_trips t ON t.vehicle_id = v."id"
+LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
 WHERE t.id = $1`
 
 // queryTripDriveCount counts the window's drives. See queryTripDrivesWindow for

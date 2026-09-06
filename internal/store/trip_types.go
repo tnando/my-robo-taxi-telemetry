@@ -76,6 +76,27 @@ func (t Trip) EffectiveEnd() time.Time {
 	return t.EndsAt
 }
 
+// Ended reports whether the OWNER has ended this trip.
+//
+// A NON-NIL EndedAt IS TERMINAL ON ITS OWN, with no comparison against the
+// clock, and that is a statement about what the column MEANS rather than a
+// shortcut. `ends_at` is a scheduled instant that may lie in the future;
+// `ended_at` records that an action ALREADY HAPPENED, and its only writer is
+// `SET ended_at = NOW()` inside queryEndTrip. It can therefore never hold a
+// future instant, so there is nothing for a comparison to decide.
+//
+// STATING IT THIS WAY REMOVES A CROSS-MACHINE CLOCK-SKEW BUG, and it is a real
+// one rather than a hypothetical: the instant is written by POSTGRES and the
+// status is derived in GO, on a different machine. A test against a
+// testcontainers Postgres measured the container's clock 76 ms AHEAD of the
+// host's — so for 76 ms after an owner tapped "End trip", `now.Before(*EndedAt)`
+// was true and the response to their own request said the trip was still
+// ACTIVE. The window predicate in SQL never had the problem (it compares NOW()
+// against a column, both on the database's clock); only the Go derivation
+// spanned two clocks, and only in the direction that reports a closed window as
+// open.
+func (t Trip) Ended() bool { return t.EndedAt != nil }
+
 // StatusAt derives the trip's status at an instant.
 //
 // The boundaries are [startsAt, effectiveEnd) — start is inclusive, end is
@@ -85,6 +106,16 @@ func (t Trip) EffectiveEnd() time.Time {
 // render a live card over a socket that has already dropped the vehicle.
 func (t Trip) StatusAt(now time.Time) TripStatus {
 	switch {
+	// THE OWNER'S EARLY END IS CHECKED FIRST and is not compared against the
+	// clock at all — see Ended() for why the column's meaning, not a
+	// comparison, is what settles it, and for the 76 ms of clock skew that
+	// made the comparison report a closed window as open.
+	//
+	// It also correctly ends a trip the owner cancelled while it was still
+	// SCHEDULED, which the ordering below would otherwise have reported as
+	// scheduled forever.
+	case t.Ended():
+		return TripStatusEnded
 	case now.Before(t.StartsAt):
 		return TripStatusScheduled
 	case now.Before(t.EffectiveEnd()):
