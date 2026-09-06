@@ -2,22 +2,29 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://myrobotaxi.com/schemas/live-activity.schema.json",
   "title": "LiveActivityRegistrationResponse",
-  "description": "200 response body for POST /api/ride-requests/{id}/activity-token — the rider's iOS app handing the server the ActivityKit push token for the Live Activity it just started (MYR-172, rest-api.md §7.21, FR-5.1). The response deliberately carries NO token: the value is P1 and the caller already knows what it sent, so echoing it would only put it in every client log and proxy trace. RIDER-ONLY: the vehicle owner is a party to the ride and may read it, but v1 starts no owner-side Activity and the endpoint answers 403 to an owner. A caller with no relation to the ride receives 404, never 403, so the endpoint is not an oracle for ride ids.",
+  "description": "200 response body for POST /api/ride-requests/{id}/activity-token — the rider's iOS app handing the server the ActivityKit push token for the Live Activity it just started (MYR-172, rest-api.md §7.21, FR-5.1). The response deliberately carries NO token: the value is P1 and the caller already knows what it sent, so echoing it would only put it in every client log and proxy trace. RIDER-ONLY: the vehicle owner is a party to the ride and may read it, but v1 starts no owner-side Activity and the endpoint answers 403 to an owner. A caller with no relation to the ride receives 404, never 403, so the endpoint is not an oracle for ride ids. THIS ENDPOINT IS THE RIDE ONE AND STAYS THAT WAY: the trip surface's own registration lives at POST /api/trips/{tripId}/activity-start-token (trip.schema.json RegisterTripActivityRequest), is per user per trip rather than per ride, carries a PUSH-TO-START token rather than a started Activity's token, and INCLUDES THE OWNER — the owner is on the leg card like everybody else on the trip, so 'owner gets 403' is a rule of this endpoint and not of the platform.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["registered", "sandbox"],
+  "required": [
+    "registered",
+    "sandbox"
+  ],
   "properties": {
     "registered": {
       "type": "boolean",
       "description": "Always true on a 200. The registration is an UPSERT keyed on (ride, rider), so a first registration and a mid-ride token rotation are indistinguishable here and both report true. A failure is an error envelope, never `registered: false`.",
       "x-classification": "P0",
-      "examples": [true]
+      "examples": [
+        true
+      ]
     },
     "sandbox": {
       "type": "boolean",
       "description": "Echoes the APNs environment the caller declared, so a client can confirm the server agrees about which gateway its token belongs to. A token minted by a development or TestFlight build is only valid against the APNs sandbox host, and pushing to the wrong one is rejected as BadDeviceToken.",
       "x-classification": "P0",
-      "examples": [true]
+      "examples": [
+        true
+      ]
     }
   },
   "$defs": {
@@ -25,7 +32,9 @@
       "title": "RegisterLiveActivityRequest",
       "type": "object",
       "additionalProperties": false,
-      "required": ["activityToken"],
+      "required": [
+        "activityToken"
+      ],
       "description": "Request body for POST /api/ride-requests/{id}/activity-token (MYR-172 §7.21). Authenticated: the registering rider is the JWT subject and is never client-supplied. IDEMPOTENT and UPSERTING — one Live Activity per (ride, rider), so re-posting REPLACES the stored token rather than accumulating rows. That is not an optimisation: ActivityKit ROTATES the push token during the life of a single Activity and expects the server to switch to the new one, so a rotation is an ordinary re-registration. Re-registering after an end also clears the end tombstone, because the client is telling us it has a live Activity again. Posting against a ride that has already reached a terminal state is 409 conflict — that Activity will never be pushed to, and the 409 is the signal to end it locally.",
       "properties": {
         "activityToken": {
@@ -34,13 +43,17 @@
           "maxLength": 256,
           "description": "The ActivityKit push token for this Activity, as returned by `Activity.pushToken` on the device. P1 — a capability: whoever holds it, together with the team's APNs signing key, can write to that phone's lock screen. NEVER log it in full (only an 8-character prefix), never echo it in a response, and never place it in an error message. The maxLength is a generous sanity bound rather than a format assertion: the token is 64 hex characters today, but rejecting a valid future shape would silently break Live Activities for every rider on that iOS release.",
           "x-classification": "P1",
-          "examples": ["8a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f"]
+          "examples": [
+            "8a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f4c2e9b7d0356a1f"
+          ]
         },
         "sandbox": {
           "type": "boolean",
           "description": "Whether the token was minted by a development or TestFlight build, selecting the APNs sandbox gateway. OPTIONAL on the wire and defaults to false (production). Carried per-Activity rather than read from the device registry because a rider who declined the notification permission still gets a Live Activity — starting one requires no prompt — and so may have no device row at all.",
           "x-classification": "P0",
-          "examples": [true]
+          "examples": [
+            true
+          ]
         }
       }
     },
@@ -48,21 +61,37 @@
       "title": "EndLiveActivityResponse",
       "type": "object",
       "additionalProperties": false,
-      "required": ["ended"],
+      "required": [
+        "ended"
+      ],
       "description": "200 response body for DELETE /api/ride-requests/{id}/activity-token — the rider's app reporting that the Live Activity has ended on the phone, whether the rider dismissed it or the app ended it from its own final-state fallback (MYR-172 §7.21). IDEMPOTENT: ending an already-ended Activity is a 200 reporting false, not an error, because the client's end and the server's terminal-state push race by design and both are correct.",
       "properties": {
         "ended": {
           "type": "boolean",
           "description": "True when a live registration was actually closed by this call; false when there was nothing live to close — either it had already ended or it was never registered. The two are deliberately indistinguishable, matching the §7.17 unregister response.",
           "x-classification": "P0",
-          "examples": [true]
+          "examples": [
+            true
+          ]
         }
       }
     },
     "LiveActivityEvent": {
       "type": "string",
-      "enum": ["update", "end"],
-      "description": "The ActivityKit `aps.event` verb on a remote update. `update` replaces the Activity's content-state in place; `end` delivers a final content-state and schedules dismissal. Append-only.",
+      "enum": [
+        "update",
+        "end"
+      ],
+      "description": "The ActivityKit `aps.event` verb on a remote update. `update` replaces the Activity's content-state in place; `end` delivers a final content-state and schedules dismissal. NOTE THE THIRD VERB THIS ENUM DOES NOT CARRY: ActivityKit's `start`, used by MYR-602's trip legs to PUSH-TO-START an Activity the app cannot start from the background, is an APNs-level verb on a push addressed by a push-to-start token (trip.schema.json RegisterTripActivityRequest) and never appears in a content-state this enum describes. It is deliberately absent rather than appended — a client decoding this value is handling an update to an Activity that already exists. Append-only.",
+      "x-classification": "P0"
+    },
+    "LiveActivityKind": {
+      "type": "string",
+      "enum": [
+        "ride",
+        "trip"
+      ],
+      "description": "WHICH KIND OF JOURNEY THIS ACTIVITY IS SHOWING (MYR-602, contracts v0.41.0). `ride` — the rider's own booked ride, the only kind that existed before v0.41.0. `trip` — one DRIVING LEG of a shared trip (trip.schema.json): the car set off for somewhere during an open trip window, and every participant plus the owner holds the card. ABSENT MEANS `ride`, always and permanently: the key is optional precisely so that a build compiled before v0.41.0 keeps decoding a server's payload unchanged, and a server sending no `kind` is sending a ride. A client MUST default to `ride` on an absent key and MUST NOT treat absence as unknown. Append-only, and a client MUST tolerate an unrecognised member rather than failing to decode — the generated Swift enum falls back to `.unrecognized(raw)` for exactly this reason (MYR-195), and a throw inside a Live Activity push handler is a lock screen frozen on a stale journey. THE CARD IS ONE CARD: the widget renders both kinds from the same layout parameterised by this value, so `kind` selects copy and the subline, never a separate presentation.",
       "x-classification": "P0"
     },
     "LiveActivityRideStatus": {
@@ -77,22 +106,29 @@
         "cancelled",
         "reservation_expired"
       ],
-      "description": "The ride state a Live Activity is displaying. The first seven mirror RideRequestStatus (ride-request.schema.json) exactly. `reservation_expired` is the one member that is NOT a ride status: the reservation sweeper gives up on a scheduled ride that ran past its lateness ceiling by recording a dispatch failure and leaving the ride row at `accepted`, so without a distinct value here the rider's lock screen would sit on 'your car is on its way' forever. Append-only; a client MUST tolerate an unrecognised member rather than failing to decode.",
+      "description": "The ride state a Live Activity is displaying. The first seven mirror RideRequestStatus (ride-request.schema.json) exactly. `reservation_expired` is the one member that is NOT a ride status: the reservation sweeper gives up on a scheduled ride that ran past its lateness ceiling by recording a dispatch failure and leaving the ride row at `accepted`, so without a distinct value here the rider's lock screen would sit on 'your car is on its way' forever. TRIP LEGS REUSE THIS ENUM AND ADD NO MEMBER (MYR-602, contracts v0.41.0) — a deliberate reuse, because a leg and a ride leg are the same thing on a lock screen: a car going somewhere. A content-state with `kind` = 'trip' carries EXACTLY THREE OF THESE MEMBERS and no others. `enroute` — the car is driving to the leg's destination; this is the state a leg spends nearly all its life in. `arrived` — the leg ended WITH arrival evidence (the auto-arrival detector fired at the destination, 80 m / 20 s dwell). `completed` — the leg ended WITHOUT arrival evidence: the car parked somewhere else, or its navigation was cleared mid-leg. THE OTHER FIVE MEMBERS NEVER APPEAR ON A TRIP CARD: `requested`, `accepted`, `declined` and `cancelled` are answers about a ride REQUEST, of which a trip has none — nobody accepts or declines a leg — and `reservation_expired` is a verdict on a dispatch. A client MUST NOT render a trip card's copy from ride wording; branch on `kind` first. Append-only; a client MUST tolerate an unrecognised member rather than failing to decode.",
       "x-classification": "P0"
     },
     "LiveActivityContentState": {
       "title": "LiveActivityContentState",
       "type": "object",
       "additionalProperties": false,
-      "required": ["v", "status", "vehicleName", "destination"],
-      "description": "The payload delivered as `aps.content-state` on an ActivityKit remote update, and the exact shape the iOS Activity's Swift ContentState decodes (MYR-172, decisions in MYR-194; `progress` and `asOf` added by MYR-398). Four required fields plus FOUR optional ones (`eta`, `progress`, `asOf`, `destinationIsStop`): Apple caps the whole push at 4KB and throttles high-frequency Activity updates by budget, so the bar for inclusion is 'the rider would misread the screen without it'. NOT a REST response — it never appears on any endpoint, and it reaches the device only over APNs, addressed by a token that identifies exactly one Activity on exactly one ride for exactly one rider. EVERY ADDITION HERE IS OPTIONAL AND THE EXISTING KEYS NEVER MOVE: the Swift ContentState is compiled into a build a rider may not update for months, and its property names ARE the wire keys, so an installed app must keep decoding a newer server's payload unchanged. The r16 redesign is the worked example — it wanted an ETA headline, a 'Meet at {pickup}' line and a progress track, and it cost exactly ONE new key, because the status already carries the leg, `eta` already carries the time, and the PICKUP LABEL IS DELIBERATELY NOT HERE (see `progress` and rest-api.md §7.21.3). MYR-587 cost one more, `destinationIsStop`, and the same test decided that too — stop statuses are server-owned and advance while the phone is asleep, so a client cannot say for itself whether the place it is naming is a stop or the trip's end. The v3 card cost one more before it, `asOf`, and the same test decided it: the plate, colour and model it puts in the subline are STATIC for the life of a ride and ride on the Activity's own ActivityAttributes, set by the app when it starts the Activity, whereas 'when was this last true' is a fact only the server holds and it changes on every push.",
+      "required": [
+        "v",
+        "status",
+        "vehicleName",
+        "destination"
+      ],
+      "description": "The payload delivered as `aps.content-state` on an ActivityKit remote update, and the exact shape the iOS Activity's Swift ContentState decodes (MYR-172, decisions in MYR-194; `progress` and `asOf` added by MYR-398). Four required fields plus SIX optional ones (`eta`, `destinationIsStop`, `progress`, `asOf`, `kind`, `tripName`): Apple caps the whole push at 4KB and throttles high-frequency Activity updates by budget, so the bar for inclusion is 'the rider would misread the screen without it'. NOT a REST response — it never appears on any endpoint, and it reaches the device only over APNs, addressed by a token that identifies exactly one Activity on exactly one ride for exactly one rider. EVERY ADDITION HERE IS OPTIONAL AND THE EXISTING KEYS NEVER MOVE: the Swift ContentState is compiled into a build a rider may not update for months, and its property names ARE the wire keys, so an installed app must keep decoding a newer server's payload unchanged. The r16 redesign is the worked example — it wanted an ETA headline, a 'Meet at {pickup}' line and a progress track, and it cost exactly ONE new key, because the status already carries the leg, `eta` already carries the time, and the PICKUP LABEL IS DELIBERATELY NOT HERE (see `progress` and rest-api.md §7.21.3). The v3 card cost one more, `asOf`, and the same test decided it: the plate, colour and model it puts in the subline are STATIC for the life of a ride and ride on the Activity's own ActivityAttributes, set by the app when it starts the Activity, whereas 'when was this last true' is a fact only the server holds and it changes on every push.\n\nTRIP LEGS SHARE THIS CONTENT STATE (MYR-602, contracts v0.41.0) AND COST TWO OPTIONAL KEYS, `kind` and `tripName`. A trip (trip.schema.json) is a window during which the owner's chosen participants watch a shared car, and it produces ONE ACTIVITY PER DRIVING LEG — the car sets off with a destination, everybody on the trip gets a card, it arrives or parks, the card ends — held by the participants AND the owner. THE SAME CARD, PARAMETERISED, NOT A SECOND CARD: `status` already carries the leg's state (`enroute` / `arrived` / `completed` — see LiveActivityRideStatus), `destination` already carries where the car is headed, `eta` already carries when it gets there, `progress` already draws the track and `asOf` already says when that was true. What a leg needed that a ride did not is WHICH KIND OF JOURNEY THIS IS (`kind`, absent = ride) and WHICH TRIP IT BELONGS TO IN WORDS (`tripName`), because a participant may hold cards for two different shared cars and 'Optimus · Grand Canyon Village' does not say which trip that is. Everything else was already here, which is why the widget renders both kinds from one layout rather than forking.\n\nTHE TWO REGISTRATIONS ARE DIFFERENT ON THE TRIP SIDE and this shape is indifferent to which one delivered it: a ride Activity is started BY THE APP and registers its own push token (RegisterLiveActivityRequest), while a trip leg begins while the app is backgrounded or not running, so the SERVER starts it with an ActivityKit PUSH-TO-START push (trip.schema.json RegisterTripActivityRequest) carrying attributes {tripId, vehicleId, vehicleName} plus this content state as the Activity's first, and the started Activity then registers its own update token through the existing per-activity path. The ATTRIBUTES are the static half and are deliberately NOT here: `tripId` and `vehicleId` never change for the life of the card, so putting them in the content state would spend Apple's 4KB budget re-sending constants on every update.\n\nVENDOR DEVIATION FROM contracts v0.41.0, RECORDED HERE RATHER THAN SILENTLY APPLIED: the v0.41.0 tag of this file DROPS `destinationIsStop` and reverts `destination`'s multi-stop description, both of which shipped in v0.38.0 (MYR-587) and are LIVE in this server — internal/push/activity.go sends the key on every mid-journey multi-stop leg, and an installed iOS build reads it. Adopting the tag verbatim would have made this document describe a payload the server does not send, and `additionalProperties: false` would have made every such push invalid against its own schema. The property below is therefore restored BYTE-IDENTICAL to v0.38.0 and everything else in this file is v0.41.0 verbatim. The contracts repo owns the fix (re-add it in a v0.41.1); until then this file is the union and the union is what the server actually sends.",
       "properties": {
         "v": {
           "type": "integer",
           "minimum": 1,
-          "description": "Content-state schema version, currently 1. Carried explicitly because the Swift ContentState is compiled into an app a rider may not update for months, so the wire shape freezes the moment a build ships. When a field's MEANING changes (as opposed to a new optional field being added, which Codable already tolerates) the server can keep sending v1 to installed clients while v2 goes to new ones — the alternative being a lock screen full of wrong numbers on every phone that has not updated.",
+          "description": "Content-state schema version, STILL 1 AS OF contracts v0.41.0. Carried explicitly because the Swift ContentState is compiled into an app a rider may not update for months, so the wire shape freezes the moment a build ships. When a field's MEANING changes (as opposed to a new optional field being added, which Codable already tolerates) the server can keep sending v1 to installed clients while v2 goes to new ones — the alternative being a lock screen full of wrong numbers on every phone that has not updated. MYR-602 DID NOT BUMP IT, and the reason is the rule stated above rather than an oversight: `kind` and `tripName` are NEW OPTIONAL KEYS, no existing key changed type, name, position or meaning, and an installed pre-v0.41.0 build decodes a trip leg's payload unchanged — it simply renders it as the ride card it already knows, which is the correct degradation because every field it reads still means what it meant. A version bump here would be reserved for the day a key's MEANING moves; adding to the surface is exactly what `v` was designed NOT to require. The same reasoning applied to `progress` (v0.27.0) and `asOf` (v0.28.0), neither of which moved it either.",
           "x-classification": "P0",
-          "examples": [1]
+          "examples": [
+            1
+          ]
         },
         "status": {
           "$ref": "#/$defs/LiveActivityRideStatus",
@@ -103,27 +139,35 @@
           "x-unit": "unix-seconds",
           "description": "The car's arrival time as an ABSOLUTE unix timestamp in seconds. OMITTED ENTIRELY when unknown — never null, never zero, never a guess. Absolute rather than a duration is the central decision: a duration decays silently on a screen the server cannot repaint ('4 min' stays '4 min' for an hour), whereas an instant stays true however late it is read, and the phone counts down on its own between the 60–90s pushes. Sourced from the CAR'S OWN carried navigation ETA (Tesla `minutesToArrival`, whole minutes, persisted verbatim), converted to an instant at send time; there is no server-side route solver, so a car with no active nav route yields no key at all rather than an invented number (MYR-194 staleness policy).",
           "x-classification": "P0",
-          "examples": [1785535200]
+          "examples": [
+            1785535200
+          ]
         },
         "vehicleName": {
           "type": "string",
           "maxLength": 128,
           "description": "The owner-chosen vehicle nickname, e.g. 'Blue Whale'. Empty string when the car has no name set, in which case the client renders its own generic fallback rather than a blank. Same tier and same reasoning as the nickname already carried in ride-lifecycle alert copy.",
           "x-classification": "P0",
-          "examples": ["Blue Whale"]
+          "examples": [
+            "Blue Whale"
+          ]
         },
         "destination": {
           "type": "string",
           "maxLength": 128,
-          "description": "THE PLACE `eta` IS ABOUT — the short label of the place the car is driving to, e.g. 'Home'. On a two-endpoint ride that is the dropoff the RIDER chose when booking, which is all this field was before MYR-587 (contracts v0.38.0). ON A MULTI-STOP TRIP MID-JOURNEY IT IS THE STOP THE CAR IS CURRENTLY HEADING FOR, and `destinationIsStop` is true beside it. The change is a CORRECTION, not a widening: `eta` is the car's own carried navigation ETA and the car navigates ONE leg at a time (MYR-485), so pairing it with the trip's final place name was a false sentence made of two true values — the field report read '10:39 PM dropoff / Heading to Bell Southstone Yards' while the car was driving to the first stop. Server-side ladder, the same one the in-app copy walks (MYR-564): on ride status `enroute`, the stop the server has marked `current`, else the first stop that is not `completed`, else the dropoff; on every other status the dropoff, unchanged. Anything that is not `completed` counts as still ahead (MYR-547's fail-safe — `completed` is the only status that asserts the car REACHED a place, and stop enums are append-only). A CLIENT COMPILED BEFORE v0.38.0 IS IMPROVED RATHER THAN BROKEN by this: it renders the place the car is actually going, under a headline noun that is now the only stale part. P1, and the one field on this surface that the ride-lifecycle ALERT copy policy (internal/push/copy.go) does not permit on a lock screen. It is carried here deliberately and narrowly: a Live Activity is the rider's own ride on the rider's own device, addressed by a token scoped to that one Activity, and a ride card that cannot say where the car is taking you is not the feature. It is never sent to an owner's Activity and never appears in an alert body. See data-classification.md §1.18.",
+          "description": "The dropoff's short label — the name the RIDER chose for the place when booking, e.g. 'Home'. P1, and the one field on this surface that the ride-lifecycle ALERT copy policy (internal/push/copy.go) does not permit on a lock screen. It is carried here deliberately and narrowly: a Live Activity is the rider's own ride on the rider's own device, addressed by a token scoped to that one Activity, and a ride card that cannot say where the car is taking you is not the feature. It is never sent to an owner's Activity and never appears in an alert body. ON A TRIP LEG (`kind` = 'trip', MYR-602) THE SOURCE IS DIFFERENT AND THE HANDLING IS IDENTICAL: it is the CAR'S OWN navigation destination name (VehicleState.destinationName), set in the Tesla by whoever is driving rather than chosen by a rider at booking, and it goes to every participant AND the owner of that trip — which is not an exception to the sentence above so much as a different card, addressed by push-to-start tokens scoped to one trip. Still P1, still never in an alert body. See data-classification.md §1.18.",
           "x-classification": "P1",
-          "examples": ["Home"]
+          "examples": [
+            "Home"
+          ]
         },
         "destinationIsStop": {
           "type": "boolean",
           "description": "Whether `destination` names an INTERMEDIATE STOP rather than the trip's final dropoff (MYR-587, contracts v0.38.0). OMITTED ENTIRELY when it does not — false is the absent key, which is what keeps every two-endpoint ride, every pickup leg and every ending BYTE-IDENTICAL to a pre-v0.38.0 payload. It exists because the headline and the subline are one sentence: the card reads '{h:mm} dropoff' over 'Heading to {destination}', so naming the stop while the noun above it still says 'dropoff' would fix half the lie. THE WORD ITSELF STAYS THE CLIENT'S — this surface sends the enum and never prose (rest-api.md §7.21.3) — so what crosses the wire is only the discriminator, and a client renders 'stop' or 'next stop' against 'dropoff' in its own copy. IT IS NOT DERIVABLE ON DEVICE, which is the test every field on this payload has to pass: stop statuses are SERVER-OWNED and advance on arrival detection (MYR-538) while the phone is asleep, and the itinerary can be edited mid-ride, so a stop list captured in ActivityAttributes at Activity start cannot say which stop is current now. Deliberately a boolean and not an index/total pair: the headline needs the WORD, and 'stop 2 of 4' would put two more values in every one of ~40 pushes per ride to answer a question the card does not ask. P0 — a flag saying what KIND of place is already named beside it locates nobody and names nothing.",
           "x-classification": "P0",
-          "examples": [true]
+          "examples": [
+            true
+          ]
         },
         "progress": {
           "type": "number",
@@ -131,14 +175,32 @@
           "maximum": 1,
           "description": "How far along the CURRENT LEG the car is, 0..1 — what the redesigned card's progress track draws (MYR-398). WHICH leg is not carried: `status` already says it (`accepted` is the car coming to the rider, `enroute` is the car taking them onward), and one fact on the wire twice is one fact that can disagree with itself. OMITTED ENTIRELY when the server cannot say — never null, never 0 — because an absent progress renders a TRACKLESS card while a wrong one renders a lie, and 0 is a claim ('the car has covered none of it'), not an admission. Derived from the car's OWN navigation: `tripDistanceRemaining` against the value captured at the start of the leg, falling back to `minutesToArrival` when the car reports no distance. THREE SITUATIONS PRODUCE NO KEY AT ALL and they are not the same as the situations that HOLD. No key: nothing has been delivered yet this leg, or the leg has not started — `accepted` covers both a dispatched car and a reservation still dormant until its due instant, and the owner's own driving in between must never anchor a track. HELD at the last delivered value: the car goes quiet, OR its readings stop being fresh, OR it CLEARS its nav route mid-leg after a fraction has already been delivered. That last one is worth spelling out for a client author — the card is NOT stale in that case, so a frozen track is all the rider sees and nothing on the card explains it. The 3-minute horizon is measured on the READING rather than on the car's row timestamp, which any telemetry write refreshes. It is MONOTONE PER LEG, ENFORCED SERVER-SIDE — the server clamps to the highest fraction it has delivered to this Activity, and the write that records that floor refuses to lower it, so the track does not run backwards. Enforced rather than absolute: the floor is written after Apple accepts a push, so a process that dies between the two can be followed by one lower value before it catches up — one step wide and self-healing. `eta` is deliberately NOT clamped and does move backwards when traffic does; on the ETA source a reading longer than the baseline is TRAFFIC, so the fraction is HELD and the baseline is left alone rather than rescaled. A client MUST render both as given: most of the way there AND arriving later than it said is a coherent pair, not a contradiction. Exactly 1 is only ever sent on the ride record's authority (`arrived`, `completed`); an in-flight leg is capped just below it. P0 and NOT P1 like its neighbour `destination`: this is a unitless fraction of an unnamed journey, carrying no coordinate, no place name and no distance — '62% of the way' locates the car only for somebody who already knows both ends of the trip. Full derivation and honesty bounds: rest-api.md §7.21.3.",
           "x-classification": "P0",
-          "examples": [0.62]
+          "examples": [
+            0.62
+          ]
         },
         "asOf": {
           "type": "integer",
           "x-unit": "unix-seconds",
           "description": "When the DATA in this content-state was true, as an ABSOLUTE unix timestamp in seconds (MYR-398, the v3 card). NOT the same instant as `aps.timestamp`, and conflating them is the mistake this field exists to prevent: `aps.timestamp` is when the push was SENT and is what ActivityKit uses to discard an out-of-order update, so it must always be `now` and must never be back-dated. `asOf` is when the server last learned something — equal to the send instant on a push that computed something new, and EARLIER on one that did not. IT DOES NOT RE-STAMP TO `now` ON A PASS THAT COMPUTED NOTHING NEW. When the car's navigation has gone quiet and `progress` is being HELD at its last delivered value, `asOf` stays the instant that value was true, and that is the whole point of the field: the ETA ticker pushes unconditionally and `aps.stale-date` is re-armed by the push itself, so ActivityKit never marks such a card stale and nothing else on it explains why the track is frozen. The client renders it as the stale presentation's subline — 'Last updated {h:mm A}' — which is the one place a rider can see that a card whose numbers keep arriving has stopped learning anything. Concretely it is the instant the car's navigation reading this state was derived from was first seen to hold, or the send instant when the state rests on the ride record instead: a lifecycle transition, an assertion like `arrived` or `completed`, or a card with no track at all. ALWAYS SENT — unlike `eta` and `progress` there is no case in which the server cannot say when it computed something — but OPTIONAL here so a payload minted by a pre-v0.28.0 server still validates and an installed build compiled before the field decodes a newer server's payload unchanged.",
           "x-classification": "P0",
-          "examples": [1785534900]
+          "examples": [
+            1785534900
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/LiveActivityKind",
+          "description": "WHICH KIND OF JOURNEY THIS CARD IS SHOWING — 'ride' or 'trip' (MYR-602, contracts v0.41.0). OPTIONAL, AND ABSENT MEANS 'ride' — permanently, not transitionally: the key exists so a build compiled before v0.41.0 decodes a newer server's payload unchanged, and a server that has nothing to say about kind is describing a ride. A client MUST default to 'ride' on an absent key and MUST NOT render an 'unknown journey' state. IT IS THE FIRST BRANCH A CARD TAKES, because it decides the copy: a ride says 'Your ride', a trip says the trip's name and the shared car's; and it decides which members of `status` are reachable (see LiveActivityRideStatus — a trip leg only ever sends `enroute`, `arrived` or `completed`). It does NOT select a different layout: one widget presentation renders both."
+        },
+        "tripName": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "THE TRIP'S NAME — the owner's label for the shared window, 'DFW to LA' (Trip.name in trip.schema.json). PRESENT WHEN `kind` = 'trip' AND OMITTED ENTIRELY OTHERWISE: a ride has no trip, so a ride card carries no key rather than an empty string. Its job is DISAMBIGUATION, which is a real problem on this surface and not on the ride one: a person may be a participant on two trips at once, on two different friends' cars, and 'Optimus · Grand Canyon Village' does not say whose road trip that is — while a rider has exactly one ride card and never has to ask which ride it is. Capped at 60 characters, the same cap Trip.name enforces, so the value arrives whole rather than truncated. P1 AND USER CONTENT, the same tier and the same handling as the sibling `destination`: it is encrypted at rest on the trip row, it is carried here narrowly because a Live Activity is addressed by a token scoped to one Activity on one device, and it MUST NEVER appear in an alert body or a push title, where the ride-lifecycle copy policy (internal/push/copy.go) forbids user content. See data-classification.md §1.18.",
+          "x-classification": "P1",
+          "x-encrypted-at-rest": true,
+          "examples": [
+            "DFW to LA"
+          ]
         }
       }
     }
