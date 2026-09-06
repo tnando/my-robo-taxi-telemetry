@@ -34,22 +34,32 @@ import (
 // (NOT NULL, no plaintext sibling), so NewTripRepo panics on nil rather than
 // letting a deployment write P1 user content in the clear or fail every write
 // at the constraint.
-func setupTripEndpoints(deps httpRouteDeps, snapshotAdapter telemetry.VehicleSnapshotReader) *store.TripRepo {
+func setupTripEndpoints(
+	deps httpRouteDeps,
+	snapshotAdapter telemetry.VehicleSnapshotReader,
+	notifier telemetry.TripNotifier,
+) *store.TripRepo {
 	logger := deps.logger.With(slog.String("component", "trips"))
 
 	repo := store.NewTripRepo(deps.pool, deps.storeMetrics, deps.encryptor, logger)
+
+	// The notifier is the seam onto internal/trips (see trip_notifier_adapter.go).
+	// A TYPED NIL IS NOT AN ABSENT INTERFACE, so the option is only applied when
+	// there is genuinely something behind it — otherwise the handler's own
+	// noopTripNotifier would be replaced by a non-nil interface holding nil and
+	// every announcement would panic after a perfectly good commit.
+	opts := []telemetry.TripOption{}
+	if notifier != nil {
+		opts = append(opts, telemetry.WithTripNotifier(notifier))
+	}
+
 	handler := telemetry.NewTripHandler(
 		deps.authenticator,
 		&tripStoreAdapter{repo: repo},
 		snapshotAdapter,
 		deps.cfg.TripsEnabled(),
 		logger,
-		// NO notifier yet. The `trips` push category — its prefs toggle, its
-		// payload shape, its delivery flags — belongs to the sibling lane
-		// building the Live Activity and the leg detector. Omitting it is
-		// SAFE AND SILENT: trips are created, ended and joined exactly as they
-		// would be, and nobody is told. One line here the day the category
-		// exists: telemetry.WithTripNotifier(tripNotifier).
+		opts...,
 	)
 
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/trips", handler.ServeCreate)

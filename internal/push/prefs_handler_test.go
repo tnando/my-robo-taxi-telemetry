@@ -102,10 +102,10 @@ func decodePrefsBody(t *testing.T, rec *httptest.ResponseRecorder) map[string]an
 	return body
 }
 
-// TestPrefsHandler_GetEmitsAllFiveKeys is the contract's shape assertion. All
-// five keys, always, with no omitempty — an absent key would be read by the app
+// TestPrefsHandler_GetEmitsEveryKey is the contract's shape assertion. Every
+// key, always, with no omitempty — an absent key would be read by the app
 // as its own default and would render a switch in the wrong position.
-func TestPrefsHandler_GetEmitsAllFiveKeys(t *testing.T) {
+func TestPrefsHandler_GetEmitsEveryKey(t *testing.T) {
 	registry := newFakePrefsRegistry()
 	registry.stored = Prefs{
 		RideLifecycle:    true,
@@ -113,6 +113,7 @@ func TestPrefsHandler_GetEmitsAllFiveKeys(t *testing.T) {
 		DriveCompleted:   true,
 		ChargingComplete: false,
 		ViewerJoined:     false,
+		Trips:            true,
 	}
 
 	rec := doPrefsRequest(t, registry, &stubTokenValidator{userID: prefsUserID}, http.MethodGet, "", true)
@@ -127,6 +128,7 @@ func TestPrefsHandler_GetEmitsAllFiveKeys(t *testing.T) {
 		"driveCompleted":   true,
 		"chargingComplete": false,
 		"viewerJoined":     false,
+		"trips":            true,
 	}
 	if len(body) != len(want) {
 		t.Errorf("response has %d keys (%v), want exactly %d", len(body), body, len(want))

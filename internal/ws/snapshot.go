@@ -164,6 +164,26 @@ func (h *Hub) sendSnapshot(ctx context.Context, client *Client, vehicleID string
 // re-deliver a stale snapshot to clients who are already caught up.
 func (h *Hub) enqueueSnapshotFrame(client *Client, vehicleID string, role auth.Role, fields map[string]any, timestamp string) {
 	projected, _ := mask.Apply(fields, mask.For(mask.ResourceVehicleState, role))
+
+	// MYR-602 — THE SENTINELS GO IN BEFORE THE SUPPRESSION CHECK HERE, which is
+	// the OPPOSITE order to BroadcastMasked, and the asymmetry is deliberate.
+	//
+	// A live broadcast is a delta on a stream: a viewer frame made of nothing
+	// but constant sentinels carries no information and its mere arrival would
+	// be a "this car is streaming" beacon, so there it is suppressed. A
+	// SNAPSHOT is the client's ONE delivery of the whole known state, sent once
+	// on subscribe and never repeated — it reveals no timing (it is triggered
+	// by the subscriber, not by the car) and it is the only chance the client
+	// gets to receive `latitude`, `speed` and their four neighbours at all.
+	// Suppressing the GPS-group snapshot frame for a viewer would leave their
+	// assembled VehicleState missing six schema-REQUIRED keys for the whole
+	// life of the connection, which is the exact failure the sentinels exist to
+	// prevent.
+	//
+	// A group that projects to nothing AND has no required-location field in it
+	// — a cabin-only or media-only group — is still suppressed, because
+	// ApplyLocationSentinels fills in only keys the input actually carried.
+	projected, _ = mask.ApplyLocationSentinels(fields, projected, role)
 	if !mask.IsSubstantive(projected) {
 		// Empty-payload suppression, mirroring BroadcastMasked: a role
 		// whose mask strips every field in this group must not see an

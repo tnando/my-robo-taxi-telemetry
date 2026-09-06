@@ -236,8 +236,13 @@ func TestHub_BroadcastMasked_CabinOnlyFrameIsSuppressedForViewers(t *testing.T) 
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
+		// `chargeLevel` rather than `speed` since MYR-602: the narrowing took
+		// the Speed/GPS group off `viewer`, so a speed-only frame is itself
+		// suppressed now and would make this test pass vacuously by never
+		// delivering anything at all. The control frame has to be a field the
+		// narrowed viewer genuinely still receives.
 		map[string]any{
-			"speed":       42,
+			"chargeLevel": 82,
 			"lastUpdated": time.Now().UTC().Format(time.RFC3339),
 		},
 	)
@@ -247,8 +252,8 @@ func TestHub_BroadcastMasked_CabinOnlyFrameIsSuppressedForViewers(t *testing.T) 
 	if err := json.Unmarshal(got.Payload, &pl); err != nil {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
-	if _, present := pl.Fields["speed"]; !present {
-		t.Errorf("first frame the viewer received was not the speed frame (%v) — the "+
+	if _, present := pl.Fields["chargeLevel"]; !present {
+		t.Errorf("first frame the viewer received was not the charge frame (%v) — the "+
 			"cabin-only frame was NOT suppressed, leaking activity timing", pl.Fields)
 	}
 }
@@ -280,7 +285,9 @@ func TestHub_BroadcastMasked_FreshnessOnlyProjectionIsSuppressed(t *testing.T) {
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
-		map[string]any{"speed": 7},
+		// See the sibling test: post-MYR-602 the control frame must carry a
+		// field the narrowed viewer still receives.
+		map[string]any{"chargeLevel": 7},
 	)
 
 	got := readMessage(t, conn)
@@ -289,13 +296,13 @@ func TestHub_BroadcastMasked_FreshnessOnlyProjectionIsSuppressed(t *testing.T) {
 		t.Fatalf("unmarshal payload: %v", err)
 	}
 	if _, present := pl.Fields["lastUpdated"]; present {
-		if _, hasSpeed := pl.Fields["speed"]; !hasSpeed {
+		if _, hasCharge := pl.Fields["chargeLevel"]; !hasCharge {
 			t.Errorf("viewer received a freshness-only frame %v — a media tick becomes a "+
 				"beacon that pulses only while audio plays, which is the occupancy signal "+
 				"MYR-435 removes the media block to prevent", pl.Fields)
 		}
 	}
-	if _, present := pl.Fields["speed"]; !present {
-		t.Errorf("first viewer frame was %v, want the speed frame", pl.Fields)
+	if _, present := pl.Fields["chargeLevel"]; !present {
+		t.Errorf("first viewer frame was %v, want the charge frame", pl.Fields)
 	}
 }

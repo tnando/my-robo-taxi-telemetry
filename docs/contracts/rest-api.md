@@ -4052,7 +4052,7 @@ a silence, not a denial: it stops this service waking a phone and changes
 nothing about what the account may read over REST or the telemetry socket. Do
 not use it as an access control.
 
-#### 7.19.0 The five categories
+#### 7.19.0 The six categories
 
 | Wire key | Column | Covers |
 |----------|--------|--------|
@@ -4061,6 +4061,7 @@ not use it as an access control.
 | `driveCompleted` | `drive_completed` | The owner's car finished a drive. |
 | `chargingComplete` | `charging_complete` | The owner's car finished charging. |
 | `viewerJoined` | `viewer_joined` | Somebody redeemed an invite to the owner's car (§7.5.5). |
+| `trips` | `trips` | **The whole trip class** ([MYR-602](https://linear.app/myrobotaxi/issue/MYR-602), contracts v0.41.0, migration 0048) — being added to a trip, its window opening and closing, and each driving leg inside it starting and arriving. See §7.19.5. |
 
 **Owner-only and rider concepts share ONE row.** A person is not an owner or a
 rider — MYR-343 established that an account can be both at once, and the mode
@@ -4092,7 +4093,14 @@ both fire on one transition, and the owner-side send is **suppressed entirely
 when the owner IS the rider** — a self-ride must not report the rider's own tap
 back to them.
 
-**Four of the five categories have no sender yet.** `internal/push` has exactly
+**`trips` is ONE category for FIVE events, on the same argument as
+`rideLifecycle` above.** The five travel one fan-out, one copy file and one
+notifier (`internal/push/notifier_trips.go`); no send site distinguishes them,
+so a second column would be a preference the server could store and would never
+honour differently — the exact class of lie this issue exists to remove. The
+client renders one row.
+
+**Four of the six categories have no sender yet.** `internal/push` has exactly
 four fan-out sites and **all four are `rideLifecycle`** — there is no
 drive-started, drive-completed, charging-complete or viewer-joined notifier in
 this service at all (see the audit in the MYR-349 PR). Those four columns are
@@ -4101,8 +4109,11 @@ storing the answer is what stops the toggle being a lie a second time, and it
 means whichever notifier eventually sends them is born gated rather than
 retrofitted.
 
-**Storage.** Go-owned `go_push_prefs` (migration 0022), primary key `user_id`,
-five `BOOLEAN NOT NULL DEFAULT TRUE` columns, no Prisma FK (CG-DL-9).
+**Storage.** Go-owned `go_push_prefs` (migration 0022, widened by migration
+0048), primary key `user_id`, **six** `BOOLEAN NOT NULL DEFAULT TRUE` columns,
+no Prisma FK (CG-DL-9). `DEFAULT TRUE` is what makes every account that existed
+before 0048 receive trip notifications afterwards, and it agrees by construction
+with the missing-row read, which resolves to all-on too.
 
 **Classification: P0 throughout.** `user_id` is an opaque cuid and the five
 values are booleans about delivery — not identifying, no location, no ride
@@ -4127,11 +4138,12 @@ Authorization: Bearer <app session JWT>
   "driveStarted": true,
   "driveCompleted": true,
   "chargingComplete": true,
-  "viewerJoined": true
+  "viewerJoined": true,
+  "trips": true
 }
 ```
 
-**ALL FIVE KEYS ARE ALWAYS PRESENT.** No field is optional and none carries
+**ALL SIX KEYS ARE ALWAYS PRESENT.** No field is optional and none carries
 `omitempty`. `omitempty` on a boolean drops `false` — which is the *interesting*
 half of every one of these values — and a client reading an absent key as its
 own default would render a switch in the opposite position to the one the person
@@ -4151,6 +4163,7 @@ column was defaulted" and "explicitly enabled" are indistinguishable by design.
 | `driveCompleted` | `boolean` | P0 | Required, never omitted. |
 | `chargingComplete` | `boolean` | P0 | Required, never omitted. |
 | `viewerJoined` | `boolean` | P0 | Required, never omitted. |
+| `trips` | `boolean` | P0 | Required, never omitted. Added in contracts v0.41.0 (MYR-602). **A client compiled before v0.41.0 is unaffected**: it ignores an unknown key, and the switch it does not render stays at its stored value. |
 
 **Errors:**
 
@@ -4207,13 +4220,14 @@ response.
   "driveStarted": false,
   "driveCompleted": true,
   "chargingComplete": false,
-  "viewerJoined": true
+  "viewerJoined": true,
+  "trips": true
 }
 ```
 
 **Clients MUST adopt this echo rather than the booleans they sent.** The echo is
 produced by the same statement that performed the write (`RETURNING`), so it
-carries the four categories the request never mentioned — including any changed
+carries the five categories the request never mentioned — including any changed
 on another device in the meantime. A client that flipped its switch optimistically
 and then kept its own value would resurrect a preference somebody switched off
 elsewhere. On failure the client MUST roll the optimistic flip back **and say
@@ -4297,6 +4311,63 @@ A marketing message fails all three. Ride news fails the first. **If a future no
 
 
 ---
+
+#### 7.19.5 The `trips` category (MYR-602)
+
+Five events, one switch, and **all five are INFORMATIONAL** — `transactional:
+false` in the sense §7.19.4 defines. Each fails the first of that flag's three
+tests outright: a trip push reports somebody ELSE'S action (the owner's, or the
+car's), the recipient loses nothing by missing one because the app renders the
+whole trip on next open, and the platform is not acting on their account.
+Switching `trips` off is a real silence the platform honours.
+
+| `event` | Fires when | Audience |
+|---------|-----------|----------|
+| `trip_added` | The owner put this person on a trip (create, or a PATCH that added them). | The people just added — **not** the whole roster. |
+| `trip_started` | The window opened (`startsAt` passed, or a trip was created with `startsAt` already in the past). | Participants. **Never the owner** — they set the window; telling them their own trip started is the noise the self-ride suppression removes. |
+| `trip_ended` | The window closed, or the owner ended it early. | Participants, same reasoning. |
+| `trip_leg_started` | Inside an open window, the car set off for a named place. | Participants **AND the owner** — the owner is on the leg card by explicit product decision, and a card with no banner behind it would make the driving party the one person never told anything. |
+| `trip_leg_arrived` | The car reached that place, **with arrival evidence**. | Participants and the owner. |
+
+**`trip_leg_arrived` fires ONLY on evidence** — the 80 m / 20 s dwell at the
+destination. A leg that ended because the driver cleared the route, parked
+somewhere else, or ran past the end of the window sends **nothing**, and its
+Live Activity's final content-state carries `completed` rather than `arrived`.
+The distinction is load-bearing rather than cosmetic: "your car arrived" is a
+sentence that cannot be taken back.
+
+**Payload.** Everything outside `aps` reaches the app as userInfo:
+
+```json
+{
+  "aps": { "alert": { "title": "…", "body": "…" }, "sound": "default" },
+  "tripId": "ctrip_…",
+  "vehicleId": "cveh_…",
+  "event": "trip_leg_started",
+  "destinationName": "Grand Canyon Village",
+  "deepLink": "myrobotaxi://trips/ctrip_…"
+}
+```
+
+**`rideId` IS ABSENT**, not empty. A trips push names no ride, and an empty
+string is a value the client would have to special-case; a RIDE push is
+byte-identical to what it was before this category existed.
+
+**`destinationName` is present only on the two LEG events**, and only when it is
+known. It is **P1** and its presence here is a narrow, argued carve-out from the
+alert-copy policy (`internal/push/copy.go`): the recipient is a trip participant
+inside an open window, the same place name is already streaming to them on
+`destinationName` and is already on their lock screen in the leg's Live
+Activity, and a banner hedging about a fact the card beside it states is not
+privacy. **The TRIP NAME is never interpolated into a title or a body** — it is
+free text a person typed, and it appears only in the Live Activity's
+content-state (§7.21.7).
+
+**`apns-collapse-id`** is `{tripId}:{topic}` for the three lifecycle events and
+`{tripId}|{legId}:{topic}` for the two leg ones. The leg narrowing is required:
+without it two consecutive legs of one trip present the same header, Apple
+merges their banners, and a participant who missed the first arrival finds only
+the second in Notification Center.
 
 ### 7.20 Saved places (MYR-321)
 
@@ -4506,7 +4577,7 @@ Two rider-scoped operations on one path, letting the rider's phone say "here is 
 
 **RIDER-ONLY in v1, deliberately.** The vehicle owner is a party to the ride and may READ it (§7.8), but this surface answers a `403` to an owner. An endpoint that accepted an owner's token would quietly create rows the sender then pushes RIDER content to — including the P1 `destination` label, which is on a rider's own lock screen by design and on an owner's by accident. The owner-side Activity is an explicit [MYR-172](https://linear.app/myrobotaxi/issue/MYR-172) follow-up and will arrive with its own content-state; the `(ride, party)` key already admits it without a migration.
 
-**Storage.** Go-owned `go_live_activities` (migration **0025**, plus the six leg-progress columns of migration **0027** and the island-expand high-water mark of migration **0029**), `UNIQUE (ride_request_id, user_id)`, swept 24 hours after the last write. `ride_request_id` is the **first genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths (owner teardown, account deletion) make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists. `user_id` remains an unenforced pointer, as CG-DL-9 requires.
+**Storage.** Go-owned `go_live_activities` (migration **0025**, plus the six leg-progress columns of migration **0027**, the island-expand high-water mark of migration **0029**, and the SECOND ANCHOR of migration **0047**), `UNIQUE (ride_request_id, user_id)`, swept 24 hours after the last write. **Since MYR-602 the table carries a second kind of Activity**: a row is anchored either to a ride (`ride_request_id`) or to a TRIP LEG (`trip_leg_id`), never to both and never to neither, enforced by `CHECK ((ride_request_id IS NOT NULL) <> (trip_leg_id IS NOT NULL))`. `ride_request_id` therefore lost its `NOT NULL` in the same statement that added the CHECK, which is **stricter** than the constraint it replaced — the old schema permitted no state the new one permits. See §7.21.7. `ride_request_id` is the **first genuine foreign key in the `go_` namespace** — CG-DL-9 bars references to the Prisma-owned schema, but `go_ride_requests` is Go-owned, and the ride's hard-delete paths (owner teardown, account deletion) make `ON DELETE CASCADE` the choice that cannot strand a token addressing a ride that no longer exists. `user_id` remains an unenforced pointer, as CG-DL-9 requires.
 
 **Classification.** `activityToken` is **P1** — a capability: whoever holds it plus the team's APNs key can write to that phone's lock screen. Stored raw and protected by log redaction rather than app-level encryption, the same posture and the same rationale as `go_push_devices.device_token`; see [`data-classification.md`](data-classification.md) §1.18 and §3.2. Consequences that show up in this contract: **neither response echoes the token**, no error envelope repeats it, and only an 8-character prefix ever reaches a log line.
 
@@ -5137,6 +5208,70 @@ Everything else keeps its banner. Each exclusion is load-bearing:
 **THE BOUND, STATED HONESTLY: SUPPRESSION IS PER USER, NOT PER DEVICE.** The registry's natural key is `(ride, party)` because ActivityKit rotates an Activity's push token mid-ride (§7.21.1) — one row is one *person's* card, not one phone's. A rider carrying two phones, with the Live Activity running on one and the other merely signed in, presents a **single row**, and the read cannot tell the two apart: the banner is suppressed on **both**. That is the deliberate trade, and the alternative is worse — a banner on every phone including the one already showing the card is precisely the duplicate this section exists to remove. Making it per-device would need a device dimension on a table whose key is a *person's* Activity, which is a schema change and a separate issue, not an oversight here.
 
 **Observability.** `push suppressed by live activity` carries `topic`, `ride_id` and `user_id` — all P0, two opaque cuids and a topic name. A failed registry lookup logs at ERROR and says it is sending the banner anyway. Gate: [`internal/push/notifier_activity_gate.go`](../../internal/push/notifier_activity_gate.go); enforcement `internal/push/notifier_send.go`; store read [`internal/store/live_activity_presence.go`](../../internal/store/live_activity_presence.go); wiring `cmd/telemetry-server/wiring_push.go`.
+
+#### 7.21.7 Trip legs: PUSH-TO-START, the second anchor, and what is shared (MYR-602)
+
+> **Anchored:** FR-9.3, NFR-3.9, NFR-3.21. Informative — no REST surface of its own. The trip-side registration endpoints are §7.30; this section is the CARD.
+
+**A TRIP LEG'S ACTIVITY IS CREATED BY THE SERVER, and that is the one structural difference from everything above.** Every ride Activity is started LOCALLY by the app, at a moment the rider is looking at their phone — they tapped Book. A leg begins when a car in another state pulls out of a car park with a destination set, and no participant's phone is involved in that at all; iOS gives a backgrounded app no way to start an Activity. So the server raises the card with an ActivityKit **push-to-start**, addressed by a token the app registers once per trip (§7.30) rather than once per Activity.
+
+**The two token kinds are different things and a `410` means different things about them.** Confusing them is the specific mistake this section exists to prevent:
+
+| Table | Token | Addresses | A `410` means | The server deletes |
+|-------|-------|-----------|---------------|--------------------|
+| `go_trip_activity_tokens` | push-to-start | **the APP** on a phone: "you may create a Trip Activity here" | the app is gone, or Live Activities were revoked for it | the `go_trip_activity_tokens` row |
+| `go_live_activities` | per-Activity update | **ONE RUNNING CARD** | that card is gone; the app is fine | the `go_live_activities` row |
+
+A push-to-start rejection routed to the ride path's `dropActivity` would delete **nothing at all** — the token is not in that table — while leaving a dead registration to be retried on every remaining leg of the trip.
+
+**The push-to-start envelope.** Same `apns-push-type: liveactivity`, same `{bundle}.push-type.liveactivity` topic, same `apns-priority: 10` as every other Activity push. What is different is `aps.event`, and the two keys only a `start` carries:
+
+```json
+{
+  "aps": {
+    "timestamp": 1788715200,
+    "event": "start",
+    "attributes-type": "TripActivityAttributes",
+    "attributes": {
+      "tripId": "ctrip_…",
+      "vehicleId": "cveh_…",
+      "vehicleName": "Optimus"
+    },
+    "content-state": {
+      "v": 1,
+      "kind": "trip",
+      "status": "enroute",
+      "vehicleName": "Optimus",
+      "tripName": "DFW to LA",
+      "destination": "Grand Canyon Village",
+      "asOf": 1788715200
+    },
+    "stale-date": 1788715380
+  }
+}
+```
+
+**`attributes-type` MUST equal the widget bundle's `ActivityAttributes` struct name EXACTLY.** iOS matches it by name to decide which Activity to instantiate, and a mismatch fails **silently**: APNs answers `200`, the device drops the push, and no card ever appears, with no signal on either side. It is a cross-repository constant — changing it is an iOS change and a server change in the same release, never one of the two.
+
+**Why those three attributes and no more.** Attributes are decoded ONCE and can never be updated, so a value belongs there only if it cannot change while the card is alive. `tripId` and `vehicleId` are identifiers the widget needs and cannot derive. `vehicleName` is there so the card is legible the instant it appears, before any update arrives; it is *also* in the content-state, so a nickname edit corrects it. **The TRIP NAME is deliberately NOT an attribute** even though it is equally static: it is P1 user content, and the content-state already carries it under a key the client reads on every push — one place, one classification argument.
+
+**`apns-expiration` is FIFTEEN MINUTES on a start**, and it is a third horizon rather than a reuse of either existing one (§7.21.4). Pinned to the 3-minute stale-date like an ordinary update, a phone in a tunnel at the moment a leg begins would never get the card and nothing would retry — the updater only pushes to Activities that already exist. Given the `end`'s day, a card would materialise for a leg that finished hours ago, with no update and no end coming, which is worse than never appearing. Fifteen minutes outlasts a tunnel and stays inside a plausible leg.
+
+**AFTER THE DEVICE STARTS THE ACTIVITY it registers the card's own update token through the EXISTING per-Activity path**, extended to accept a leg anchor. The registration is guarded on the **LEG being open** (`ended_at IS NULL`) — the same question §7.21.1's guard asks about a ride, in the leg's vocabulary — and a refusal is the same `409` with the same meaning: end the Activity locally. `alerted_phase` seeds at 0 rather than at a status-derived rung, because the six-rung ladder of §7.21.4 is a RIDE ladder and a leg has none of those states.
+
+**The content-state is the SAME shape, parameterised.** `status` already carries the leg's state, `destination` already carries where the car is headed, `eta` already carries when it arrives, `asOf` already says when that was true. Two optional keys were added and `v` STAYS 1: `kind` (absent = `ride`, permanently) and `tripName`. An installed pre-v0.41.0 build decodes a leg's payload unchanged and renders it as the ride card it already knows — the correct degradation, because every field it reads still means what it meant.
+
+**A trip leg sends exactly three of the eight `status` members** — `enroute`, `arrived`, `completed` — and never the other five: `requested`, `accepted`, `declined` and `cancelled` are answers about a ride REQUEST, of which a trip has none, and `reservation_expired` is a verdict on a dispatch. `arrived` requires **arrival evidence** (the 80 m / 20 s dwell); `completed` is a leg that ended without it.
+
+**`progress` IS ABSENT ON EVERY LEG PUSH**, and it is the one ride field a leg does not inherit. The ride derivation (§7.21.3) measures a fraction of a leg whose BOTH ENDS the server knows, clamped monotonically against a stored floor. A trip leg has no booked endpoints at all — the driver chose the destination on the dash and may change it mid-leg — so the only available baseline moves whenever the route does, and a track that goes BACKWARDS on a re-route is worse than no track. An absent `progress` renders a card with no track, which the client already handles for every ride whose car has no active route.
+
+**The END IS THE MYR-418 PAIR, VERBATIM**: an ALERTING UPDATE carrying the final state, then an `end` **one second later** so its `aps.timestamp` is strictly newer. `aps.timestamp` renders in whole SECONDS and ActivityKit discards an update that is not newer than what it is showing, so two calls to the clock inside one second would leave the ordering undefined. The end's dismissal-date is `DismissAfter` (five minutes), the same linger a completed ride's card gets, because the arrival state is the thing worth a moment with.
+
+**The card gates on the `trips` category, not on `ride_lifecycle`.** A person who muted RIDES must still get their trip cards, and vice versa; the two are unrelated products sharing one transport. It fails OPEN in all three of its failure modes, exactly as §7.21.5's twin does and for the same reason.
+
+**Update cadence.** A leg's card refreshes only when the car's arrival MINUTE has moved **and** a 20-second floor has passed — both, not either. The minute alone would be enough on a motorway and far too much in stop-start traffic where an ETA flips between two values every few seconds; the interval alone would push an unchanged card. Apple throttles this surface by budget and a car streams up to once per second, so a refresh has to earn its push.
+
+**Sender:** [`internal/push/activity_trip_notifier.go`](../../internal/push/activity_trip_notifier.go) and `activity_trip_fanout.go`; content-state `internal/push/activity_trip_state.go`; envelope `internal/push/activity_apns.go`; the two registries `internal/store/trip_activity_token_repo.go` and `internal/store/live_activity_trip_anchor.go`; the leg lifecycle that drives all of it `internal/trips/legs.go`.
 
 ---
 

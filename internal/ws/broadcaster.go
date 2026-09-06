@@ -135,7 +135,7 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 		return
 	}
 
-	msg, err := marshalWSMessage(msgTypeDriveStarted, driveStartedPayload{
+	frame := driveStartedPayload{
 		VehicleID: vehicleID,
 		DriveID:   payload.DriveID,
 		StartLocation: startLocation{
@@ -143,7 +143,8 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 			Longitude: payload.Location.Longitude,
 		},
 		Timestamp: payload.StartedAt.Format(time.RFC3339),
-	})
+	}
+	msg, err := marshalWSMessage(msgTypeDriveStarted, frame)
 	if err != nil {
 		b.logger.Error("broadcaster.handleDriveStarted: marshal failed",
 			slog.String("event_id", event.ID),
@@ -152,7 +153,34 @@ func (b *Broadcaster) handleDriveStarted(ctx context.Context, event events.Event
 		return
 	}
 
-	b.hub.Broadcast(vehicleID, msg)
+	// MYR-602 — `startLocation` IS THE CAR'S RAW POSITION, and this frame used
+	// to go out through the role-blind Hub.Broadcast. A plain `viewer` no
+	// longer receives the Speed/GPS group on any other surface, so leaving this
+	// one unmasked would have handed them the single most locating coordinate
+	// the car emits: where its owner was standing when they set off, twice a
+	// day, indefinitely.
+	//
+	// The EVENT still reaches them — a viewer sees the car's status flip to
+	// driving anyway, and withholding it would make their drive list disagree
+	// with the owner's about whether anything happened. Only the coordinate is
+	// replaced, with the documented (0,0) no-fix sentinel, which every consumer
+	// already handles because a car that has never reported a position emits
+	// it. See hub_location_frames.go.
+	redactedFrame := frame
+	redactedFrame.StartLocation = redactedStartLocation()
+	redacted, err := marshalWSMessage(msgTypeDriveStarted, redactedFrame)
+	if err != nil {
+		// The located frame is fine; only the redaction failed. Sending the
+		// located one to everybody would be the leak this exists to close, so
+		// the viewers get nothing this time and the owner still gets their
+		// frame — fail closed, and say so.
+		b.logger.Error("broadcaster.handleDriveStarted: redacted marshal failed; viewers withheld",
+			slog.String("event_id", event.ID),
+			slog.Any("error", err),
+		)
+	}
+
+	b.hub.BroadcastByLocationAccess(vehicleID, msg, redacted)
 }
 
 // handleDriveEnded transforms a DriveEndedEvent into a drive_ended

@@ -19,8 +19,26 @@ type Notification struct {
 	Sandbox bool
 	Title   string
 	Body    string
-	// RideID is the sole userInfo key delivered to the app.
+	// RideID is the ride this alert is about, delivered to the app as the
+	// `rideId` userInfo key. Empty on a notification that is not about a ride
+	// (MYR-602's trips fan-out), in which case the key is omitted entirely
+	// rather than sent as "" — see buildPayload.
 	RideID string
+	// UserInfo is the EXTRA payload keys this notification carries outside the
+	// `aps` object, beyond `rideId` (MYR-602).
+	//
+	// It exists because the trips fan-out addresses a subject the ride-shaped
+	// payload cannot name: {tripId, vehicleId, event, destinationName?} plus
+	// the deep link the app routes on. Values are strings only — the app reads
+	// them to pick a screen, never to render numbers — and every key put here
+	// is subject to the same payload policy as the alert body (copy.go): this
+	// is a lock screen, and userInfo travels to it whether or not it is drawn.
+	UserInfo map[string]string
+	// CollapseSubject overrides the subject half of the `apns-collapse-id`
+	// (MYR-554) for a notification that is not about a ride. Empty means "use
+	// RideID", which is every ride push and therefore leaves their headers
+	// byte-identical to what they were before this field existed.
+	CollapseSubject string
 	// EventTopic is the DOMAIN event this alert answers to — `ride.due`,
 	// `ride.status.changed`, … It is NOT the APNs topic (the app's bundle id),
 	// which the Client holds and which never varies per notification.
@@ -30,6 +48,15 @@ type Notification struct {
 	// apns_collapse.go). Empty is harmless — the header is then keyed on the
 	// ride alone.
 	EventTopic string
+}
+
+// collapseSubject is what this notification's de-duplication key is built
+// from: its explicit subject when it has one, else the ride it is about.
+func (n Notification) collapseSubject() string {
+	if n.CollapseSubject != "" {
+		return n.CollapseSubject
+	}
+	return n.RideID
 }
 
 // Sender delivers a single notification. Implementations are best-effort: a

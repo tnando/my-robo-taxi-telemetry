@@ -56,6 +56,52 @@ var migration0025Columns = map[string]string{
 	"trip_leg_id": "text",
 }
 
+// assertOneAnchorConstraint proves migration 0047's exactly-one-anchor CHECK is
+// installed and ENFORCING, by asking the database to accept the two states it
+// must refuse: a row with both anchors, and a row with neither.
+//
+// Asserted by ATTEMPTING THE WRITES rather than by reading pg_constraint,
+// because the catalogue can hold a constraint that is NOT VALID and therefore
+// enforces nothing on existing rows — and because what this table's callers
+// depend on is the refusal, not the row in pg_constraint.
+func assertOneAnchorConstraint(t *testing.T) {
+	t.Helper()
+	seedActivityRide(t, "ride_anchor_0047")
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO go_trip_legs (id, trip_id, vehicle_id, destination_name_enc, started_at)
+		 VALUES ('leg_anchor_0047', 'trip_anchor_0047', 'veh_anchor', 'enc', NOW())
+		 ON CONFLICT DO NOTHING`); err != nil {
+		// go_trip_legs has an FK to go_trips, so seed the parent first.
+		if _, seedErr := testPool.Exec(context.Background(),
+			`INSERT INTO go_trips (id, vehicle_id, owner_user_id, name_enc, starts_at, ends_at)
+			 VALUES ('trip_anchor_0047', 'veh_anchor', 'owner_anchor', 'enc', NOW(), NOW() + INTERVAL '1 day')
+			 ON CONFLICT DO NOTHING`); seedErr != nil {
+			t.Fatalf("seed trip: %v", seedErr)
+		}
+		if _, legErr := testPool.Exec(context.Background(),
+			`INSERT INTO go_trip_legs (id, trip_id, vehicle_id, destination_name_enc, started_at)
+			 VALUES ('leg_anchor_0047', 'trip_anchor_0047', 'veh_anchor', 'enc', NOW())
+			 ON CONFLICT DO NOTHING`); legErr != nil {
+			t.Fatalf("seed leg: %v", legErr)
+		}
+	}
+
+	both := `INSERT INTO go_live_activities (id, ride_request_id, trip_leg_id, user_id, activity_push_token)
+	         VALUES ('la_both_0047', 'ride_anchor_0047', 'leg_anchor_0047', 'u', 'tok')`
+	if _, err := testPool.Exec(context.Background(), both); err == nil {
+		t.Error("a row with BOTH anchors was accepted; the one-anchor CHECK is not enforcing")
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM go_live_activities WHERE id = 'la_both_0047'`)
+	}
+
+	neither := `INSERT INTO go_live_activities (id, user_id, activity_push_token)
+	            VALUES ('la_none_0047', 'u', 'tok')`
+	if _, err := testPool.Exec(context.Background(), neither); err == nil {
+		t.Error("a row with NEITHER anchor was accepted; dropping ride_request_id's NOT NULL " +
+			"was compensated by nothing")
+		_, _ = testPool.Exec(context.Background(), `DELETE FROM go_live_activities WHERE id = 'la_none_0047'`)
+	}
+}
+
 // liveActivityColumnTypes introspects the installed go_live_activities columns.
 func liveActivityColumnTypes(t *testing.T) map[string]string {
 	t.Helper()
@@ -179,6 +225,19 @@ func TestMigration0025_UpCreatesLiveActivities(t *testing.T) {
 
 	// NULLABILITY IS LOAD-BEARING IN OPPOSITE DIRECTIONS.
 	nullable := liveActivityNullability(t)
+	// MYR-602: `ride_request_id` became NULLABLE, and its guard moved rather
+	// than disappearing. The one-anchor CHECK is STRICTER than the NOT NULL it
+	// replaced — the old schema permitted no state the new one permits — so the
+	// assertion is on the constraint, not on the column.
+	if nullable["ride_request_id"] != "YES" {
+		t.Error("ride_request_id is NOT NULL — migration 0047 widened this table with a " +
+			"trip_leg_id anchor, and a leg-anchored row has no ride")
+	}
+	if nullable["trip_leg_id"] != "YES" {
+		t.Error("trip_leg_id is NOT NULL — a ride-anchored row has no leg")
+	}
+	assertOneAnchorConstraint(t)
+
 	if nullable["activity_push_token"] != "NO" {
 		t.Error("activity_push_token is NULLABLE — a row with no token addresses nothing, " +
 			"and there is no honest-unknown state: a caller with no token simply does not register")

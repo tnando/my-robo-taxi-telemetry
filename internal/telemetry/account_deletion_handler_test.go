@@ -210,16 +210,19 @@ type fakeAccountData struct {
 	driverAccessDeleted int
 	driverAccessErr     error
 
-	// MYR-602 step 8g. Three counters rather than one, because the sequence
-	// makes three calls and the ordering test has to be able to tell them
-	// apart — the owned-trip delete must run BEFORE the two that clean up
-	// what its cascade did not reach.
-	tripsOwnedDeleted int
-	tripsOwnedErr     error
-	tripPartsDeleted  int
-	tripPartsErr      error
-	tripTokensDeleted int
-	tripTokensErr     error
+	// MYR-602 step 8g. Four counters rather than one, because the sequence
+	// makes four calls and the ordering test has to be able to tell them
+	// apart — the owned-trip delete must run BEFORE the three that clean up
+	// what its cascade did not reach. The last two are the live tables that
+	// address a phone: a push-to-start registration and a running leg card.
+	tripsOwnedDeleted    int
+	tripsOwnedErr        error
+	tripPartsDeleted     int
+	tripPartsErr         error
+	tripTokensDeleted    int
+	tripTokensErr        error
+	legActivitiesDeleted int
+	legActivitiesErr     error
 
 	membershipsDeleted int
 	membershipsErr     error
@@ -374,7 +377,7 @@ func (f *fakeAccountData) DeleteVehicleDriverAccess(_ context.Context, id string
 	return n, nil
 }
 
-// MYR-602 step 8g, three methods with the 8e/8f shape — noted, scoped, and
+// MYR-602 step 8g, four methods with the 8e/8f shape — noted, scoped, and
 // idempotent on a re-run — so the sequence test's ordering and re-runnability
 // assertions cover them without a special case.
 func (f *fakeAccountData) DeleteTripsOwned(_ context.Context, id string) (int, error) {
@@ -407,6 +410,17 @@ func (f *fakeAccountData) DeleteTripActivityTokens(_ context.Context, id string)
 	}
 	n := f.tripTokensDeleted
 	f.tripTokensDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+func (f *fakeAccountData) DeleteTripLegActivities(_ context.Context, id string) (int, error) {
+	f.note("delete_trip_leg_activities")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.legActivitiesErr != nil {
+		return 0, f.legActivitiesErr
+	}
+	n := f.legActivitiesDeleted
+	f.legActivitiesDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -625,11 +639,12 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// one of them above step 3.
 		"delete_vehicle_driver_access",
 		// MYR-602 step 8g. The OWNED delete must come first: it cascades the
-		// roster, the tokens and the legs off go_trips(id), so the two after
+		// roster, the tokens and the legs off go_trips(id), so the three after
 		// it only ever find what genuinely belongs to somebody else's trip.
 		"delete_trips_owned",
 		"delete_trip_participations",
 		"delete_trip_activity_tokens",
+		"delete_trip_leg_activities",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -1114,7 +1129,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 15 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tombstones, driver access, trips owned, trip participations, trip activity tokens, tokens
+	const sqlSteps = 16 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tombstones, driver access, trips owned, trip participations, trip activity tokens, trip leg activities, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

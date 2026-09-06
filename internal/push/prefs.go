@@ -38,6 +38,23 @@ const (
 	CategoryChargingComplete Category = "charging_complete"
 	// CategoryViewerJoined — somebody redeemed an invite to the owner's car.
 	CategoryViewerJoined Category = "viewer_joined"
+
+	// CategoryTrips covers the WHOLE trip class (MYR-602): being added to a
+	// trip, its window opening and closing, and each driving leg inside it
+	// starting and arriving.
+	//
+	// ONE category for five events, on the same argument CategoryRideLifecycle
+	// makes for its own set. The five travel one fan-out, one copy file and one
+	// notifier; no send site distinguishes them, so a second column would be a
+	// preference the server could store and never honour differently.
+	//
+	// ALL FIVE ARE INFORMATIONAL, never transactional. A trip push reports
+	// somebody ELSE'S action (the owner's, or the car's), the recipient loses
+	// nothing by missing one — the app renders the whole trip on next open —
+	// and the platform is not acting on their account. That is the first of
+	// delivery.transactional's three tests failed outright; see the flag's
+	// comment in notifier_send.go.
+	CategoryTrips Category = "trips"
 )
 
 // Categories is every category, in the order §7.19 renders them. Used by the
@@ -49,6 +66,7 @@ func Categories() []Category {
 		CategoryDriveCompleted,
 		CategoryChargingComplete,
 		CategoryViewerJoined,
+		CategoryTrips,
 	}
 }
 
@@ -63,6 +81,11 @@ type Prefs struct {
 	DriveCompleted   bool
 	ChargingComplete bool
 	ViewerJoined     bool
+	// Trips is the MYR-602 switch. LAST, and it must stay last: prefsResponse
+	// and prefsRequest are produced from this struct by a Go struct CONVERSION,
+	// which is legal only while all three declare the same fields in the same
+	// order. Appending is the only growth this guard survives.
+	Trips bool
 }
 
 // DefaultPrefs is the pre-MYR-349 behaviour: every category on. It is what an
@@ -75,6 +98,7 @@ func DefaultPrefs() Prefs {
 		DriveCompleted:   true,
 		ChargingComplete: true,
 		ViewerJoined:     true,
+		Trips:            true,
 	}
 }
 
@@ -97,6 +121,8 @@ func (p Prefs) Allows(c Category) bool {
 		return p.ChargingComplete
 	case CategoryViewerJoined:
 		return p.ViewerJoined
+	case CategoryTrips:
+		return p.Trips
 	default:
 		return true
 	}

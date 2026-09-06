@@ -1,6 +1,6 @@
 # Trips — window-scoped live sharing (MYR-602)
 
-**Status:** Implemented and merged on `myr602-core` — migration **0047**, `store.TripRepo`, `telemetry.TripHandler`, the fourth access leg in `internal/auth`, and the `viewer` narrowing in `internal/mask`. Contracts **v0.41.0** ([`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json)). The wire contract is [`rest-api.md`](../contracts/rest-api.md) §7.30 and §5; the classification is [`data-classification.md`](../contracts/data-classification.md) §1.25–§1.28. **A sibling lane owns the sweeper, the leg detector, the per-leg Live Activity and the `trips` push category — see §10.**
+**Status:** Implemented — migrations **0047** and **0048**, `store.TripRepo`, `telemetry.TripHandler`, the fourth access leg in `internal/auth`, the `viewer` narrowing in `internal/mask`, and `internal/trips` (the window sweeper and the leg detector) with the `trips` push category and the per-leg Live Activity in `internal/push`. Contracts **v0.41.0** ([`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json)). The wire contract is [`rest-api.md`](../contracts/rest-api.md) §7.30, §7.21.7 and §5; the classification is [`data-classification.md`](../contracts/data-classification.md) §1.25–§1.28. Built as two lanes against one base branch — the model, the REST surface and the access resolution (§1–§9), and the legs, the pushes and the re-mask (§10–§11) — joined at the seams in §12.
 
 **Goal.** Give an owner a way to say *"for these three days, these people may see my car"* — and, in the same change, take standing live location away from a share that is not saying that. The feature is one sentence: **a trip is a TIME WINDOW during which the share-holders the owner picked see the car's live location, its navigation, the window's drives and a per-leg Live Activity.**
 
@@ -179,25 +179,229 @@ Everything else across the four tables is P0 — opaque cuids, instants, boolean
 
 **Memberships are DELETED here, not tombstoned**, which is the one place that is right: everywhere else `left_at` answers *"was this person ever on the trip"*, and after an account deletion there is no person left for that question to be about.
 
-## 10. What this lane did NOT build
+## 10. Legs and the per-leg Live Activity
 
-Recorded so the gap is **documented rather than discovered**. All of the following belong to a sibling lane working against the same base:
+### What a leg is
 
-- **The trip sweeper** (`internal/trips` — the package does not exist on this branch): the boundary `trip_started` / `trip_ended` pushes at the instants no request is present for, and the `started_notified_at` / `ended_notified_at` stamps that make them at-most-once. The columns and the partial index `idx_go_trips_unswept` exist and are unread.
-- **The leg detector**: everything that WRITES `go_trip_legs`. This lane's repository only READS legs (`queryTripOpenLeg`, for `Trip.currentLeg`); nothing here inserts, updates or ends one. The `arrived` evidence flag, the two leg push stamps and the two Activity stamps are unwritten.
-- **The per-leg Live Activity push-to-start fan-out**: the sender that takes a `go_trip_activity_tokens` row and opens an Activity anchored on `go_live_activities.trip_leg_id`. The anchor column, its CHECK, its partial unique index and its live index all exist (migration 0047); nothing writes them yet.
-- **The `trips` push category**: its [`rest-api.md`](../contracts/rest-api.md) §7.19 prefs toggle, its payload shape, its delivery flags and its deep link.
-- **The WebSocket revalidator's RE-MASK.** `internal/ws` is untouched by this lane. The 60-second `AccessRevalidator` sweep already re-derives access sets and drops what no longer resolves; teaching it to re-project an already-connected socket at a narrowed role is the sibling lane's work. *(Note for the sibling: `internal/auth/queries.go`'s fourth-leg comment reads as though that re-mask has already landed. It has not — see §11.)*
+One journey inside an open window: the car sets off for a named place, drives,
+and arrives or parks. A leg begins when, during an active trip, the vehicle is
+**driving WITH a non-empty `destinationName`**; it ends on arrival, on the route
+being cleared, on the car parking short, or on the window closing underneath it.
 
-**THE SEAM IS `telemetry.TripNotifier`** ([`internal/telemetry/trip_notifier.go`](../../internal/telemetry/trip_notifier.go)). It declares the **three REST-caused** events this package owns — `TripAdded`, `TripStarted` (only for a create that lands inside its own window), `TripEnded` (only for an owner's early end) — and deliberately not the two telemetry-caused ones.
+At most **one leg is open per trip at a time**, enforced by a partial unique
+index (`idx_go_trip_legs_open_per_trip`) rather than by the detector's care. The
+detector is event-driven and its inputs can arrive twice — a redelivered frame,
+two processes during a rolling deploy — and a second open leg would produce a
+second Live Activity on every participant's lock screen for the same journey.
+
+### Why the detector reads raw telemetry
+
+**There is no "driving with a destination" event in this service**, and the two
+ways of creating one were both rejected:
+
+**`drive.started` (internal/drives) is a SHIFT-STATE machine.** It fires when
+the car moves out of P, it carries a VIN, a drive id and a coordinate, and it
+knows nothing whatever about navigation. Extending `DriveStartedEvent` with a
+destination would make a state machine about GEAR depend on a field group it has
+no reason to know, and would put a field on every existing consumer that only
+this package reads. The disqualifying problem is **TIMING**: a driver commonly
+sets the destination on the dash AFTER pulling out, so a destination sampled at
+the drive-start instant is empty on a large fraction of real legs.
+
+**`internal/arrival` is RIDE-SCOPED to its bones.** Its candidate set is built
+from `go_ride_requests` rows with a dispatched pickup, and its verdict writes a
+ride status.
+
+So `internal/trips` subscribes to `TopicVehicleTelemetry` and keeps a **per-VIN
+destination and motion cache**, opening a leg on the transition into "driving,
+with a destination" **from either side**:
+
+| Sequence | Real-world shape |
+|----------|------------------|
+| destination set → car starts moving | the driver planned before pulling out |
+| car already moving → destination appears | the driver set the route on the dash afterwards |
+
+The second is the common one and is precisely what a drive-start event could
+never have expressed. Both are pinned by `TestLegOpens`.
+
+**Cost.** This is the busiest topic in the service — up to one frame per second
+per streaming car — so the per-frame path is a VIN lookup in a cached map and,
+for the overwhelming majority of frames (cars in no open window), nothing else.
+One frame per 15-second TTL pays for a query; only a genuine edge pays for a
+write. The candidate cache fails towards **detect nothing** after four TTLs of
+failed refreshes, because opening a leg on a closed window would push a card to
+people whose access has already been revoked.
+
+### Arrival evidence, and the one inversion against internal/arrival
+
+`internal/arrival` refuses to treat the car's own `milesToArrival` as evidence,
+and says why in as many words: the dash's target and the RIDE's target are
+different facts, with MYR-527 as the standing proof — a rider spent three hours
+on a trip whose car was still navigating to the pickup.
+
+**On a trip leg that argument inverts, and the inversion is exact rather than
+convenient.** A leg is DEFINED as "the car is driving to the place the dash
+names", so the dash's target IS the leg's target by construction, and the
+distance the car reports to its own destination is the most direct evidence
+available. The destination COORDINATE (`destinationLocation`) is used when the
+car streams one; the reported distance is the fallback.
+
+Everything else is reused verbatim from `internal/arrival` — the **80 m radius**,
+the **20-second dwell**, the **1 mph stopped threshold**, and the three-rung
+stillness ladder including MYR-563's positional rung. Two sets of numbers for one
+physical question is how two detectors end up disagreeing about the same car in
+the same car park.
+
+**A stop inside the radius is the beginning of an arrival, not the end of a leg.**
+This is the first bug the detector's tests found: a car that arrives also stops,
+so the park-short branch closed every successful arrival as `completed` one
+second into a twenty-second dwell, and the arrival could never fire. The
+park-short branch is now guarded on `!atDestination`.
+
+**The residual case, stated honestly:** a car that parks at its destination and
+then goes completely silent — with not even a MYR-394 REST poll frame to satisfy
+the dwell — keeps its leg open until the window closes, and is then settled as
+`completed`. That is the honest answer, since nothing ever proved it stayed, and
+it is the same dependency `internal/arrival` has on the same poller.
+
+### The four endings, and what each one sends
+
+| Ending | `arrived` | `trip_leg_arrived` push | Final card status |
+|--------|-----------|-------------------------|-------------------|
+| Dwell satisfied at the destination | `true` | **sent** | `arrived` |
+| Driver cleared the route | `false` | — | `completed` |
+| Car parked short of the destination | `false` | — | `completed` |
+| The trip's window closed underneath it | `false` | — | `completed` |
+
+The distinction is load-bearing rather than cosmetic: *"your car arrived"* is a
+sentence that cannot be taken back.
+
+### The Live Activity
+
+**The server creates the card.** A leg begins while no participant's phone is
+doing anything, and iOS gives a backgrounded app no way to start an Activity, so
+the card is raised by an ActivityKit **push-to-start** addressed by a token the
+app registers once per trip. The full envelope, the `attributes-type` constant,
+the three attributes, the content-state and the fifteen-minute expiration are
+specified in `rest-api.md` **§7.21.7**.
+
+**Two tables, two meanings of a `410`:**
+
+- `go_trip_activity_tokens` holds a **push-to-start** token, which addresses the
+  **APP**. A `410` means the app is gone; the row goes from *this* table.
+- `go_live_activities` holds a per-Activity **update** token, which addresses
+  **one running card**. A `410` means the card is gone and the app is fine.
+
+Routing a push-to-start rejection to the ride path would delete nothing while
+leaving a dead registration retried on every remaining leg.
+
+**One table for both kinds of Activity.** `go_live_activities` gained a second
+anchor (`trip_leg_id`, migration 0047) with a CHECK that exactly one is set. A
+separate table would have needed its own ETA ticker, held-end machinery,
+token-rotation upsert and 24-hour reaper — and MYR-418 is the standing evidence
+that this surface has no failure signal, so a second wrong implementation would
+look exactly like a working one from the server all the way to the logs.
+
+**A leg that never got a token registration still gets its pushes.** The card is
+a courtesy on top of the banners, not a precondition for them: a trip whose
+participants are all on the web produces zero cards and five perfectly good
+notifications.
+
+### The four claims
+
+A leg has four independent deliveries, and each carries its own durable stamp on
+`go_trip_legs`, because they are four separate deliveries with four separate
+failure modes — an alert can succeed while a push-to-start fails, and each must
+be retryable without re-sending the other:
+
+| Stamp | Delivery |
+|-------|----------|
+| `started_notified_at` | the `trip_leg_started` banner |
+| `activity_started_at` | the push-to-start fan-out |
+| `arrived_notified_at` | the `trip_leg_arrived` banner |
+| `activity_ended_at` | the alerting-update-then-end pair |
+
+### The window sweeper
+
+Every 60 seconds, two claim statements — one per edge — each an
+`UPDATE … RETURNING` against a stamped column. There is no read-then-write
+anywhere in `internal/trips/sweeper.go`, which is the whole concurrency story:
+two processes both run the pass and the stamps arbitrate.
+
+**Endings are claimed first.** A trip whose entire window elapsed while the
+process was down matches BOTH claims, and sweeping starts first would announce
+*"your trip started"* and then, milliseconds later in the same pass, that it had
+ended.
+
+`Service.SettleTrip` is the single function every closing edge goes through: the
+sweeper's ticker, the owner's early-end handler, and a window that elapsed
+during a restart. It ends the open leg's card **before** the trip announcement,
+because a card still saying "heading to the Grand Canyon" is a lie on a lock
+screen while a missing banner is only a silence.
+
+### The WebSocket re-mask
+
+A trip window opens and closes on the **clock**, so unlike a revoked share there
+is no mutation anywhere for the fast revocation nudge to hang off. The
+60-second `ws.AccessRevalidator` sweep is therefore not a backstop for trips —
+it **is** the mechanism, and it now re-resolves per-vehicle ROLES rather than
+only membership:
+
+- **narrowing** — a participant whose window closed still holds their share, so
+  the vehicle never leaves their access set and the kick path never fires. They
+  are re-masked to `viewer` in place: the connection survives, the location
+  stops.
+- **widening** — a share-holder whose window opened is promoted to
+  `trip_participant` without reconnecting.
+
+The sweeper nudges it on **every** transition, because both run at 60 seconds:
+unnudged, a trip opening a moment after a sweep would leave every participant's
+socket masked as a plain viewer for nearly a minute AFTER their phone buzzed to
+say the trip had started — the push and the map disagreeing is the one failure a
+person actually notices.
+
+`Client.roles` is an immutable map behind an atomic pointer, replaced whole and
+never edited, because it is read lock-free on the broadcast hot path.
+
+## 11. Kill switch
+
+`TRIPS_ENABLED` (default true) is read at **composition** time: false constructs
+neither the sweeper nor the detector, so a disabled deployment costs nothing and
+holds no state, and the trip endpoints answer `503`.
+
+**What it does not do is revoke access already resolved.** That is derived from
+the trip rows by a query this switch does not reach, so a participant inside an
+open window keeps seeing the car until the window's own end — the safe direction
+for a switch whose purpose is to stop the machinery rather than to punish the
+people using it.
+
+## 12. What is NOT built
+## 12. The seams, and what is still not built
+
+**Both lanes are now in.** Everything §10 and §11 describe — the sweeper, the leg
+detector, the per-leg Live Activity and its push-to-start, the `trips` push
+category and the WebSocket re-mask — landed alongside the model, the REST surface
+and the access resolution, and the seams below are what joins them.
+
+**THE SEAM IS `telemetry.TripNotifier`** ([`internal/telemetry/trip_notifier.go`](../../internal/telemetry/trip_notifier.go)). It declares the **three REST-caused** events the handler package owns — `TripAdded`, `TripStarted` (only for a create that lands inside its own window), `TripEnded` (only for an owner's early end) — and deliberately not the two telemetry-caused ones, which belong to the leg detector. It is satisfied by [`cmd/telemetry-server/trip_notifier_adapter.go`](../../cmd/telemetry-server/trip_notifier_adapter.go), a composition-root adapter over `trips.Service`'s `NotifyTripAdded` / `NotifyTripStarted` / `NotifyTripEnded`: the two packages name the same three events differently and neither is made to import the other's vocabulary.
 
 **NIL IS A NO-OP, NOT A FAILURE, and that is the load-bearing property.** The constructor substitutes `noopTripNotifier`, so the call sites carry no nil checks and a fourth event added later cannot forget one. **A deployment with no notifier wired creates trips that work perfectly and tells nobody** — because a push is an announcement about a state change, never the state change itself, so a notifier that is absent, slow or broken must not be able to fail a create. Implementations must not block the request: every method is called **after the commit** and its result is discarded, and there is no error return because there is no error the handler could act on.
 
-**Wiring it is ONE LINE** in [`cmd/telemetry-server/wiring_trips.go`](../../cmd/telemetry-server/wiring_trips.go): add `telemetry.WithTripNotifier(tripNotifier)` to the `NewTripHandler` option list.
+**The owner's early end goes through `SettleTrip`, not through `TripEnded`.** [`internal/telemetry/trip_settler.go`](../../internal/telemetry/trip_settler.go) declares a second, narrower seam — `TripSettler.SettleTrip(ctx, tripID)` — wired to `trips.Service.SettleTrip` by the same adapter. It exists because a closing edge is more than an announcement: the open leg's Live Activity has to be ENDED before the trip banner goes out (§10), and only the live package knows how. `POST /api/trips/{tripId}/end` therefore calls the settler, and the settler owns the `trip_ended` fan-out; the handler does not also call `TripEnded`, or every early end would announce itself twice. **Nil is a no-op here too, and the degradation is stated rather than assumed:** with no settler wired an early end still ends the trip row — the window closes, access stops on the next lookup — and the sweeper's own closing pass picks the announcement up on its next tick.
 
 Two smaller seams are wired the same fail-closed way and are worth knowing about: `TripDriveAdmitter` (nil ⇒ the drives endpoints stay owner-only, exactly as MYR-369 left them) and `TripVehicleLister` (nil ⇒ the catalog stays owner + shared + member). **A deployment that forgot to wire trips under-serves rather than over-shares.**
 
-## 11. References
+**Still not built, recorded so the gaps are documented rather than discovered:**
+
+- **The trip card has no ticker.** Its ETA refreshes only on the frames the detector sees, so a car that goes quiet mid-leg holds its last number until the 3-minute stale-date marks the card stale. The ride path has `ActivityTicker` for exactly this; a leg-anchored equivalent is a small follow-up (`ListActiveLegActivities` already exists in shape).
+- **`internal/push/activity_ticker.go`'s reaper does not know about legs.** Its 24-hour `updated_at` sweep covers leg rows correctly by accident — same table, same column — which is the right outcome reached without a test saying so.
+- **`push.Activity.RideRequestID` carries a LEG id on the trip path.** The struct has one anchor field and the leg send paths only log it, so nothing misreads it, but a second field would be honest.
+- **A `409` from the leg registration is not distinguishable from a ride's.** Both return `store.ErrLiveActivityRideClosed`, deliberately — the HTTP answer is identical — but the sentinel's NAME now lies about half its callers.
+- **`v1Roles` in `internal/ws/hub_masked.go` still lists only owner and viewer.** Harmless: it is used solely to size a map, and the active-role set is built from the clients actually connected.
+- **`internal/telemetry` still has no auth middleware (DV-19)** — every trips handler repeats the bearer preamble, like every other handler on the surface.
+- **`data-lifecycle.md` §3.1 / §4.2 carry no step 8g** and no trip metadata counts, though the Go comments cite "§3.1 step 8g".
+
+## 13. References
 
 - **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the nine routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
 - **Schemas:** [`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json), and the MYR-602 amendments to [`vehicle-summary.schema.json`](../contracts/schemas/vehicle-summary.schema.json) (`activeTripId`, the rewritten `location` RBAC text), [`vehicle-state.schema.json`](../contracts/schemas/vehicle-state.schema.json) (the per-field MYR-602 visibility notes) and [`live-activity.schema.json`](../contracts/schemas/live-activity.schema.json) (the `ride` \| `trip` kind).
@@ -208,3 +412,20 @@ Two smaller seams are wired the same fail-closed way and are worth knowing about
 - **Access and masks:** [`internal/auth/role.go`](../../internal/auth/role.go), [`internal/auth/queries.go`](../../internal/auth/queries.go), [`internal/auth/vehicle_access.go`](../../internal/auth/vehicle_access.go), [`internal/mask/tables.go`](../../internal/mask/tables.go), [`internal/mask/sentinels.go`](../../internal/mask/sentinels.go), [`internal/mask/mask.go`](../../internal/mask/mask.go).
 - **Composition root and config:** [`cmd/telemetry-server/wiring_trips.go`](../../cmd/telemetry-server/wiring_trips.go), [`internal/config/config.go`](../../internal/config/config.go) (`TripsEnabled`).
 - **Neighbours:** [MYR-184](https://linear.app/myrobotaxi/issue/MYR-184) (shares), [MYR-369](https://linear.app/myrobotaxi/issue/MYR-369) (drives went owner-only; grant capabilities), [MYR-435](https://linear.app/myrobotaxi/issue/MYR-435) (the viewer allow-list this narrowing supersedes in part), [MYR-447](https://linear.app/myrobotaxi/issue/MYR-447) (the label encryptor), [MYR-515](https://linear.app/myrobotaxi/issue/MYR-515) (`VehicleSummary.location`), [MYR-540](https://linear.app/myrobotaxi/issue/MYR-540) (ride members), [MYR-583](https://linear.app/myrobotaxi/issue/MYR-583) (the confirmed-name gate the roster reads), [MYR-602](https://linear.app/myrobotaxi/issue/MYR-602).
+
+### The code map
+
+| Concern | File |
+|---------|------|
+| Package rationale, both rejected alternatives | `internal/trips/doc.go` |
+| Window sweeper | `internal/trips/sweeper.go` |
+| Leg detector (I/O half) | `internal/trips/detector.go` |
+| Leg detector (pure rules) | `internal/trips/detector_state.go` |
+| Leg lifecycle and its four claims | `internal/trips/legs.go` |
+| The two window transitions, `TripNotifier`, `SettleTrip` | `internal/trips/transitions.go` |
+| Trip banners (`trips` category) | `internal/push/notifier_trips.go`, `copy_trips.go` |
+| Trip Live Activity | `internal/push/activity_trip_notifier.go`, `activity_trip_fanout.go`, `activity_trip_state.go` |
+| Push-to-start envelope | `internal/push/activity_apns.go` |
+| Live-side repositories | `internal/store/trip_live_repo.go`, `trip_leg_repo.go`, `trip_activity_token_repo.go`, `live_activity_trip_anchor.go` |
+| WebSocket re-mask | `internal/ws/access_revalidator.go`, `client.go`, `hub_location_frames.go` |
+| Composition | `cmd/telemetry-server/wiring_trips_live.go` |

@@ -197,6 +197,13 @@ func (a *accountDataDeleterAdapter) DeleteRideMemberships(ctx context.Context, u
 	return a.deleter.DeleteRideMemberships(ctx, userID)
 }
 
+// DeleteTripLegActivities drops the account's leg-anchored Live Activity rows
+// (MYR-602, §3.1 step 8g), leaving its RIDE Activities to the ride teardown
+// that is responsible for end-pushing them first.
+func (a *accountDataDeleterAdapter) DeleteTripLegActivities(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripLegActivities(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope telemetry.AccountDeletionScope, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
 	res, err := a.deleter.DeleteIdentity(ctx, store.DeletionScope{
 		CallerID:    scope.CallerID,
@@ -219,14 +226,15 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		RemovedVehicleTombstonesDeleted: counts.RemovedVehicleTombstonesDeleted,
 		VehicleDriverAccessRowsDeleted:  counts.VehicleDriverAccessRowsDeleted,
 
-		// MYR-602 — three counts, one per relation a person can stand in to a
-		// trip. All three are plain integers, which is the audit row's whole
+		// MYR-602 — four counts, one per relation a person can stand in to a
+		// trip. All four are plain integers, which is the audit row's whole
 		// P0 rule (CG-DL-5): a trip NAME is P1 user content and a
 		// push-to-start token is a P1 capability, and neither may cross this
 		// boundary in any form but a tally.
 		TripsDeleted:              counts.TripsDeleted,
 		TripParticipationsDeleted: counts.TripParticipationsDeleted,
 		TripActivityTokensDeleted: counts.TripActivityTokensDeleted,
+		TripLegActivitiesDeleted:  counts.TripLegActivitiesDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

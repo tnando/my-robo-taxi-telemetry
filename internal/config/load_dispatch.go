@@ -87,6 +87,21 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 	}
 	fc.autoArrivalEnabled = autoArrival
 
+	// TRIPS_ENABLED is the MYR-602 kill-switch for the WHOLE feature: the §7.30
+	// endpoints, the window sweeper and the leg detector together. It is loaded
+	// here beside the other two detector switches because it gates the same
+	// KIND of thing — machinery that acts on a car's telemetry with nobody
+	// asking — and an operator reading this file should see all three together.
+	// Same fail-fast parse as its neighbours: unset is ON, and anything
+	// ParseBool rejects stops the process at boot rather than being read as
+	// "off", because a typo that silently disabled a feature would be
+	// indistinguishable from an intentional shutdown.
+	trips, err := parseKillSwitchEnv("TRIPS_ENABLED")
+	if err != nil {
+		return err
+	}
+	fc.tripsEnabled = trips
+
 	// ARRIVAL_FLASH_ENABLED is the MYR-542 arrival-greeting kill-switch: three
 	// headlight flashes when the car is observed at a waypoint. It sits after
 	// AUTO_ARRIVAL_ENABLED because it is strictly downstream of it — the flash
@@ -128,16 +143,6 @@ func applyDispatchEnvOverrides(fc *fileConfig) error {
 		return err
 	}
 	fc.telemetryInactivitySuspensionEnabled = suspension
-
-	// MYR-602 trips. Same fail-fast parse as its neighbours: unset is ON, and
-	// anything ParseBool rejects stops the process at boot rather than being
-	// read as "off" — a typo that silently disabled a feature would be
-	// indistinguishable from an intentional shutdown.
-	trips, err := parseKillSwitchEnv("TRIPS_ENABLED")
-	if err != nil {
-		return err
-	}
-	fc.tripsEnabled = trips
 
 	return nil
 }

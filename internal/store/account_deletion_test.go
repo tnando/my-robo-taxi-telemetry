@@ -354,8 +354,8 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// (the owner) who never consented to appear in this person's audit
 		// trail. The number says nothing about whose cars they were.
 		"vehicleDriverAccessRowsDeleted": true,
-		// MYR-602, step 8g. THREE counts, one per relation a person can stand
-		// in to a trip, and all three needed the argument for the same reason
+		// MYR-602, step 8g. FOUR counts, one per relation a person can stand
+		// in to a trip, and all four needed the argument for the same reason
 		// the tombstone count above did: the ROWS they count are not P0 by
 		// shape. go_trips holds a trip NAME, which is P1 user content sealed
 		// at rest; go_trip_activity_tokens holds an APNs push-to-start token,
@@ -365,13 +365,18 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// whom, or on which device. A name, a fragment of one, or a token
 		// prefix here would be the violation.
 		//
-		// They are three keys and not one because a deletion has to be shown
+		// They are four keys and not one because a deletion has to be shown
 		// to have reached both directions: trips this person OWNED (whose
 		// roster, tokens and legs went with them through the FK cascade) and
 		// trips they were merely ON, which are somebody else's and survive.
+		// The fourth is the leg-anchored Live Activity — a different kind of
+		// address from the push-to-start token beside it (one running card
+		// versus a standing permission slip), and a deletion that reached one
+		// and not the other is exactly the state two counts make visible.
 		"tripsDeleted":              true,
 		"tripParticipationsDeleted": true,
 		"tripActivityTokensDeleted": true,
+		"tripLegActivitiesDeleted":  true,
 	}
 	for k, v := range got {
 		if !allowed[k] {

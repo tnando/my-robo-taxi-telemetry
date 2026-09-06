@@ -235,6 +235,7 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 	// Role("") sentinel at broadcast time, which yields a deny-all
 	// projection — the client connects but receives no payload for
 	// that vehicle until a successful re-handshake.
+	roles := make(map[string]authpkg.Role, len(concreteIDs))
 	for _, vid := range concreteIDs {
 		role, roleErr := auth.ResolveRole(authCtx, userID, vid)
 		if roleErr != nil {
@@ -245,8 +246,12 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 			)
 			continue
 		}
-		client.vehicleRoles[vid] = role
+		roles[vid] = role
 	}
+	// Published as ONE table rather than written entry by entry (MYR-602): the
+	// map is read lock-free on the broadcast path, and a client registered
+	// mid-loop would otherwise be masked against a partially filled table.
+	client.setRoles(roles)
 	return nil
 }
 

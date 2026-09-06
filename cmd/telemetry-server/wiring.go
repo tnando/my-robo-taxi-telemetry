@@ -277,7 +277,17 @@ type httpRouteDeps struct {
 	// telemetry endpoint), and in every test that does not wire it — the
 	// command endpoint then runs exactly as it did before.
 	fleetConfigReconciler *telemetry.FleetConfigReconciler
-	logger                *slog.Logger
+	// tripNotifier delivers the three REST-caused `trips` pushes (MYR-602) and,
+	// on the owner's early end, SETTLES the trip — ending every open leg's Live
+	// Activity before the banner goes out and nudging the WebSocket re-mask.
+	// Satisfied by tripNotifierAdapter over internal/trips' Service.
+	//
+	// NIL IS A NO-OP AND IS THE ORDINARY STATE IN TWO CASES: a test that wires
+	// no push, and a deployment with TRIPS_ENABLED=false, where setupTripsLive
+	// builds no service at all. Trips created without it work perfectly and
+	// tell nobody, which is the safe direction for an announcement.
+	tripNotifier telemetry.TripNotifier
+	logger       *slog.Logger
 }
 
 // setupHTTPHandlers wires every HTTP handler the server exposes:
@@ -318,7 +328,7 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 	// third merge leg. One instance rather than three, so the surfaces resolve
 	// a window through one statement set and cannot come to disagree about who
 	// is on a trip.
-	tripRepo := setupTripEndpoints(deps, &vehicleSnapshotAdapter{repo: deps.vehicleRepo})
+	tripRepo := setupTripEndpoints(deps, &vehicleSnapshotAdapter{repo: deps.vehicleRepo}, deps.tripNotifier)
 	tripAdmitter := &tripDriveAdmitterAdapter{repo: tripRepo}
 	// ── MYR-602 TRIPS. END ─────────────────────────────────────────────────
 

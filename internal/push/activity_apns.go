@@ -39,6 +39,21 @@ type activityAPS struct {
 	// end event. Omitted means iOS dismisses the Activity immediately.
 	DismissalDate *int64 `json:"dismissal-date,omitempty"`
 
+	// AttributesType is `aps.attributes-type`, present ONLY on a `start` event
+	// (MYR-602). It names the Swift `ActivityAttributes` struct iOS must
+	// instantiate to create the Activity, and it must match the type name in
+	// the widget bundle EXACTLY — a mismatch is silently ignored by the device,
+	// with APNs answering 200 and no card ever appearing. It is
+	// `TripActivityAttributes`; see TripActivityAttributesType.
+	AttributesType string `json:"attributes-type,omitempty"`
+
+	// Attributes is `aps.attributes`, the STATIC half of the Activity, present
+	// only on a `start`. It is decoded once into the Swift attributes struct
+	// and never changes for the life of the card, which is exactly why these
+	// values are NOT in the content-state: re-sending `tripId` and `vehicleId`
+	// on every ETA tick would spend Apple's 4KB budget on constants.
+	Attributes *tripActivityAttributes `json:"attributes,omitempty"`
+
 	// Alert is `aps.alert`, present only on the six phase changes (MYR-398) and
 	// only ever on an `update` (MYR-418 — see buildActivityPayload).
 	// Its PRESENCE is the whole mechanism — iOS expands the Dynamic Island for
@@ -69,6 +84,47 @@ type activityAlert struct {
 	Body  string `json:"body"`
 }
 
+// TripActivityAttributesType is the value of `aps.attributes-type` on a
+// trip-leg push-to-start, and it is a CROSS-REPOSITORY CONSTANT: it must be the
+// exact name of the `ActivityAttributes`-conforming struct in the iOS widget
+// bundle. iOS matches it by name to decide which Activity to instantiate, and a
+// mismatch fails SILENTLY — APNs answers 200, the device drops the push, and no
+// card ever appears, with no signal on either side. Changing it is an iOS
+// change and a server change in the same release, never one of the two.
+const TripActivityAttributesType = "TripActivityAttributes"
+
+// tripActivityAttributes is `aps.attributes` for a trip-leg push-to-start: the
+// three values that are constant for the life of one leg's card.
+//
+// WHY THESE THREE AND NOT MORE. The attributes are decoded ONCE and can never
+// be updated, so a value belongs here only if it cannot change while the card
+// is alive. `tripId` and `vehicleId` are identifiers the widget needs for its
+// deep link and cannot derive. `vehicleName` is the owner's nickname, which
+// CAN in principle change mid-leg — it is here anyway because the card must be
+// legible the instant it appears, before any content-state update arrives, and
+// a nickname edit during a single leg is not a case worth spending a required
+// content-state key on. The content-state carries it too, so an update
+// corrects it.
+//
+// The TRIP NAME is deliberately NOT here even though it is equally static: it
+// is P1 user content, and the content-state already carries it under a key the
+// client reads on every push. One place, one classification argument.
+type tripActivityAttributes struct {
+	TripID      string `json:"tripId"`
+	VehicleID   string `json:"vehicleId"`
+	VehicleName string `json:"vehicleName"`
+}
+
+// TripActivityStart is the addressing half of one push-to-start: which phone,
+// and which Activity to create on it.
+type TripActivityStart struct {
+	// TripID and VehicleID go into the attributes.
+	TripID    string
+	VehicleID string
+	// VehicleName is the nickname the card shows before its first update.
+	VehicleName string
+}
+
 // activityPayload is the whole APNs body.
 //
 // Unlike the alert payload beside it, there is NO userInfo: an Activity update
@@ -91,6 +147,19 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 		dismiss := n.DismissalDate.Unix()
 		aps.DismissalDate = &dismiss
 	}
+	// A `start` — and ONLY a start — carries the attributes (MYR-602). Written
+	// here, at the one place the keys are either present or not, for the same
+	// reason the `end`-never-alerts rule is enforced here: this surface has no
+	// failure signal, so attributes on an `update` would be accepted by APNs,
+	// ignored by the device, and indistinguishable from working.
+	if n.Event == ActivityEventStart && n.Start != nil {
+		aps.AttributesType = TripActivityAttributesType
+		aps.Attributes = &tripActivityAttributes{
+			TripID:      n.Start.TripID,
+			VehicleID:   n.Start.VehicleID,
+			VehicleName: n.Start.VehicleName,
+		}
+	}
 	// AN `end` NEVER RENDERS AN ALERT, whatever the caller asked for (MYR-418).
 	//
 	// Apple's ActivityKit push documentation introduces the alert dictionary
@@ -106,6 +175,11 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 	// exactly like an alert that worked, from the server all the way to the
 	// logs. A caller that wants the sixth expansion must send it on the alerting
 	// UPDATE that precedes the end, which is what endRide does.
+	// A `start` may alert, and Apple's own documentation introduces the alert
+	// dictionary under `start` and `update` — but no trip caller sets one. The
+	// card APPEARING is the announcement, and the `trip_leg_started` banner is
+	// already on its way from the ordinary notifier; a third simultaneous
+	// interruption for one fact is what MYR-413 exists to stop.
 	if n.Alert != nil && n.Event != ActivityEventEnd {
 		aps.Alert = &activityAlert{Title: n.Alert.Title, Body: n.Alert.Body}
 	}
@@ -157,6 +231,26 @@ func (c *Client) SendActivity(ctx context.Context, n ActivityNotification) error
 // shorter than the ActivityKit ceiling; it exists to outlast a flat battery or
 // an overnight flight, not to be precise.
 const endPushRetention = 24 * time.Hour
+
+// pushToStartRetention is how long APNs holds an undelivered PUSH-TO-START.
+//
+// FIFTEEN MINUTES, and the number is a compromise between the two ways this
+// push can be wrong. Pinned to the 3-minute stale-date like an ordinary update,
+// a phone in a tunnel or in a pocket at the moment a leg begins would never get
+// the card at all — and unlike an ETA tick there is no successor, because the
+// updater only pushes to Activities that already exist. Given the `end`'s day,
+// a card would materialise on a lock screen for a leg that finished hours ago,
+// which is worse than never appearing: an Activity created after its journey
+// ended has no update coming and no end coming, and sits there until
+// ActivityKit's own ceiling.
+//
+// Fifteen minutes is long enough to outlast a tunnel, a lift, or a locked phone
+// in a bag, and short enough that the card is still about a leg the car is
+// plausibly still driving — the median leg on a road trip is far longer. A
+// start that misses this window costs the card, not the trip: the
+// `trip_leg_started` banner is a separate push with its own retention, and the
+// leg's own `trip_leg_arrived` still arrives.
+const pushToStartRetention = 15 * time.Minute
 
 // alertingUpdateRetention is the same day for an ALERTING update, and it is
 // deliberately its own constant rather than a reuse of endPushRetention: they
@@ -211,6 +305,11 @@ const alertingUpdateRetention = 24 * time.Hour
 // Everything is computed off n.Timestamp, not the wall clock, so the header,
 // the `aps.timestamp` and the stale-date in the body all describe one instant.
 func activityExpiration(n ActivityNotification) time.Time {
+	if n.Event == ActivityEventStart {
+		// See pushToStartRetention: neither the stale-date nor the end's day is
+		// the right horizon for a push that CREATES a card.
+		return n.Timestamp.Add(pushToStartRetention)
+	}
 	if n.Event != ActivityEventEnd {
 		if n.Alert == nil {
 			return n.StaleDate()

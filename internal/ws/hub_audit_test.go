@@ -271,9 +271,13 @@ func TestHub_BroadcastMasked_AuditEmitFailure_DoesNotDropFrame(t *testing.T) {
 		"v-1",
 		mask.ResourceVehicleState,
 		time.Now().UTC().Format(time.RFC3339),
+		// `chargeLevel` carries the frame since MYR-602 narrowed `viewer` off
+		// the Speed/GPS group: a speed-only projection is now suppressed for a
+		// viewer, so the frame would never arrive and this test would fail for
+		// a reason that has nothing to do with the audit emitter.
 		map[string]any{
-			"speed": 65,
-			"vin":   "7SAYGDET7TA613795",
+			"chargeLevel": 82,
+			"vin":         "7SAYGDET7TA613795",
 		},
 	)
 

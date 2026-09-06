@@ -29,8 +29,15 @@ import (
 
 // LiveActivity is one running Live Activity that can be pushed to.
 type LiveActivity struct {
-	// RideRequestID is the ride whose Activity this is.
+	// RideRequestID is the ride whose Activity this is. Empty on a row anchored
+	// to a trip leg instead — migration 0047's CHECK makes exactly one of the
+	// two anchors set, so exactly one of these two fields is populated by any
+	// read.
 	RideRequestID string
+	// TripLegID is the trip leg whose Activity this is (MYR-602). Empty on a
+	// ride row. See live_activity_trip_anchor.go for why one table carries
+	// both.
+	TripLegID string
 	// UserID is the party running it. v1 only ever registers the rider.
 	UserID string
 	// ActivityPushToken is the raw ActivityKit update token. P1 — never log in

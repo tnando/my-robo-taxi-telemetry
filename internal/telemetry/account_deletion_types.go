@@ -126,6 +126,13 @@ type AccountDataDeleter interface {
 	// push-to-start registrations on trips the cascade above did not reach
 	// (MYR-602, §3.1 step 8g).
 	DeleteTripActivityTokens(ctx context.Context, userID string) (int, error)
+	// DeleteTripLegActivities drops this person's LEG-ANCHORED Live Activity
+	// rows (MYR-602, §3.1 step 8g) — the running cards, as against the
+	// push-to-start registrations above. Both tables cascade from go_trips,
+	// which covers a trip's OWNER completely and a PARTICIPANT not at all:
+	// their rows live under somebody else's trip, which this deletion does not
+	// touch and must not.
+	DeleteTripLegActivities(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -201,7 +208,11 @@ type AccountDeletionCounts struct {
 	// removed (MYR-602). A COUNT and never a token — the value is a P1
 	// capability and the audit row is P0-only.
 	TripActivityTokensDeleted int
-	RefreshTokensRevoked      int
+	// TripLegActivitiesDeleted counts the leg-anchored Live Activity rows
+	// removed (MYR-602). Kept separate from the tokens for the reason the store
+	// struct gives: they are two different kinds of address.
+	TripLegActivitiesDeleted int
+	RefreshTokensRevoked     int
 }
 
 // AccountIdentityOutcome mirrors store.AccountIdentityResult.
