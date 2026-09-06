@@ -139,10 +139,16 @@ func (p *OwnerProvisioner) ClearDriverAccess(ctx context.Context, vin, userID st
 // overwrite this row. The append-only AuditLog trail is where a second
 // acknowledgment would be recorded, and it is the only surface that can hold
 // more than one — which is the right shape for a history.
+// The `user_id = $4` guard matches the two statements above and is here for the
+// same reason, even though the §7.29 handler already establishes ownership: a
+// consent record must not be writable against a car the acknowledging account
+// does not hold, and defence that lives only in the caller is defence that the
+// second caller will not have.
 const queryAcknowledgeDriverAccess = `
 UPDATE go_vehicle_driver_access
 SET acknowledged_at = $2, acknowledgment_version = $3
 WHERE vehicle_id = $1
+  AND user_id = $4
   AND acknowledged_at IS NULL`
 
 // ownerApprovalAuditMetadata is the whole P0 payload of the
@@ -198,7 +204,7 @@ func (r *VehicleRepo) AcknowledgeOwnerApproval(
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, queryAcknowledgeDriverAccess, vehicleID, now, version)
+	tag, err := tx.Exec(ctx, queryAcknowledgeDriverAccess, vehicleID, now, version, userID)
 	if err != nil {
 		r.metrics.IncQueryError("vehicle.acknowledge_owner_approval")
 		return false, fmt.Errorf("VehicleRepo.AcknowledgeOwnerApproval(%s): %w", vehicleID, err)

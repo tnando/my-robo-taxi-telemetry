@@ -223,7 +223,18 @@ func (h *OwnerApprovalHandler) handle(w http.ResponseWriter, r *http.Request) {
 func (h *OwnerApprovalHandler) completeSetup(
 	ctx context.Context, w http.ResponseWriter, row VehicleSnapshotRow, userID string, recorded bool,
 ) {
-	if recorded {
+	// `recorded` alone is NOT the right condition, and the extra disjunct closes
+	// a real interleaving. Two genuinely concurrent acknowledgments of one car:
+	// the store's `AND acknowledged_at IS NULL` makes the loser match zero rows,
+	// so it gets recorded=false — and if that skipped the re-read it would hand
+	// the completer the row it authorized against, which still says
+	// unacknowledged, and answer `awaiting_owner_acknowledgment` to a request
+	// contemporaneous with the one that satisfied it. The client would re-show
+	// the sheet it had just confirmed.
+	//
+	// So: re-read whenever the row we hold says the gate is shut, whether this
+	// call is what shut it or not.
+	if recorded || row.DriverAccess.PendingAcknowledgment() {
 		fresh, err := h.vehicles.GetByID(ctx, row.ID)
 		if err != nil {
 			// The acknowledgment is committed; we simply cannot see its effect.

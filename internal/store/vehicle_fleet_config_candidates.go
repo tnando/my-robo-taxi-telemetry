@@ -42,6 +42,25 @@ type FleetConfigCandidate struct {
 	// APPLIED to this car — proof the virtual key is paired and the car was
 	// reachable then. Zero when never observed. Opens the pairing epoch.
 	SignedCommandAt time.Time
+	// PendingOwnerAck is true when this car carries an UNACKNOWLEDGED
+	// go_vehicle_driver_access row (MYR-599) — it was linked by someone Tesla
+	// calls a DRIVER of it, and nothing may be pushed at it or deleted from it
+	// until they acknowledge the owner approved adding it.
+	//
+	// IT TRAVELS ON THE CANDIDATE RATHER THAN BEING RE-QUERIED because the
+	// reconciler has TWO candidate producers and gating only one of them left a
+	// live hole: the periodic pass builds candidates from
+	// queryFleetConfigCandidates (which carries a NOT EXISTS), but the
+	// pairing-signal path builds them from
+	// queryResetFleetConfigScheduleOnPairing and hands them straight to
+	// reconcileOne. Every producer now reports the fact and the single consumer
+	// enforces it, so a third producer added later inherits the gate instead of
+	// silently reopening it.
+	//
+	// The zero value is false = "push away", which is the UNSAFE direction. That
+	// is tolerable only because both producers set it explicitly in SQL; a
+	// hand-built candidate must never be handed to reconcileOne.
+	PendingOwnerAck bool
 	// ForcedRepushAt is when the reconciler last performed a forced
 	// (delete-then-create) config re-push. Zero when never. Compared against
 	// SignedCommandAt to ration escalations to one per epoch.
@@ -121,7 +140,8 @@ const queryFleetConfigCandidates = `
 SELECT v."id", v."vin", v."userId", v."lastUpdated", v."status",
        COALESCE(fa.attempt_count, 0),
        COALESCE(fa.last_outcome, ''),
-       fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at
+       fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at,
+       ` + pendingOwnerAckExprV + `
 FROM "Vehicle" v
 LEFT JOIN go_fleet_config_attempts fa ON fa.vehicle_id = v."id"
 WHERE length(v."vin") = 17
@@ -195,7 +215,8 @@ func (r *VehicleRepo) ListFleetConfigCandidates(
 		var lastAttemptAt, signedCommandAt, forcedRepushAt *time.Time
 		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.Status,
 			&c.AttemptCount, &c.LastOutcome,
-			&lastAttemptAt, &signedCommandAt, &forcedRepushAt); err != nil {
+			&lastAttemptAt, &signedCommandAt, &forcedRepushAt,
+			&c.PendingOwnerAck); err != nil {
 			r.metrics.IncQueryError("vehicle.list_fleet_config_candidates")
 			return nil, fmt.Errorf("VehicleRepo.ListFleetConfigCandidates: scan: %w", err)
 		}

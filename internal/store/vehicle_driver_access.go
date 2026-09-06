@@ -185,3 +185,34 @@ const unacknowledgedDriverAccessGate = `
         FROM go_vehicle_driver_access dva
         WHERE dva.vehicle_id = v."id"
           AND dva.acknowledged_at IS NULL`
+
+// pendingOwnerAckExprV / pendingOwnerAckExprVeh project the SAME question as a
+// BOOLEAN COLUMN on a candidate row, rather than using it to filter one out.
+//
+// WHY BOTH A FILTER AND A COLUMN EXIST, which looks redundant and is not. The
+// reconciler has TWO candidate producers: the periodic pass
+// (queryFleetConfigCandidates, which filters with the NOT EXISTS above) and the
+// pairing-signal path (queryResetFleetConfigScheduleOnPairing, which resets one
+// named car's schedule and hands the row straight to reconcileOne). Gating only
+// the first left a live hole — a driver who linked a borrowed car and sent ONE
+// signed command would drive the reconciler into a config read, a push, and
+// potentially the MYR-489 forced re-push's DELETE, all against a third party's
+// car and none of it consented to.
+//
+// So every producer now REPORTS the fact and the single consumer enforces it.
+// The filter stays on the periodic pass because excluding a row is cheaper than
+// carrying it, but the column is what makes the invariant hold: a third producer
+// added later inherits the gate instead of silently reopening it.
+//
+// Two spellings only because the two statements name the vehicle relation
+// differently — `v` for the candidate listing, the `veh` CTE for the pairing
+// reset. The predicate is otherwise identical, and identical to the gate above.
+const pendingOwnerAckExprV = `EXISTS (
+        SELECT 1 FROM go_vehicle_driver_access dva
+        WHERE dva.vehicle_id = v."id" AND dva.acknowledged_at IS NULL
+      )`
+
+const pendingOwnerAckExprVeh = `EXISTS (
+        SELECT 1 FROM go_vehicle_driver_access dva
+        WHERE dva.vehicle_id = veh."id" AND dva.acknowledged_at IS NULL
+      )`

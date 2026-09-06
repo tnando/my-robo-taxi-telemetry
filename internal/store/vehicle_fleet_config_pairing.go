@@ -92,7 +92,8 @@ WITH veh AS (
               (xmax = 0) AS created
 )
 SELECT veh."id", veh."vin", veh."userId", veh."lastUpdated", veh."status",
-       ups.last_outcome, ups.last_attempt_at, ups.forced_repush_at, ups.created
+       ups.last_outcome, ups.last_attempt_at, ups.forced_repush_at, ups.created,
+       ` + pendingOwnerAckExprVeh + `
 FROM ups JOIN veh ON veh."id" = ups.vehicle_id`
 
 // ResetFleetConfigScheduleOnPairing records that a signed vehicle command was
@@ -125,7 +126,8 @@ func (r *VehicleRepo) ResetFleetConfigScheduleOnPairing(
 	var c FleetConfigCandidate
 	var lastAttemptAt, forcedRepushAt *time.Time
 	err := row.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.Status,
-		&c.LastOutcome, &lastAttemptAt, &forcedRepushAt, &c.ScheduleCreated)
+		&c.LastOutcome, &lastAttemptAt, &forcedRepushAt, &c.ScheduleCreated,
+		&c.PendingOwnerAck)
 	if errors.Is(err, pgx.ErrNoRows) {
 		r.metrics.ObserveQueryDuration("vehicle.reset_fleet_config_on_pairing", time.Since(start).Seconds())
 		return FleetConfigCandidate{}, false, nil
