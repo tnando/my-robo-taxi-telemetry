@@ -56,6 +56,11 @@ func (t *TripActivityNotifier) fanOutLeg(ctx context.Context, tc TripLegContext,
 
 	state := tripContentState(tc, spec.at)
 	var delivered int
+	// delivery records WHO Apple accepted, so their rows can be stamped. Only
+	// the accepted ones: a card Apple refused is not "recently pushed", and
+	// stamping it would hold a permanently failing row past the reaper for
+	// nobody — the same rule the ride ticker's markPushed follows.
+	delivery := make([]string, 0, len(activities))
 	for i := range activities {
 		act := activities[i]
 		if !t.allowed(ctx, act.UserID, tc.LegID) {
@@ -73,6 +78,7 @@ func (t *TripActivityNotifier) fanOutLeg(ctx context.Context, tc TripLegContext,
 		switch {
 		case err == nil:
 			delivered++
+			delivery = append(delivery, act.UserID)
 		case errors.Is(err, ErrUnregistered):
 			// THE CARD is gone — swiped away, or ended by the app — not the
 			// phone and not the app. This is the UPDATE token, so the row goes
@@ -88,6 +94,8 @@ func (t *TripActivityNotifier) fanOutLeg(ctx context.Context, tc TripLegContext,
 		}
 	}
 
+	t.markLegPushed(ctx, tc.LegID, delivery)
+
 	t.logger.Info("trip activity pushed",
 		slog.String("trip_id", tc.TripID),
 		slog.String("leg_id", tc.LegID),
@@ -99,6 +107,35 @@ func (t *TripActivityNotifier) fanOutLeg(ctx context.Context, tc TripLegContext,
 		slog.Bool("alerting", spec.alert != nil),
 	)
 	return delivered
+}
+
+// markLegPushed stamps the rows this pass delivered to.
+//
+// WITHOUT IT A LIVE CARD IS REAPED OUT FROM UNDER ITSELF. go_live_activities is
+// swept 24 hours after each row's last WRITE, and `updated_at` is what makes
+// that horizon mean "last touched" rather than "registered": the ride path
+// keeps it true by stamping every delivered pass, and the leg path did not
+// stamp at all. A card on a long drive — a road trip's whole first day — had
+// its registration hard-deleted while it was still being pushed to, and the end
+// push then had no address at all: the card ran on to ActivityKit's own ceiling
+// still saying the car was driving somewhere it reached hours before.
+//
+// Non-fatal and detached from the send's context, exactly as the ride ticker's
+// markPushed is: a failed stamp costs a reaping horizon, never a pass of
+// updates.
+func (t *TripActivityNotifier) markLegPushed(ctx context.Context, legID string, userIDs []string) {
+	if len(userIDs) == 0 {
+		return
+	}
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+	defer cancel()
+
+	if _, err := t.store.MarkLegActivitiesPushed(markCtx, legID, userIDs); err != nil {
+		t.logger.Error("trip activity: mark pushed failed; the reaper may remove a live card",
+			slog.String("leg_id", legID),
+			slog.Int("activities", len(userIDs)),
+			slog.String("error", err.Error()))
+	}
 }
 
 // dropLegActivity removes an UPDATE token APNs permanently rejected.

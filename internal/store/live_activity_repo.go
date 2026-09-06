@@ -103,7 +103,7 @@ type LiveActivityKey struct {
 // silently reject every registration on a ride that has not dispatched yet.
 //
 // A guard miss affects zero rows, which RegisterActivity reports as
-// ErrLiveActivityRideClosed. Note this deliberately does NOT refuse every
+// ErrLiveActivityClosed. Note this deliberately does NOT refuse every
 // dispatch failure: a nav push that failed for any other reason leaves a ride
 // that is still genuinely happening (the owner can drive it manually), and its
 // Activity must keep rotating tokens.
@@ -304,16 +304,29 @@ type VehicleActivityRide struct {
 	Status        RideRequestStatus
 }
 
-// ErrLiveActivityRideClosed is returned by RegisterActivity when the SQL guard
-// refuses the write: the ride has reached a terminal status, or it is an
-// unrescued expired reservation (still `accepted`, MYR-461), and its Live
-// Activity has been ended for good.
+// ErrLiveActivityClosed is returned when a registration's SQL guard refuses the
+// write: the anchor is past the point where registering means anything.
 //
-// Deliberately does NOT wrap sdk.ErrNotFound. The ride exists — the caller was
-// proven to be its rider before we got here — it is simply past the point where
-// a registration means anything. The HTTP layer maps it to 409 (rest-api.md
-// §7.21.1), which is an instruction to the client to end its Activity locally.
-var ErrLiveActivityRideClosed = errors.New("live activity: ride is closed to registration")
+// IT IS ANCHOR-NEUTRAL BY NAME as well as by use (MYR-602). It was
+// ErrLiveActivityRideClosed, and RegisterLegActivity returns it too —
+// deliberately, because the HTTP answer is identical (409, "end your Activity
+// locally") and minting a second sentinel would make the handler branch on
+// which anchor it happened to be holding. The old name made that shared use
+// read as a bug at every leg call site.
+//
+// What "closed" means in each vocabulary:
+//
+//	a RIDE  reached a terminal status, or is an unrescued expired reservation
+//	        (still `accepted`, MYR-461)
+//	a LEG   has ended — `ended_at IS NOT NULL`, the same question in the leg's
+//	        own terms, since a leg has no status to reach
+//
+// Deliberately does NOT wrap sdk.ErrNotFound. The anchor exists — the caller
+// was proven to be a party to it before we got here — it is simply past the
+// point where a registration means anything. The HTTP layer maps it to 409
+// (rest-api.md §7.21.1), which is an instruction to the client to end its
+// Activity locally.
+var ErrLiveActivityClosed = errors.New("live activity: ride is closed to registration")
 
 // LiveActivityRepo is the go_live_activities repository.
 type LiveActivityRepo struct {
@@ -333,7 +346,7 @@ func NewLiveActivityRepo(pool *pgxpool.Pool, logger *slog.Logger) *LiveActivityR
 // one ride, replacing a rotated token in place and clearing any previous
 // end-tombstone.
 //
-// Returns ErrLiveActivityRideClosed when the ride is past registration — a
+// Returns ErrLiveActivityClosed when the ride is past registration — a
 // terminal status, or an expired reservation nobody rescued (one still at
 // `accepted`; see the query's MYR-461 note). That decision is made by the
 // statement itself rather than by a read before it: the handler's own check is
@@ -366,7 +379,7 @@ func (r *LiveActivityRepo) RegisterActivity(ctx context.Context, rideRequestID, 
 		// hard-deletes rides). Both mean the same thing to the caller: there is
 		// no Activity to keep alive here.
 		return fmt.Errorf("store.RegisterActivity(ride=%s, user=%s): %w",
-			rideRequestID, userID, ErrLiveActivityRideClosed)
+			rideRequestID, userID, ErrLiveActivityClosed)
 	}
 	return nil
 }

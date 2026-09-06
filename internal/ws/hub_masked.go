@@ -137,10 +137,17 @@ func (h *Hub) BroadcastMasked(
 	}
 }
 
-// v1Roles enumerates the roles for which the hub pre-marshals a frame
-// per call to BroadcastMasked. Two roles in v1 (FR-5.4); FR-5.5 adds
-// limited_viewer in a later release.
-var v1Roles = []auth.Role{auth.RoleOwner, auth.RoleViewer}
+// v1Roles enumerates the role vocabulary, and its ONLY job is to size the
+// activeRoles map — the set actually marshaled for is built from the clients
+// connected, so a role missing here costs a map growth and nothing else.
+//
+// It listed owner and viewer only, which was true when it was written and which
+// MYR-602 falsified — and although the consequence is a map growth, the
+// declaration READS as an enumeration of the role vocabulary, and an
+// enumeration that is half wrong is a thing the next reader will believe. It is
+// now DERIVED from auth.AllRoles rather than restated, so it cannot be wrong
+// again.
+var v1Roles = auth.AllRoles()
 
 // buildRoleFrames produces the per-role pre-marshaled vehicle_update
 // frames for a single broadcast. Iterates ONLY the activeRoles set

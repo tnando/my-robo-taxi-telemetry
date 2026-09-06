@@ -1,5 +1,10 @@
 package push
 
+import (
+	"crypto/sha256"
+	"encoding/hex"
+)
+
 // The `apns-collapse-id` header (MYR-554).
 //
 // THE BUG IT FIXES IS A DOUBLE-DELIVERY THE SERVER CANNOT SEE. deliver() retries
@@ -56,31 +61,44 @@ const maxCollapseIDBytes = 64
 // lock screen. Absent is the only safe answer, and it restores exactly the
 // pre-MYR-554 behaviour for such a push: at-least-once, never over-merged.
 //
-// TRUNCATION IS BY BYTES, on a rune boundary. Both inputs are ASCII today (a
-// cuid and a dotted topic constant, ~45 bytes together), so the cap is not
-// reached in practice; the guard is here because the header's failure mode is a
-// 400 that would silence the notification entirely. Cutting the tail can in
-// principle make two long ids equal, and that is the right direction to fail:
-// an over-collapse merges two Notification Center entries, where an
-// over-length header loses the push.
-func collapseID(rideID, eventTopic string) string {
-	if rideID == "" {
+// AN OVERSIZED ID IS HASHED, NOT TRUNCATED, and MYR-602 is why that is not a
+// refinement but a fix.
+//
+// Truncation was chosen when every subject was one cuid (~25 bytes) plus a
+// dotted topic — comfortably inside the cap, with the cut as a guard that could
+// not fire. A TRIP LEG's subject is TWO ids, `{tripID}|{legID}`, because two
+// consecutive legs of one trip must not merge their banners; with real ids that
+// is ~67 bytes before the topic is appended, so the cut fires on every leg push
+// and it removes THE DISCRIMINATING TAIL. `trip_leg_started` and
+// `trip_leg_arrived` on the same leg share their whole prefix and differ only
+// in the topic at the end, so both truncated to the SAME value and Apple merged
+// them: a participant who missed the departure banner found only the arrival,
+// and one who read the departure had it silently replaced.
+//
+// The old comment argued that over-collapsing was the safe direction to fail
+// in, against the alternative of a 400 that loses the push. It was right about
+// the alternative and wrong that those are the only two: a digest is under the
+// cap AND preserves the distinction. The prefix marks the value as a digest for
+// anyone reading a packet capture, and 128 bits of SHA-256 is far past any
+// accidental collision across a fleet's notifications.
+//
+// Ids that FIT are still sent verbatim, deliberately: they are the vast
+// majority, and a readable `crr_…:ride.status.changed` in a capture is worth
+// keeping.
+func collapseID(subject, eventTopic string) string {
+	if subject == "" {
 		return ""
 	}
-	id := rideID + ":" + eventTopic
+	id := subject + ":" + eventTopic
 	if len(id) <= maxCollapseIDBytes {
 		return id
 	}
-	// Back off to the last whole rune that fits, so the header never carries a
-	// half-encoded character.
-	cut := maxCollapseIDBytes
-	for cut > 0 && !utf8RuneStart(id[cut]) {
-		cut--
-	}
-	return id[:cut]
+	sum := sha256.Sum256([]byte(id))
+	return collapseDigestPrefix + hex.EncodeToString(sum[:16])
 }
 
-// utf8RuneStart reports whether b begins a UTF-8 rune (i.e. is not a
-// continuation byte). Local rather than a unicode/utf8 call so the truncation
-// reads as the one-line rule it is.
-func utf8RuneStart(b byte) bool { return b&0xC0 != 0x80 }
+// collapseDigestPrefix marks a hashed collapse id in logs and packet captures,
+// so a value that does not look like its subject is explicable rather than
+// mysterious. Two characters, leaving the digest itself the bulk of a value
+// that is 34 bytes against a 64-byte cap.
+const collapseDigestPrefix = "h."

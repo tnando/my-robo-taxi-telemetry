@@ -51,7 +51,10 @@ func TestPushToStartPayload(t *testing.T) {
 		Event:         ActivityEventStart,
 		ContentState:  tripContentState(tc, now),
 		Timestamp:     now,
-		Start:         &TripActivityStart{TripID: tc.TripID, VehicleID: tc.VehicleID, VehicleName: tc.VehicleName},
+		Start: &TripActivityStart{
+			TripID: tc.TripID, VehicleID: tc.VehicleID,
+			LegID: tc.LegID, VehicleName: tc.VehicleName,
+		},
 	})
 
 	if aps["event"] != "start" {
@@ -69,13 +72,20 @@ func TestPushToStartPayload(t *testing.T) {
 	}
 	for key, want := range map[string]string{
 		"tripId": "trip-1", "vehicleId": "veh-1", "vehicleName": "Optimus",
+		// THE LEG IS WHAT MAKES THE CARD ADDRESSABLE. ActivityKit hands the app
+		// a per-Activity update token the instant the card is created, and
+		// registration is anchored on the leg (§7.21.7) — a device that was
+		// asleep when the leg opened cannot derive which leg its card is for.
+		// Without this key the server can create a card and then never update
+		// or end it.
+		"legId": "leg-1",
 	} {
 		if attrs[key] != want {
 			t.Errorf("attributes.%s = %v, want %q", key, attrs[key], want)
 		}
 	}
-	if len(attrs) != 3 {
-		t.Errorf("attributes carries %d keys (%v), want exactly 3 — the attributes are "+
+	if len(attrs) != 4 {
+		t.Errorf("attributes carries %d keys (%v), want exactly 4 — the attributes are "+
 			"decoded ONCE and can never be updated, so anything that can change while "+
 			"the card is alive does not belong here", len(attrs), attrs)
 	}

@@ -271,8 +271,8 @@ type liveActivityRegistryAdapter struct {
 
 func (a *liveActivityRegistryAdapter) RegisterActivity(ctx context.Context, rideRequestID, userID, token string, sandbox bool) error {
 	err := a.repo.RegisterActivity(ctx, rideRequestID, userID, token, sandbox)
-	if errors.Is(err, store.ErrLiveActivityRideClosed) {
-		return telemetry.ErrLiveActivityRideClosed
+	if errors.Is(err, store.ErrLiveActivityClosed) {
+		return telemetry.ErrLiveActivityClosed
 	}
 	return err
 }

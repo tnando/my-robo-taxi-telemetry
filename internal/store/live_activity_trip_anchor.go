@@ -39,7 +39,7 @@ import (
 //
 // The guard is the INSERT … SELECT's WHERE: the leg must exist and still be
 // open. A miss affects zero rows, which the caller reports as
-// ErrLiveActivityRideClosed — the same sentinel the ride path uses, because the
+// ErrLiveActivityClosed — the same sentinel the ride path uses, because the
 // HTTP layer's answer is identical (409, "end your Activity locally") and
 // minting a second error would make the handler branch on which anchor it
 // happened to be holding.
@@ -142,7 +142,7 @@ WHERE trip_leg_id = $1 AND user_id = $2 AND ended_at IS NULL`
 // Live Activity on one trip leg, replacing a rotated token in place and
 // clearing any previous end-tombstone.
 //
-// Returns ErrLiveActivityRideClosed when the leg is gone or already closed —
+// Returns ErrLiveActivityClosed when the leg is gone or already closed —
 // the same sentinel and the same 409 as the ride path, see queryUpsertLegActivity.
 //
 // The caller is responsible for having established that userID is the trip's
@@ -165,7 +165,7 @@ func (r *LiveActivityRepo) RegisterLegActivity(ctx context.Context, legID, userI
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("store.RegisterLegActivity(leg=%s, user=%s): %w",
-			legID, userID, ErrLiveActivityRideClosed)
+			legID, userID, ErrLiveActivityClosed)
 	}
 	return nil
 }

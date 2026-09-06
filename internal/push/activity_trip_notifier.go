@@ -49,6 +49,10 @@ type TripActivityStore interface {
 	ActivitiesForLeg(ctx context.Context, legID string) ([]Activity, error)
 	// EndActivitiesForLeg tombstones them, after the final `end` push.
 	EndActivitiesForLeg(ctx context.Context, legID string) (int64, error)
+	// MarkLegActivitiesPushed stamps updated_at on the rows a fan-out just
+	// delivered to, which is what keeps the 24-hour reaper away from a card
+	// that is still on somebody's lock screen. See fanOutLeg.
+	MarkLegActivitiesPushed(ctx context.Context, legID string, userIDs []string) (int64, error)
 	// DeleteActivityToken drops an UPDATE token APNs permanently rejected.
 	DeleteActivityToken(ctx context.Context, token string) error
 }
@@ -173,7 +177,14 @@ func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) 
 
 	now := t.now()
 	state := tripContentState(tc, now)
-	start := &TripActivityStart{TripID: tc.TripID, VehicleID: tc.VehicleID, VehicleName: tc.VehicleName}
+	start := &TripActivityStart{
+		TripID:    tc.TripID,
+		VehicleID: tc.VehicleID,
+		// The LEG, without which the created card has no anchor to register
+		// its own update token against and can never be updated or ended.
+		LegID:       tc.LegID,
+		VehicleName: tc.VehicleName,
+	}
 
 	var started int
 	for _, tok := range tokens {

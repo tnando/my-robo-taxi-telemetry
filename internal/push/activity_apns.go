@@ -96,7 +96,7 @@ const TripActivityAttributesType = "TripActivityAttributes"
 // tripActivityAttributes is `aps.attributes` for a trip-leg push-to-start: the
 // three values that are constant for the life of one leg's card.
 //
-// WHY THESE THREE AND NOT MORE. The attributes are decoded ONCE and can never
+// WHY THESE FOUR AND NOT MORE. The attributes are decoded ONCE and can never
 // be updated, so a value belongs here only if it cannot change while the card
 // is alive. `tripId` and `vehicleId` are identifiers the widget needs for its
 // deep link and cannot derive. `vehicleName` is the owner's nickname, which
@@ -106,6 +106,20 @@ const TripActivityAttributesType = "TripActivityAttributes"
 // content-state key on. The content-state carries it too, so an update
 // corrects it.
 //
+// `legId` IS WHAT MAKES THE CARD ADDRESSABLE AT ALL, and it is the key without
+// which the whole update path is one-way. ActivityKit hands the app a
+// per-Activity UPDATE token the moment the card is created, and the server has
+// nowhere to file it: registration is anchored on the LEG (§7.21.7,
+// go_live_activities.trip_leg_id), and the device cannot derive which leg its
+// card is for — it was asleep when the leg opened, and a trip has many legs.
+// Without it the server can create a card and never update or end it, so every
+// leg's card would run to ActivityKit's own ceiling still saying the car was
+// driving somewhere it reached hours before.
+//
+// It qualifies on the same never-changes rule the other three meet, exactly and
+// not conveniently: an Activity IS one leg. A new leg is a new card, and a card
+// whose leg ended is ended.
+//
 // The TRIP NAME is deliberately NOT here even though it is equally static: it
 // is P1 user content, and the content-state already carries it under a key the
 // client reads on every push. One place, one classification argument.
@@ -113,14 +127,21 @@ type tripActivityAttributes struct {
 	TripID      string `json:"tripId"`
 	VehicleID   string `json:"vehicleId"`
 	VehicleName string `json:"vehicleName"`
+	// LegID is P0 — an opaque server-minted id, like the two above it. Last in
+	// the struct so the three keys that shipped before it hold their positions
+	// in a packet capture.
+	LegID string `json:"legId"`
 }
 
 // TripActivityStart is the addressing half of one push-to-start: which phone,
 // and which Activity to create on it.
 type TripActivityStart struct {
-	// TripID and VehicleID go into the attributes.
+	// TripID, VehicleID and LegID go into the attributes.
 	TripID    string
 	VehicleID string
+	// LegID is the anchor the created card registers its own update token
+	// against. See tripActivityAttributes.
+	LegID string
 	// VehicleName is the nickname the card shows before its first update.
 	VehicleName string
 }
@@ -158,6 +179,7 @@ func buildActivityPayload(n ActivityNotification) ([]byte, error) {
 			TripID:      n.Start.TripID,
 			VehicleID:   n.Start.VehicleID,
 			VehicleName: n.Start.VehicleName,
+			LegID:       n.Start.LegID,
 		}
 	}
 	// AN `end` NEVER RENDERS AN ALERT, whatever the caller asked for (MYR-418).

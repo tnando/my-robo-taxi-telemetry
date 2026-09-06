@@ -359,13 +359,13 @@ func (a *tripActivityStoreAdapter) ActivitiesForLeg(ctx context.Context, legID s
 	for i := range rows {
 		row := &rows[i]
 		out = append(out, push.Activity{
-			// The LEG id rides the anchor slot the ride path fills with a ride
-			// id: push.Activity carries one anchor, and the leg send paths only
-			// ever log it.
-			RideRequestID: row.TripLegID,
-			UserID:        row.UserID,
-			Token:         row.ActivityPushToken,
-			Sandbox:       row.Sandbox,
+			// THE LEG ANCHOR, in its own field. It used to ride the
+			// RideRequestID slot on the argument that nothing read it — see
+			// push.Activity.TripLegID for why that stopped being good enough.
+			TripLegID: row.TripLegID,
+			UserID:    row.UserID,
+			Token:     row.ActivityPushToken,
+			Sandbox:   row.Sandbox,
 		})
 	}
 	return out, nil
@@ -375,6 +375,16 @@ func (a *tripActivityStoreAdapter) EndActivitiesForLeg(ctx context.Context, legI
 	n, err := a.activities.EndActivitiesForLeg(ctx, legID)
 	if err != nil {
 		return 0, fmt.Errorf("trips: end leg activities: %w", err)
+	}
+	return n, nil
+}
+
+func (a *tripActivityStoreAdapter) MarkLegActivitiesPushed(
+	ctx context.Context, legID string, userIDs []string,
+) (int64, error) {
+	n, err := a.activities.MarkLegActivitiesPushed(ctx, legID, userIDs)
+	if err != nil {
+		return 0, fmt.Errorf("trips: mark leg activities pushed: %w", err)
 	}
 	return n, nil
 }

@@ -77,8 +77,8 @@ func TestLiveActivityRepo_RegisterRefusesAnExpiredReservation(t *testing.T) {
 	// ActivityKit rotates the token. This is the POST that used to resurrect
 	// the row.
 	err := repo.RegisterActivity(ctx, ride, "rider-1", "token-rotated", false)
-	if !errors.Is(err, store.ErrLiveActivityRideClosed) {
-		t.Fatalf("RegisterActivity after expiry = %v, want ErrLiveActivityRideClosed", err)
+	if !errors.Is(err, store.ErrLiveActivityClosed) {
+		t.Fatalf("RegisterActivity after expiry = %v, want ErrLiveActivityClosed", err)
 	}
 
 	live, err := repo.ActivitiesForRide(ctx, ride)
@@ -137,8 +137,8 @@ func TestLiveActivityRepo_RegisterAllowsARescuedExpiredReservation(t *testing.T)
 
 			// While it is still nothing but an expired reservation, the refusal
 			// stands — that is MYR-172 and it must survive this fix.
-			if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-early", false); !errors.Is(err, store.ErrLiveActivityRideClosed) {
-				t.Fatalf("RegisterActivity on an unrescued expired reservation = %v, want ErrLiveActivityRideClosed", err)
+			if err := repo.RegisterActivity(ctx, ride, "rider-1", "token-early", false); !errors.Is(err, store.ErrLiveActivityClosed) {
+				t.Fatalf("RegisterActivity on an unrescued expired reservation = %v, want ErrLiveActivityClosed", err)
 			}
 
 			// The humans drive it anyway.
@@ -202,8 +202,8 @@ func TestLiveActivityRepo_RegisterRefusesTerminalRides(t *testing.T) {
 			setRideStatus(t, ride, status)
 
 			err := repo.RegisterActivity(ctx, ride, "rider-1", "token-late", false)
-			if !errors.Is(err, store.ErrLiveActivityRideClosed) {
-				t.Fatalf("RegisterActivity on a %s ride = %v, want ErrLiveActivityRideClosed", status, err)
+			if !errors.Is(err, store.ErrLiveActivityClosed) {
+				t.Fatalf("RegisterActivity on a %s ride = %v, want ErrLiveActivityClosed", status, err)
 			}
 			if live, _ := repo.ActivitiesForRide(ctx, ride); len(live) != 0 {
 				t.Errorf("%d Activities registered against a %s ride", len(live), status)
@@ -279,8 +279,8 @@ func TestLiveActivityRepo_RegisterRefusesAnUnknownRide(t *testing.T) {
 	repo := setupLiveActivities(t, ride)
 
 	err := repo.RegisterActivity(context.Background(), "cride0025nonexistent", "rider-1", "token-a", false)
-	if !errors.Is(err, store.ErrLiveActivityRideClosed) {
-		t.Fatalf("RegisterActivity on an unknown ride = %v, want ErrLiveActivityRideClosed", err)
+	if !errors.Is(err, store.ErrLiveActivityClosed) {
+		t.Fatalf("RegisterActivity on an unknown ride = %v, want ErrLiveActivityClosed", err)
 	}
 }
 

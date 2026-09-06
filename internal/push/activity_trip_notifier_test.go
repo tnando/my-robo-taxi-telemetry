@@ -17,6 +17,10 @@ type fakeTripActivityStore struct {
 	droppedAct  []string
 	tokensErr   error
 	activityErr error
+	// marked records every (leg, user) a pass stamped as delivered — the
+	// anti-reaper mark. Recorded in call order so a test can assert that the
+	// refused sends were NOT stamped.
+	marked []string
 }
 
 func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ string) ([]ActivityStartToken, error) {
@@ -49,6 +53,17 @@ func (f *fakeTripActivityStore) EndActivitiesForLeg(_ context.Context, legID str
 	defer f.mu.Unlock()
 	f.endedLegs = append(f.endedLegs, legID)
 	return int64(len(f.activities)), nil
+}
+
+func (f *fakeTripActivityStore) MarkLegActivitiesPushed(
+	_ context.Context, legID string, userIDs []string,
+) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range userIDs {
+		f.marked = append(f.marked, legID+"/"+u)
+	}
+	return int64(len(userIDs)), nil
 }
 
 func (f *fakeTripActivityStore) DeleteActivityToken(_ context.Context, token string) error {
@@ -212,5 +227,39 @@ func TestStartLeg_NoTokensIsNotAFailure(t *testing.T) {
 	}
 	if len(sender.Sent()) != 0 {
 		t.Error("something was sent with no registered tokens")
+	}
+}
+
+// TestFanOutLeg_StampsOnlyWhatAppleAccepted is finding 7's send-side half.
+//
+// go_live_activities is reaped 24 hours after each row's last WRITE, and
+// `updated_at` only means "last touched" if every delivered pass stamps it. The
+// leg path stamped nothing, so a card on a long drive had its registration
+// hard-deleted while it was still being pushed to — and the end push then had
+// no address at all.
+//
+// A REFUSED SEND IS NOT A TOUCH. Stamping one would keep a permanently failing
+// row alive past the reaper for nobody, which is the ride ticker's rule and the
+// reason the mark is built from what Apple accepted rather than from what was
+// attempted.
+func TestFanOutLeg_StampsOnlyWhatAppleAccepted(t *testing.T) {
+	store := &fakeTripActivityStore{
+		activities: []Activity{
+			{UserID: "user-a", Token: "act-a", TripLegID: "leg-1"},
+			{UserID: "user-b", Token: "act-b", TripLegID: "leg-1"},
+		},
+	}
+	n, sender := newTripActivityNotifier(t, store, Prefs{Trips: true})
+	// user-b's card is gone from the phone; its token is dropped, not stamped.
+	sender.ErrByToken = map[string]error{"act-b": ErrUnregistered}
+
+	n.UpdateLeg(context.Background(), tripLegFixture())
+
+	if len(store.marked) != 1 || store.marked[0] != "leg-1/user-a" {
+		t.Errorf("stamped %v, want exactly the accepted delivery leg-1/user-a — a card "+
+			"Apple refused is not 'recently pushed'", store.marked)
+	}
+	if len(store.droppedAct) != 1 || store.droppedAct[0] != "act-b" {
+		t.Errorf("dropped %v, want the unregistered UPDATE token act-b", store.droppedAct)
 	}
 }

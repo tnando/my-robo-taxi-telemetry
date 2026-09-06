@@ -405,8 +405,8 @@ func TestRegisterLegActivity_UpsertsOnTheLegUserPair(t *testing.T) {
 		t.Fatalf("EndLeg: %v", err)
 	}
 	err = activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg2", "cccc3333", false)
-	if !errors.Is(err, store.ErrLiveActivityRideClosed) {
-		t.Errorf("registering against a CLOSED leg = %v, want ErrLiveActivityRideClosed — "+
+	if !errors.Is(err, store.ErrLiveActivityClosed) {
+		t.Errorf("registering against a CLOSED leg = %v, want ErrLiveActivityClosed — "+
 			"clearing that tombstone would resume an ETA countdown to a place the car left", err)
 	}
 }

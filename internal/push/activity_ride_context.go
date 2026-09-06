@@ -13,8 +13,20 @@ import "time"
 // Activity is one running Live Activity, the consumer-site view of a
 // go_live_activities row.
 type Activity struct {
+	// RideRequestID is the anchor on the RIDE path, and empty on the trip
+	// path. See TripLegID.
 	RideRequestID string
-	UserID        string
+	// TripLegID is the anchor on the TRIP path, and empty on the ride path
+	// (MYR-602). Exactly one of the two is set — go_live_activities enforces
+	// it with a CHECK (migration 0047).
+	//
+	// A SECOND FIELD RATHER THAN ONE RENAMED ANCHOR. The leg id used to ride in
+	// RideRequestID because nothing on the leg path read it, which was true and
+	// is the kind of true that lasts until somebody adds a log line. A field
+	// whose NAME says ride while its VALUE is a leg is a trap for the next
+	// reader, and the cost of avoiding it is one string.
+	TripLegID string
+	UserID    string
 	// Token is the ActivityKit update token. P1 — never log in full.
 	Token   string
 	Sandbox bool
