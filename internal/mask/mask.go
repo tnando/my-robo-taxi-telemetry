@@ -54,6 +54,18 @@ type ResourceMask struct {
 	// A nil or empty map produces an empty projected payload regardless
 	// of input.
 	Allowed map[string]struct{}
+
+	// Sentinels is the SUBSTITUTION table: field names that are NOT allowed
+	// but that must nonetheless appear in the output, mapped to the no-value
+	// spelling to emit in place of the real one. Nil on almost every mask —
+	// see sentinels.go for the single case that needs it (MYR-602's narrowed
+	// `viewer` against the six schema-REQUIRED location fields) and for why
+	// removing them outright would make the frame undecodable rather than
+	// merely narrower.
+	//
+	// A name in BOTH maps is a contradiction; Allowed wins in Apply and
+	// TestSentinelsNeverOverlapTheAllowList forbids the state outright.
+	Sentinels map[string]any
 }
 
 // allows reports whether the given field name is permitted by this
@@ -71,7 +83,11 @@ func (m ResourceMask) allows(field string) bool {
 //   - out: a new map containing only the keys allowed by mask. Allowed
 //     keys map to the same value as in input. Keys absent from mask are
 //     omitted from out entirely (no key emitted) — see "absent, not
-//     nulled" in rest-api.md §5.1.
+//     nulled" in rest-api.md §5.1 — UNLESS the mask carries a sentinel for
+//     them, in which case the key survives carrying the schema's documented
+//     no-value spelling instead of the real one. See sentinels.go: that
+//     exception exists only for fields the schema declares `required`, where
+//     removing the key does not narrow the frame but makes it undecodable.
 //   - fieldsMasked: the names of input keys that were removed by the
 //     projection. Used by the audit-log emit path (deferred, see
 //     audit.go and the TODOs in the hub / REST handler) to record which
@@ -90,6 +106,17 @@ func Apply(input map[string]any, mask ResourceMask) (out map[string]any, fieldsM
 		if mask.allows(k) {
 			out[k] = v
 			continue
+		}
+		// WITHHELD. The value never survives; the only question is whether
+		// the KEY does. It does for the handful of fields the schema declares
+		// required (sentinels.go) and for nothing else.
+		//
+		// Substituted fields are still reported in fieldsMasked, deliberately:
+		// the audit trail records what was WITHHELD, and a sentinel is a
+		// withholding that happens to leave a key behind. Recording it as
+		// visible would make the audit understate the projection.
+		if s, ok := mask.sentinel(k); ok {
+			out[k] = s
 		}
 		fieldsMasked = append(fieldsMasked, k)
 	}

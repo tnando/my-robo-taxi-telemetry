@@ -134,6 +134,22 @@ func fullOwnerPayload() map[string]any {
 func projectJSONKeys(t *testing.T, role auth.Role) map[string]struct{} {
 	t.Helper()
 
+	fields := projectJSONFields(t, role)
+	keys := make(map[string]struct{}, len(fields))
+	for k := range fields {
+		keys[k] = struct{}{}
+	}
+	return keys
+}
+
+// projectJSONFields is the same round trip, keeping the raw VALUES.
+//
+// Raw JSON rather than decoded Go values, deliberately: a sentinel is compared
+// against the bytes a client would receive, so an `int` 0 that JSON-decodes
+// back as a `float64` cannot make the comparison lie in either direction.
+func projectJSONFields(t *testing.T, role auth.Role) map[string]json.RawMessage {
+	t.Helper()
+
 	projected, _ := Apply(fullOwnerPayload(), For(ResourceVehicleState, role))
 	encoded, err := json.Marshal(projected)
 	if err != nil {
@@ -143,11 +159,7 @@ func projectJSONKeys(t *testing.T, role auth.Role) map[string]struct{} {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatalf("re-decode %s projection: %v", role, err)
 	}
-	keys := make(map[string]struct{}, len(decoded))
-	for k := range decoded {
-		keys[k] = struct{}{}
-	}
-	return keys
+	return decoded
 }
 
 // TestViewerFrameOmitsEveryRemovedField is the headline assertion: for a viewer,
@@ -252,9 +264,41 @@ func TestPlainViewerFrameKeepsTheCatalogFloor(t *testing.T) {
 // against `"latitude": null`, which still leaks a value-shaped default into a
 // decoder — and for a coordinate, 0 is a real place.
 func TestPlainViewerFrameOmitsEveryLiveLocationField(t *testing.T) {
-	keys := projectJSONKeys(t, auth.RoleViewer)
+	fields := projectJSONFields(t, auth.RoleViewer)
+	viewerMask := For(ResourceVehicleState, auth.RoleViewer)
+
 	for _, f := range vehicleStateLiveLocationFields {
-		if _, present := keys[f]; present {
+		raw, present := fields[f]
+		sentinel, substituted := viewerMask.Sentinels[f]
+
+		// THE SIX SCHEMA-REQUIRED FIELDS ARE THE EXCEPTION, and they are an
+		// exception to the KEY rule only — never to the VALUE rule. The key
+		// survives because vehicle-state.schema.json declares it `required`
+		// and removing it makes the frame undecodable rather than narrower
+		// (sentinels.go); the value is the schema's own no-value spelling, so
+		// the caller learns nothing about where the car is. Which fields these
+		// are is pinned against the schema by
+		// TestViewerStateSentinelsCoverExactlyTheRequiredGap, so this test
+		// cannot be widened by simply adding a sentinel.
+		if substituted {
+			if !present {
+				t.Errorf("plain viewer JSON dropped %q — it is in the schema's "+
+					"`required` array, so the key must survive carrying its "+
+					"no-value sentinel", f)
+				continue
+			}
+			want, err := json.Marshal(sentinel)
+			if err != nil {
+				t.Fatalf("marshal sentinel for %q: %v", f, err)
+			}
+			if string(raw) != string(want) {
+				t.Errorf("plain viewer JSON carries %q = %s, want the no-value "+
+					"sentinel %s — the key survives, the value never does", f, raw, want)
+			}
+			continue
+		}
+
+		if present {
 			t.Errorf("plain viewer JSON still carries %q — MYR-602 restricts live "+
 				"location and navigation to an active ride or an open trip window", f)
 		}

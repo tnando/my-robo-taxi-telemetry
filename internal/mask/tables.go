@@ -70,8 +70,15 @@ var masksByResource = map[ResourceType]map[auth.Role]ResourceMask{
 	// separate ROLES because they carry different provenance, which is what
 	// decides drive access (§7.2–§7.4).
 	ResourceVehicleState: {
-		auth.RoleOwner:           setFromFields(vehicleStateOwnerFields),
-		auth.RoleViewer:          setFromFields(vehicleStateViewerFields),
+		auth.RoleOwner: setFromFields(vehicleStateOwnerFields),
+		// THE SENTINELS ARE PART OF THE NARROWING, not a decoration on it. Six
+		// of the fields this list drops are in vehicle-state.schema.json's
+		// `required` array, which contracts v0.41.0 deliberately did not relax
+		// — so for a plain viewer they are emitted as the schema's own
+		// no-value spellings rather than removed. sentinels.go carries the
+		// argument; without it this row would hand every installed client a
+		// frame it cannot decode at all.
+		auth.RoleViewer:          withSentinels(setFromFields(vehicleStateViewerFields), vehicleStateViewerSentinels),
 		auth.RoleRideMember:      setFromFields(vehicleStateLiveViewerFields),
 		auth.RoleTripParticipant: setFromFields(vehicleStateLiveViewerFields),
 	},
@@ -1057,4 +1064,15 @@ func setFromFields(fields []string) ResourceMask {
 		allowed[f] = struct{}{}
 	}
 	return ResourceMask{Allowed: allowed}
+}
+
+// withSentinels attaches a substitution table to a mask built by setFromFields.
+//
+// Separate from setFromFields rather than a second parameter on it, because
+// exactly ONE of the eighteen masks in this file needs one and threading a nil
+// through the other seventeen call sites would make the exception look routine.
+// It is not routine: see sentinels.go.
+func withSentinels(m ResourceMask, sentinels map[string]any) ResourceMask {
+	m.Sentinels = sentinels
+	return m
 }
