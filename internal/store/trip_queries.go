@@ -223,10 +223,23 @@ WHERE id = $1 AND owner_user_id = $2 AND ended_at IS NULL`
 // CONFIRMED first name if there is one, else the owner's own label for the
 // grant. `acceptedByNameExpr` carries the confirmation gate and the three-rung
 // ladder; ownerFirstNameToken reduces it to a first token in Go.
+// ⚠ LEFT JOIN, NOT INNER, and the direction of that choice is the point. This
+// roster is what an OWNER reads to know who can see their car. An inner join
+// would DROP a participant whose share row had somehow gone — under-reporting
+// on a privacy surface, silently, in the one direction that matters. Nothing in
+// production deletes a go_vehicle_shares row today (revocation is a tombstone
+// flip, and even account deletion revokes rather than deletes), so this arm is
+// unreachable; it is written this way so that if that ever changes, the failure
+// is a nameless row rather than a missing person.
+//
+// `accepted_by_user_id` is the column acceptedByNameExpr keys on, so a NULL
+// share row yields a NULL name and the Go side falls back — first to the
+// owner's label, which is also NULL here, and then to the empty string the
+// contract permits.
 const queryTripRoster = `
-SELECT p.share_id, p.user_id, s.label, ` + acceptedByNameExpr + `
+SELECT p.share_id, p.user_id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `
 FROM go_trip_participants p
-JOIN go_vehicle_shares s ON s.id = p.share_id
+LEFT JOIN go_vehicle_shares s ON s.id = p.share_id
 WHERE p.trip_id = $1 AND p.left_at IS NULL
 ORDER BY p.added_at, p.user_id`
 
