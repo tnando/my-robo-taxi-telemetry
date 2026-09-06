@@ -140,14 +140,38 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	vin, ok := h.resolveOwnedVIN(ctx, w, vehicleID, userID)
+	row, ok := h.resolveOwnedVehicle(ctx, w, vehicleID, userID)
 	if !ok {
 		return
 	}
+	vin := row.VIN
 
 	// Best-effort Tesla-side stream-config delete (must run before the token is
 	// cleared). Non-fatal — the local teardown is authoritative.
-	streamConfigDeleted := h.streamConfig.DeleteStreamConfig(ctx, userID, vin)
+	//
+	// MYR-599: SKIPPED ENTIRELY for a car whose consent gate is still shut. We
+	// have never installed a config on such a car — the link hook pushes nothing
+	// at it and every other push path refuses it — so any config Tesla holds for
+	// that VIN was put there by the car's real OWNER through their own account.
+	// Tesla lets a DRIVER token DELETE it, which is exactly why this has to be a
+	// decision rather than a call: a driver removing a borrowed car would
+	// otherwise tear down a third party's telemetry, and the owner would just
+	// see their car go quiet.
+	//
+	// Once the acknowledgment IS on record the delete stands, unchanged: from
+	// that point we may have installed the config ourselves, so it is ours to
+	// remove.
+	streamConfigDeleted := false
+	if row.DriverAccess.PendingAcknowledgment() {
+		h.logger.Info("vehicle teardown: skipping the Tesla config delete for an unacknowledged driver-access car",
+			slog.String("event", "stream_config_delete_skipped_owner_ack"),
+			slog.String("vehicle_id", vehicleID),
+			slog.String("user_id", userID),
+			slog.String("vin", redactVIN(vin)),
+		)
+	} else {
+		streamConfigDeleted = h.streamConfig.DeleteStreamConfig(ctx, userID, vin)
+	}
 
 	// Best-effort active revocation of the Tesla OAuth grant, on a last-vehicle
 	// removal only. Also before the teardown, and for a sharper reason: the
@@ -198,11 +222,17 @@ func (h *VehicleTeardownHandler) handle(w http.ResponseWriter, r *http.Request) 
 	h.writeJSON(w, http.StatusOK, h.buildResponse(result, streamConfigDeleted))
 }
 
-// resolveOwnedVIN resolves vehicleId → VIN and enforces ownership. On an
-// unknown vehicle it returns 404 (indistinguishable from ownership-filtered —
-// never leak existence); on a real ownership mismatch it returns 403. Either
-// way no teardown runs. Returns ok=false after writing the error.
-func (h *VehicleTeardownHandler) resolveOwnedVIN(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) (string, bool) {
+// resolveOwnedVehicle resolves vehicleId → the snapshot row and enforces
+// ownership. On an unknown vehicle it returns 404 (indistinguishable from
+// ownership-filtered — never leak existence); on a real ownership mismatch it
+// returns 403. Either way no teardown runs. Returns ok=false after writing the
+// error.
+//
+// IT RETURNS THE ROW RATHER THAN THE VIN (MYR-599). The caller needs the
+// driver-access join to decide whether the Tesla-side config delete is ours to
+// make, and re-reading the row for that would be a second round trip and a
+// second chance for the two reads to disagree.
+func (h *VehicleTeardownHandler) resolveOwnedVehicle(ctx context.Context, w http.ResponseWriter, vehicleID, userID string) (VehicleSnapshotRow, bool) {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
@@ -210,14 +240,14 @@ func (h *VehicleTeardownHandler) resolveOwnedVIN(ctx context.Context, w http.Res
 			// the second DELETE of an already-gone car lands here as a clean
 			// not-found rather than a teardown.
 			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return "", false
+			return VehicleSnapshotRow{}, false
 		}
 		h.logger.Error("vehicle teardown: lookup failed",
 			slog.String("vehicle_id", vehicleID),
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return "", false
+		return VehicleSnapshotRow{}, false
 	}
 
 	if row.UserID != userID {
@@ -226,10 +256,10 @@ func (h *VehicleTeardownHandler) resolveOwnedVIN(ctx context.Context, w http.Res
 			slog.String("user_id", userID),
 		)
 		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
-		return "", false
+		return VehicleSnapshotRow{}, false
 	}
 
-	return row.VIN, true
+	return row, true
 }
 
 // revokeTeslaGrant best-effort revokes the owner's Tesla OAuth grant when this

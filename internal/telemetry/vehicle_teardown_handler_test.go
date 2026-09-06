@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
@@ -490,5 +491,76 @@ func TestVehicleTeardownDoesNotEndActivitiesForAnUnownedCar(t *testing.T) {
 	}
 	if ender.called {
 		t.Error("Live Activities were ended for a car the caller does not own")
+	}
+}
+
+// TestVehicleTeardownSkipsStreamConfigDeleteForUnacknowledgedDriverCar pins
+// MYR-599's teardown gate in BOTH directions.
+//
+// THE FAILURE IT PREVENTS IS SILENT AND LANDS ON SOMEBODY ELSE. A car whose
+// consent gate is still shut has never had a config installed by us, so any
+// config Tesla holds for that VIN was put there by the car's real OWNER through
+// their own account. Tesla permits a DRIVER token to DELETE it — so a driver
+// tidying up a borrowed car would tear down a third party's telemetry, and the
+// owner would just watch their car go quiet with nothing to explain it.
+//
+// The acknowledged direction matters as much: after the acknowledgment we may
+// well have installed the config ourselves, and refusing to remove it would
+// leave the platform paying Tesla for a stream on a car nobody holds any more.
+func TestVehicleTeardownSkipsStreamConfigDeleteForUnacknowledgedDriverCar(t *testing.T) {
+	tests := []struct {
+		name          string
+		access        VehicleDriverAccess
+		wantDeleteHit bool
+		because       string
+	}{
+		{
+			name:          "unacknowledged driver car",
+			access:        VehicleDriverAccess{Present: true, CreatedAt: time.Now()},
+			wantDeleteHit: false,
+			because: "we never installed this config — deleting it tears down the real " +
+				"owner's telemetry, which Tesla lets a DRIVER token do",
+		},
+		{
+			name: "acknowledged driver car",
+			access: VehicleDriverAccess{
+				Present: true, CreatedAt: time.Now().Add(-time.Hour), AcknowledgedAt: time.Now(),
+			},
+			wantDeleteHit: true,
+			because: "the gate is open, so the config may well be ours; leaving it would keep " +
+				"billing for a car nobody holds",
+		},
+		{
+			name:          "owner's own car",
+			access:        VehicleDriverAccess{},
+			wantDeleteHit: true,
+			because:       "unchanged behaviour for every car in the fleet before MYR-599",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			row := ownedTeardownRow()
+			row.DriverAccess = tc.access
+			deleter := &fakeConfigDeleter{}
+			h := newTeardownHandler(
+				&fakeSnapshotReader{rows: []VehicleSnapshotRow{row}},
+				validResolver(),
+				deleter,
+				&fakeTeardownWriter{result: VehicleTeardownResult{Removed: true}},
+			)
+
+			rec := doTeardown(t, h, http.MethodDelete, true)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 — the gate changes the TESLA call, never the "+
+					"local teardown; a person must always be able to remove a car from their "+
+					"own account", rec.Code)
+			}
+			if deleter.called != tc.wantDeleteHit {
+				t.Errorf("DeleteTelemetryConfig called = %v, want %v (%s)",
+					deleter.called, tc.wantDeleteHit, tc.because)
+			}
+		})
 	}
 }

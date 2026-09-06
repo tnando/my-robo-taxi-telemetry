@@ -30,6 +30,14 @@ type OwnedVehicle struct {
 	// never synced has no VIN yet. An empty VIN has no Tesla-side config to
 	// delete and is skipped for that step alone — the row teardown still runs.
 	VIN string
+	// DriverAccessPending is true when this account only DRIVES the car and has
+	// not acknowledged the owner's approval (MYR-599). The Tesla-side config
+	// DELETE is SKIPPED for such a car; see deleteStreamConfigs.
+	//
+	// It is a THIRD fact on a struct whose doc boasts of carrying two, and the
+	// reason is the same one that put the VIN here: it has to come from the same
+	// read. Resolving it per car later would reopen the window MYR-593 closed.
+	DriverAccessPending bool
 }
 
 // AccountOwnedVehicleReader lists the cars an account owns, id AND VIN, so the

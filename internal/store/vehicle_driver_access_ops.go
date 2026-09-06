@@ -188,3 +188,56 @@ func (r *VehicleRepo) ListDriverAccessByVIN(
 	r.metrics.ObserveQueryDuration("vehicle.list_driver_access_by_vin", time.Since(start).Seconds())
 	return out, nil
 }
+
+// queryPendingDriverAckByOwner lists the ids of one owner's cars whose consent
+// gate is still SHUT (MYR-599).
+//
+// A SET READ RATHER THAN A COLUMN ON ListByUser, deliberately. The account
+// deletion sequence is the caller, and its fleet read (`ListByUser`) is the wide
+// snapshot projection the AGENTS.md lean-projection invariant already complains
+// about — adding a second LEFT JOIN to it would put the cost on every list
+// caller to serve one that runs once per account, ever.
+//
+// Owner-scoped for the same reason every other statement in this file is: a
+// driver-access row is a fact about ONE person's relationship to one car.
+//
+// The partial index idx_go_vehicle_driver_access_pending covers the predicate.
+const queryPendingDriverAckByOwner = `
+SELECT dva.vehicle_id
+FROM go_vehicle_driver_access dva
+JOIN "Vehicle" v ON v."id" = dva.vehicle_id
+WHERE v."userId" = $1 AND dva.acknowledged_at IS NULL`
+
+// PendingDriverAcknowledgmentIDs returns the set of userID's vehicle ids whose
+// owner-approval acknowledgment has not been recorded.
+//
+// THE CALLER MUST FAIL CLOSED ON THE ERROR, exactly as with
+// PendingDriverAcknowledgmentByVIN: this answers whether the platform may send a
+// Tesla call about somebody else's car, so "we could not tell" must never be
+// spent as "go ahead". Returning the error rather than an empty set is what
+// stops a caller ignoring it by accident.
+func (r *VehicleRepo) PendingDriverAcknowledgmentIDs(ctx context.Context, userID string) (map[string]bool, error) {
+	out := make(map[string]bool)
+	if strings.TrimSpace(userID) == "" {
+		return out, nil
+	}
+	rows, err := r.pool.Query(ctx, queryPendingDriverAckByOwner, userID)
+	if err != nil {
+		r.metrics.IncQueryError("vehicle.pending_driver_ack_ids")
+		return nil, fmt.Errorf("VehicleRepo.PendingDriverAcknowledgmentIDs(%s): %w", userID, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			r.metrics.IncQueryError("vehicle.pending_driver_ack_ids")
+			return nil, fmt.Errorf("VehicleRepo.PendingDriverAcknowledgmentIDs(%s): scan: %w", userID, err)
+		}
+		out[id] = true
+	}
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError("vehicle.pending_driver_ack_ids")
+		return nil, fmt.Errorf("VehicleRepo.PendingDriverAcknowledgmentIDs(%s): rows: %w", userID, err)
+	}
+	return out, nil
+}

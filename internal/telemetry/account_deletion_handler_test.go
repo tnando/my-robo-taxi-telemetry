@@ -24,9 +24,13 @@ type fakeOwnedVehicleLister struct {
 	// vins overrides the VIN for a given vehicle id. Unset ids get a synthetic
 	// 17-character VIN, and an id mapped to "" models the nullable-VIN car (a
 	// row linked but never synced) that has no Tesla-side config to delete.
-	vins  map[string]string
-	err   error
-	calls int
+	vins map[string]string
+	// pendingAck names the vehicle ids whose MYR-599 consent gate is still shut.
+	// The Tesla-side config delete is skipped for those: we never installed the
+	// config, so it belongs to the car's real owner.
+	pendingAck map[string]bool
+	err        error
+	calls      int
 }
 
 func (f *fakeOwnedVehicleLister) ListOwnedVehicleIDs(_ context.Context, _ string) ([]string, error) {
@@ -41,7 +45,9 @@ func (f *fakeOwnedVehicleLister) ListOwnedVehicles(_ context.Context, _ string) 
 	}
 	out := make([]OwnedVehicle, 0, len(f.ids))
 	for _, id := range f.ids {
-		out = append(out, OwnedVehicle{ID: id, VIN: f.vinFor(id)})
+		out = append(out, OwnedVehicle{
+			ID: id, VIN: f.vinFor(id), DriverAccessPending: f.pendingAck[id],
+		})
 	}
 	return out, nil
 }
