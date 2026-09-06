@@ -62,11 +62,31 @@ type TripAudience struct {
 // auth.queryUserVehicleIDs and auth.queryActiveTripParticipation carry. A
 // suspended grantee must be indistinguishable from no grantee on EVERY surface,
 // and a push naming somebody's car is a surface.
+//
+// THE PREDICATE LIVES IN THE FILTER, NOT IN THE WHERE, AND THE DIFFERENCE IS A
+// TRIP THAT DISAPPEARS. Written as `WHERE p.user_id IS NULL OR s.id IS NOT
+// NULL` it is a predicate on the JOINED ROWS: a trip whose every participant's
+// share is suspended or unaccepted produces one row per participant, all of
+// them with a NULL `s.id` and a non-NULL `p.user_id`, so every row is
+// eliminated and the aggregate has no group to build — `ErrTripNotFound` for a
+// trip that plainly exists. The consequences are not cosmetic. The leg detector
+// reads the audience on EVERY frame of an open leg and returns on the error, so
+// the leg never closes, the card is never ended and the owner loses their
+// banner; `settleClaimed` loses the trip_ended fan-out on the same error.
+//
+// Moving it into array_agg's FILTER keeps the trip row alive with an EMPTY
+// participant list, which is the true answer: the trip exists, the owner is on
+// it, and nobody currently holds a live grant. The OWNER's pushes — the two leg
+// events — then still go out, and the participant-only pushes go to nobody,
+// which is what a suspended share is supposed to mean.
 const queryTripAudience = `
 SELECT t.vehicle_id,
        t.owner_user_id,
        COALESCE(
-           array_remove(array_agg(p.user_id) FILTER (WHERE p.user_id IS NOT NULL), NULL),
+           array_remove(
+               array_agg(p.user_id) FILTER (WHERE p.user_id IS NOT NULL AND s.id IS NOT NULL),
+               NULL
+           ),
            '{}'
        )
 FROM go_trips t
@@ -78,7 +98,6 @@ LEFT JOIN go_vehicle_shares s
       AND s.status = 'accepted'
       AND s.suspended_at IS NULL
 WHERE t.id = $1
-  AND (p.user_id IS NULL OR s.id IS NOT NULL)
 GROUP BY t.vehicle_id, t.owner_user_id`
 
 // queryClaimTripsToStart atomically claims the trips whose window has OPENED

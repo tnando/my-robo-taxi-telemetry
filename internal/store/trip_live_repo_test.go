@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -303,11 +304,17 @@ func TestPushToStartTokens_UpsertAndReject(t *testing.T) {
 	now := time.Now().UTC()
 	seedTripWindow(t, tripID, "cveh0602tok", "cowner0602tok", now.Add(-time.Hour), now.Add(time.Hour))
 
+	// The §7.30.8 writer is TripRepo's — one home for the upsert, per the
+	// integration's "resolve duplicates toward the core lane" rule. This
+	// repository owns only the SEND-side reads and the 410 delete.
 	repo := store.NewTripActivityTokenRepo(testPool, nil)
-	if err := repo.RegisterPushToStartToken(ctx, tripID, "cuser0602tok", "pts-v1", true); err != nil {
+	writer := newTripRepo(t)
+	// The fan-out list re-joins membership and share, so the registrant must
+	// be somebody the trip actually admits — here, the trip's own owner.
+	if err := writer.RegisterActivityStartToken(ctx, tripID, "cowner0602tok", "pts-v1", true); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if err := repo.RegisterPushToStartToken(ctx, tripID, "cuser0602tok", "pts-v2", false); err != nil {
+	if err := writer.RegisterActivityStartToken(ctx, tripID, "cowner0602tok", "pts-v2", false); err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
 
@@ -343,4 +350,259 @@ func containsString(haystack []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestRegisterLegActivity_UpsertsOnTheLegUserPair is the regression for the
+// conflict target's missing INDEX PREDICATE.
+//
+// idx_go_live_activities_leg_user is PARTIAL (`WHERE trip_leg_id IS NOT NULL`),
+// and Postgres refuses to infer a partial index unless the ON CONFLICT clause
+// repeats its predicate. Without it EVERY call — not merely the second —
+// failed with SQLSTATE 42P10 and every leg card was refused its update token,
+// which is the whole Live Activity half of the feature addressing zero rows. So
+// the first registration proves the arbiter is found at all, and the second
+// proves it rotates in place rather than accumulating a row per rotation.
+func TestRegisterLegActivity_UpsertsOnTheLegUserPair(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	const tripID, vehicleID = "ctrip0602reg", "cveh0602reg"
+	now := time.Now().UTC()
+	seedTripWindow(t, tripID, vehicleID, "cowner0602reg", now.Add(-time.Hour), now.Add(time.Hour))
+
+	legs := newTripLegRepo(t)
+	leg, err := legs.StartLeg(ctx, tripID, vehicleID, "Grand Canyon Village", now)
+	if err != nil {
+		t.Fatalf("StartLeg: %v", err)
+	}
+
+	activities := newLiveActivityRepo(t)
+	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg", "aaaa1111", true); err != nil {
+		t.Fatalf("RegisterLegActivity: %v — a 42P10 here means the ON CONFLICT clause "+
+			"lost the partial index's predicate and no leg card can ever register", err)
+	}
+	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg", "bbbb2222", false); err != nil {
+		t.Fatalf("RegisterLegActivity (rotation): %v", err)
+	}
+
+	rows, err := activities.ActivitiesForLeg(ctx, leg.ID)
+	if err != nil {
+		t.Fatalf("ActivitiesForLeg: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("%d rows after a token rotation, want 1 — a second row is a second card "+
+			"for one journey on one lock screen", len(rows))
+	}
+	if rows[0].ActivityPushToken != "bbbb2222" || rows[0].Sandbox {
+		t.Errorf("row = %+v, want the rotated token and its sandbox flag", rows[0])
+	}
+
+	// The guard is the leg being open, in the leg's own vocabulary.
+	if err := legs.EndLeg(ctx, leg.ID, now.Add(time.Minute), true); err != nil {
+		t.Fatalf("EndLeg: %v", err)
+	}
+	err = activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg2", "cccc3333", false)
+	if !errors.Is(err, store.ErrLiveActivityRideClosed) {
+		t.Errorf("registering against a CLOSED leg = %v, want ErrLiveActivityRideClosed — "+
+			"clearing that tombstone would resume an ETA countdown to a place the car left", err)
+	}
+}
+
+// TestMarkLegActivitiesPushed_KeepsALiveCardOutOfTheReaper is finding 7.
+//
+// querySweepLiveActivities hard-DELETES any row whose updated_at is older than
+// the cutoff, and nothing stamped the leg rows — the ride path's mark matches
+// (ride_request_id, user_id) and never sees them. A card on a day-long drive
+// would have had its row removed while it was still on the lock screen, taking
+// the end push's only address with it.
+func TestMarkLegActivitiesPushed_KeepsALiveCardOutOfTheReaper(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	const tripID, vehicleID = "ctrip0602mark", "cveh0602mark"
+	now := time.Now().UTC()
+	seedTripWindow(t, tripID, vehicleID, "cowner0602mark", now.Add(-48*time.Hour), now.Add(time.Hour))
+
+	legs := newTripLegRepo(t)
+	leg, err := legs.StartLeg(ctx, tripID, vehicleID, "Grand Canyon Village", now.Add(-30*time.Hour))
+	if err != nil {
+		t.Fatalf("StartLeg: %v", err)
+	}
+	activities := newLiveActivityRepo(t)
+	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602mark", "dddd4444", false); err != nil {
+		t.Fatalf("RegisterLegActivity: %v", err)
+	}
+	// Age the registration past the 24-hour horizon, as a real leg that has
+	// been running for a day and a half would be.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE go_live_activities SET updated_at = NOW() - INTERVAL '30 hours' WHERE trip_leg_id = $1`,
+		leg.ID); err != nil {
+		t.Fatalf("age the row: %v", err)
+	}
+
+	moved, err := activities.MarkLegActivitiesPushed(ctx, leg.ID, []string{"cuser0602mark"})
+	if err != nil {
+		t.Fatalf("MarkLegActivitiesPushed: %v", err)
+	}
+	if moved != 1 {
+		t.Fatalf("stamped %d rows, want 1", moved)
+	}
+
+	if _, err := activities.SweepStaleActivities(ctx, 24*time.Hour); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	rows, err := activities.ActivitiesForLeg(ctx, leg.ID)
+	if err != nil {
+		t.Fatalf("ActivitiesForLeg: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("the reaper removed a leg card that is still being pushed to; "+
+			"its end push now has no address (rows=%d)", len(rows))
+	}
+
+	// A tombstoned row must NOT be un-staled by a racing send — the same rule
+	// the ride twin holds, and the reason the statement is scoped to live rows.
+	if _, err := activities.EndActivitiesForLeg(ctx, leg.ID); err != nil {
+		t.Fatalf("EndActivitiesForLeg: %v", err)
+	}
+	moved, err = activities.MarkLegActivitiesPushed(ctx, leg.ID, []string{"cuser0602mark"})
+	if err != nil {
+		t.Fatalf("MarkLegActivitiesPushed (after end): %v", err)
+	}
+	if moved != 0 {
+		t.Errorf("stamped %d ended rows, want 0", moved)
+	}
+}
+
+// TestTripAudienceFor_SurvivesAnAllSuspendedRoster is finding 2.
+//
+// With the share predicate in the WHERE, a trip whose every participant's grant
+// is suspended eliminated the trip ROW itself and the read answered
+// ErrTripNotFound. The leg detector reads the audience on every frame of an
+// open leg and returns on that error, so the leg never closed, the card was
+// never ended, and the owner lost their banner — for a trip that plainly
+// exists. The right answer is the trip with an EMPTY roster.
+func TestTripAudienceFor_SurvivesAnAllSuspendedRoster(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+	repo := newTripLiveRepo(t)
+
+	const tripID, vehicleID, ownerID = "ctrip0602susp", "cveh0602susp", "cowner0602susp"
+	now := time.Now().UTC()
+	seedTripWindow(t, tripID, vehicleID, ownerID, now.Add(-time.Hour), now.Add(time.Hour))
+
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_vehicle_shares (id, vehicle_id, owner_user_id, label, permission,
+		   code, status, expires_at, accepted_by_user_id, suspended_at)
+		 VALUES ('sh_susponly', $1, $2, 'Seeded', 'live', 'code_susponly', 'accepted',
+		         NOW() + INTERVAL '30 days', 'cp0602susponly', NOW())
+		 ON CONFLICT (id) DO UPDATE SET suspended_at = NOW()`,
+		vehicleID, ownerID); err != nil {
+		t.Fatalf("seed suspended share: %v", err)
+	}
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO go_trip_participants (trip_id, user_id, share_id)
+		 VALUES ($1, 'cp0602susponly', 'sh_susponly')
+		 ON CONFLICT (trip_id, user_id) DO UPDATE SET left_at = NULL`,
+		tripID); err != nil {
+		t.Fatalf("seed participant: %v", err)
+	}
+
+	got, err := repo.TripAudienceFor(ctx, tripID)
+	if err != nil {
+		t.Fatalf("TripAudienceFor: %v — a trip whose whole roster is suspended must still "+
+			"resolve, or its legs never close and its owner never hears anything", err)
+	}
+	if got.OwnerUserID != ownerID || got.VehicleID != vehicleID {
+		t.Errorf("audience = %+v, want the seeded owner and vehicle", got)
+	}
+	if len(got.ParticipantUserIDs) != 0 {
+		t.Errorf("participants = %v, want none — a suspended grantee is indistinguishable "+
+			"from no grantee", got.ParticipantUserIDs)
+	}
+}
+
+// TestPushToStartTokensForTrip_DropsDepartedAndSuspended pins the fan-out's own
+// access predicate. A push-to-start token is a standing CAPABILITY on a phone
+// and nothing deletes it when a participant leaves or their share is suspended,
+// so the list has to ask.
+func TestPushToStartTokensForTrip_DropsDepartedAndSuspended(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	const tripID, vehicleID, ownerID = "ctrip0602ptsacc", "cveh0602ptsacc", "cowner0602ptsacc"
+	now := time.Now().UTC()
+	seedTripWindow(t, tripID, vehicleID, ownerID, now.Add(-time.Hour), now.Add(time.Hour))
+
+	type person struct {
+		userID    string
+		left      bool
+		suspended bool
+	}
+	people := []person{
+		{userID: "cp0602ptslive"},
+		{userID: "cp0602ptsleft", left: true},
+		{userID: "cp0602ptssusp", suspended: true},
+	}
+	for _, p := range people {
+		var suspendedAt, leftAt any
+		if p.suspended {
+			suspendedAt = now
+		}
+		if p.left {
+			leftAt = now
+		}
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_vehicle_shares (id, vehicle_id, owner_user_id, label, permission,
+			   code, status, expires_at, accepted_by_user_id, suspended_at)
+			 VALUES ('sh_' || $1, $2, $3, 'Seeded', 'live', 'code_' || $1, 'accepted',
+			         NOW() + INTERVAL '30 days', $1, $4)
+			 ON CONFLICT (id) DO UPDATE SET suspended_at = $4`,
+			p.userID, vehicleID, ownerID, suspendedAt); err != nil {
+			t.Fatalf("seed share for %s: %v", p.userID, err)
+		}
+		if _, err := testPool.Exec(ctx,
+			`INSERT INTO go_trip_participants (trip_id, user_id, share_id, left_at)
+			 VALUES ($1, $2, 'sh_' || $2, $3)
+			 ON CONFLICT (trip_id, user_id) DO UPDATE SET left_at = $3`,
+			tripID, p.userID, leftAt); err != nil {
+			t.Fatalf("seed participant %s: %v", p.userID, err)
+		}
+	}
+
+	writer := newTripRepo(t)
+	for _, id := range []string{ownerID, "cp0602ptslive", "cp0602ptsleft", "cp0602ptssusp"} {
+		if err := writer.RegisterActivityStartToken(ctx, tripID, id, "pts_"+id, false); err != nil {
+			t.Fatalf("register token for %s: %v", id, err)
+		}
+	}
+
+	repo := store.NewTripActivityTokenRepo(testPool, nil)
+	rows, err := repo.PushToStartTokensForTrip(ctx, tripID)
+	if err != nil {
+		t.Fatalf("PushToStartTokensForTrip: %v", err)
+	}
+	got := make(map[string]bool, len(rows))
+	for _, r := range rows {
+		got[r.UserID] = true
+	}
+	if !got[ownerID] || !got["cp0602ptslive"] {
+		t.Errorf("recipients = %v, want the owner and the live participant", got)
+	}
+	if got["cp0602ptsleft"] || got["cp0602ptssusp"] {
+		t.Errorf("recipients = %v — a departed or suspended person still received a leg "+
+			"card naming the car and its destination", got)
+	}
 }

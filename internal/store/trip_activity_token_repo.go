@@ -66,12 +66,41 @@ WHERE push_to_start_token = $1`
 
 // queryTripActivityTokens lists a trip's registrations — the push-to-start
 // fan-out for one leg.
+//
+// IT RE-JOINS THE MEMBERSHIP AND THE SHARE, and that is an access predicate
+// rather than tidiness. A registration is a standing CAPABILITY on a phone: the
+// row survives a participant leaving the trip and survives the owner suspending
+// their share, because nothing in either path deletes it. Listed unconditionally
+// by trip id, the next leg would push a Live Activity naming the car and its
+// destination to somebody whose access ended — the precise thing "trip access
+// cannot outlive the share" promises cannot happen. So the fan-out asks the
+// same question every other trips surface asks, with the same two predicates
+// (`left_at IS NULL`, `status = 'accepted' AND suspended_at IS NULL`) that
+// queryTripAudience and auth.queryActiveTripParticipation carry.
+//
+// THE OWNER IS ADMITTED UNCONDITIONALLY. They hold no share on their own car —
+// there is no grant to check — and they are on the leg card by explicit product
+// decision.
 // #nosec G101 -- column/predicate SQL over the push-to-start registry, not a
 // credential literal (gosec greps the identifier 'token' in a string).
 const queryTripActivityTokens = `
-SELECT trip_id, user_id, push_to_start_token, sandbox
-FROM go_trip_activity_tokens
-WHERE trip_id = $1`
+SELECT tok.trip_id, tok.user_id, tok.push_to_start_token, tok.sandbox
+FROM go_trip_activity_tokens tok
+JOIN go_trips t ON t.id = tok.trip_id
+WHERE tok.trip_id = $1
+  AND (
+        tok.user_id = t.owner_user_id
+     OR EXISTS (
+            SELECT 1
+            FROM go_trip_participants p
+            JOIN go_vehicle_shares s
+              ON s.vehicle_id = t.vehicle_id
+             AND s.accepted_by_user_id = p.user_id
+             AND s.status = 'accepted'
+             AND s.suspended_at IS NULL
+            WHERE p.trip_id = t.id AND p.user_id = tok.user_id AND p.left_at IS NULL
+        )
+  )`
 
 // TripActivityTokenRepo is the go_trip_activity_tokens repository.
 type TripActivityTokenRepo struct {
@@ -85,40 +114,6 @@ func NewTripActivityTokenRepo(pool *pgxpool.Pool, logger *slog.Logger) *TripActi
 		logger = slog.Default()
 	}
 	return &TripActivityTokenRepo{pool: pool, logger: logger}
-}
-
-// RegisterPushToStartToken upserts one person's token for one trip.
-//
-// The caller is responsible for having established that userID is the trip's
-// owner or a live participant — this method enforces the shape of the write,
-// not the authorization behind it, exactly as RegisterActivity does.
-func (r *TripActivityTokenRepo) RegisterPushToStartToken(ctx context.Context, tripID, userID, token string, sandbox bool) error {
-	if strings.TrimSpace(tripID) == "" {
-		return fmt.Errorf("store.RegisterPushToStartToken: empty trip id")
-	}
-	if strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("store.RegisterPushToStartToken(trip=%s): empty user id", tripID)
-	}
-	if strings.TrimSpace(token) == "" {
-		// P1: report its absence, never its value.
-		return fmt.Errorf("store.RegisterPushToStartToken(trip=%s, user=%s): empty token", tripID, userID)
-	}
-	if _, err := r.pool.Exec(ctx, queryUpsertTripActivityToken, tripID, userID, token, sandbox); err != nil {
-		return fmt.Errorf("store.RegisterPushToStartToken(trip=%s, user=%s): %w", tripID, userID, err)
-	}
-	return nil
-}
-
-// DeletePushToStartToken removes one person's registration for one trip,
-// reporting whether a row matched. A miss is not an error: the DELETE endpoint
-// is idempotent, and a registration somebody else holds must look identical to
-// one that never existed so the endpoint cannot be used to probe.
-func (r *TripActivityTokenRepo) DeletePushToStartToken(ctx context.Context, tripID, userID string) (bool, error) {
-	tag, err := r.pool.Exec(ctx, queryDeleteTripActivityToken, tripID, userID)
-	if err != nil {
-		return false, fmt.Errorf("store.DeletePushToStartToken(trip=%s, user=%s): %w", tripID, userID, err)
-	}
-	return tag.RowsAffected() > 0, nil
 }
 
 // DeleteRejectedPushToStartToken removes a token APNs answered 410 to.

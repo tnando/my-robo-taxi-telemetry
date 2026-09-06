@@ -54,13 +54,25 @@ import (
 // same reason: a client that re-registers is telling us it has a live Activity
 // again, and leaving a stale tombstone would silently exclude the row from
 // every send path with nothing in the logs to explain the frozen card.
+//
+// THE CONFLICT TARGET CARRIES THE INDEX'S PREDICATE, and it is not decoration.
+// The unique index this statement infers is PARTIAL — migration 0047 declares
+// `idx_go_live_activities_leg_user … WHERE trip_leg_id IS NOT NULL`, because
+// the table's other anchor leaves the column NULL on every ride row and NULLs
+// do not collide. Postgres will only infer a partial index when the ON CONFLICT
+// clause repeats its predicate; without the WHERE the planner finds no
+// arbiter at all and every call fails with SQLSTATE 42P10
+// (`there is no unique or exclusion constraint matching the ON CONFLICT
+// specification`) — which is to say the FIRST registration on every leg card
+// was refused, not merely the second. The ride path needs no such clause
+// because its unique constraint is unconditional.
 const queryUpsertLegActivity = `
 INSERT INTO go_live_activities
     (id, trip_leg_id, user_id, activity_push_token, sandbox, alerted_phase, created_at, updated_at)
 SELECT $1, l.id, $3, $4, $5, 0, NOW(), NOW()
 FROM go_trip_legs l
 WHERE l.id = $2 AND l.ended_at IS NULL
-ON CONFLICT (trip_leg_id, user_id) DO UPDATE
+ON CONFLICT (trip_leg_id, user_id) WHERE trip_leg_id IS NOT NULL DO UPDATE
 SET activity_push_token = EXCLUDED.activity_push_token,
     sandbox             = EXCLUDED.sandbox,
     updated_at          = NOW(),
@@ -81,6 +93,35 @@ SELECT a.trip_leg_id, a.user_id, a.activity_push_token, a.sandbox,
        ` + progressColumns + `
 FROM go_live_activities a
 WHERE a.trip_leg_id = $1 AND a.ended_at IS NULL`
+
+// queryMarkLegActivitiesPushed stamps updated_at on the leg rows a fan-out just
+// delivered to.
+//
+// THE 24-HOUR REAPER IS WHY THIS EXISTS, and its absence was a hard delete
+// rather than a cosmetic one. querySweepLiveActivities removes any row whose
+// `updated_at` is older than the cutoff, and `updated_at` means "last
+// registration, end, OR successful push" — a meaning the ride path keeps true
+// by stamping every delivered pass (queryMarkLiveActivitiesPushed) and the leg
+// path did not keep true at all. A leg card registered at the start of a long
+// drive and refreshed every twenty seconds for a day would have had its row
+// DELETED out from under it while it was still on the lock screen, taking with
+// it the only address the end push has: the card would then run to
+// ActivityKit's own ceiling saying the car was still driving somewhere it
+// reached hours earlier.
+//
+// The ride twin's statement pairs two text arrays because its key is a pair.
+// A leg fan-out is by construction one leg and many users, so this takes the
+// leg once and the users as one array — the same tuple set, spelled for the
+// shape the caller actually holds.
+//
+// Scoped to live rows for the ride twin's reason: a send that raced the leg's
+// end must not un-stale a tombstoned row and hold it back from the sweep.
+const queryMarkLegActivitiesPushed = `
+UPDATE go_live_activities
+SET updated_at = NOW()
+WHERE ended_at IS NULL
+  AND trip_leg_id = $1
+  AND user_id = ANY($2::text[])`
 
 // queryEndLegActivities tombstones every Activity on one leg, after the final
 // `event: "end"` push. Whole-leg rather than per-user because a leg ends for
@@ -197,4 +238,34 @@ func (r *LiveActivityRepo) EndLegActivity(ctx context.Context, legID, userID str
 		return false, fmt.Errorf("store.EndLegActivity(leg=%s, user=%s): %w", legID, userID, err)
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+// MarkLegActivitiesPushed stamps updated_at on one leg's rows for the users a
+// fan-out just delivered to, and reports how many it moved.
+//
+// Called AFTER the sends, never instead of them, exactly as
+// MarkActivitiesPushed is: a card Apple refused is not "recently pushed", and
+// stamping it would keep a permanently failing row alive past the reaper for
+// no one. See queryMarkLegActivitiesPushed for what the reaper does without it.
+//
+// An empty user list is a no-op rather than an error: a pass that reached
+// nobody has nothing to stamp.
+func (r *LiveActivityRepo) MarkLegActivitiesPushed(ctx context.Context, legID string, userIDs []string) (int64, error) {
+	if strings.TrimSpace(legID) == "" {
+		return 0, fmt.Errorf("store.MarkLegActivitiesPushed: empty leg id")
+	}
+	if len(userIDs) == 0 {
+		return 0, nil
+	}
+	for _, u := range userIDs {
+		if strings.TrimSpace(u) == "" {
+			return 0, fmt.Errorf("store.MarkLegActivitiesPushed(leg=%s): empty user id", legID)
+		}
+	}
+
+	tag, err := r.pool.Exec(ctx, queryMarkLegActivitiesPushed, legID, userIDs)
+	if err != nil {
+		return 0, fmt.Errorf("store.MarkLegActivitiesPushed(leg=%s, n=%d): %w", legID, len(userIDs), err)
+	}
+	return tag.RowsAffected(), nil
 }
