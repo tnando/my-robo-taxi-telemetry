@@ -107,7 +107,7 @@ const (
 
 	// AuditActionOwnerApprovalAcknowledged records that the person who linked a
 	// car they only DRIVE on Tesla's side stated that the car's owner approved
-	// adding it (MYR-599, rest-api.md §7.24).
+	// adding it (MYR-599, rest-api.md §7.29).
 	//
 	// THIS ROW IS THE POINT OF THE FEATURE, not bookkeeping around it. The
 	// platform cannot verify the owner's approval with Tesla — no API exposes

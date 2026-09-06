@@ -100,7 +100,7 @@ func (h *VehicleFleetConfigHandler) handle(w http.ResponseWriter, r *http.Reques
 	//
 	// 409, matching the reconnect endpoint's refusal for the same reason: the
 	// caller is not forbidden and nothing failed; the request does not apply to
-	// this vehicle yet, and §7.24 is the specific thing that changes that.
+	// this vehicle yet, and §7.29 is the specific thing that changes that.
 	if push && row.DriverAccess.PendingAcknowledgment() {
 		h.logger.Info("vehicle fleet config: push refused, driver-access car awaiting the owner-approval acknowledgment",
 			slog.String("event", "fleet_config_awaiting_owner_ack"),

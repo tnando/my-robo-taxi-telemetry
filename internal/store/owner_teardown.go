@@ -132,7 +132,7 @@ DELETE FROM go_fleet_config_attempts WHERE vehicle_id = $1`
 // reason its two neighbours do.
 //
 // Worth stating what is NOT lost: the acknowledgment itself survives as the
-// AuditLog row the §7.24 endpoint wrote, which is the durable, append-only
+// AuditLog row the §7.29 endpoint wrote, which is the durable, append-only
 // record. What this deletes is the standing per-vehicle FACT — "this car is
 // driver-linked, and its gate is open" — which is meaningless once the car is
 // gone and dangerous if a cuid were ever reused: a surviving open gate is a

@@ -72,7 +72,7 @@ const (
 	// Tesla reports as a DRIVER of it rather than its owner, and the platform
 	// will not configure telemetry until that person acknowledges the owner
 	// approved adding it (MYR-599, contracts v0.39.0). ACTION: the driver
-	// confirms the acknowledgment sheet, which POSTs §7.24.
+	// confirms the acknowledgment sheet, which POSTs §7.29.
 	SetupStateAwaitingOwnerAcknowledgment = "awaiting_owner_acknowledgment"
 )
 

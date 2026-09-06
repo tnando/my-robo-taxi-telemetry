@@ -189,7 +189,7 @@ func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken,
 //   - DRIVER access (MYR-599): the driver-access row is written, the schedule is
 //     seeded `awaiting_owner_ack`, and NOTHING IS PUSHED. The car is provisioned
 //     — it appears, it can be named, the virtual key the person may already have
-//     paired is not wasted — but it is inert until §7.24 records that the owner
+//     paired is not wasted — but it is inert until §7.29 records that the owner
 //     approved adding it.
 //
 // It is the shared per-vehicle body of both the passive AfterLink sync and the

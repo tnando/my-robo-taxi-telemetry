@@ -115,7 +115,7 @@ const SetupOutcomeNone = ""
 //
 // It is deliberately WIRE-INVISIBLE ON ITS OWN. deriveSetupState answers
 // `awaiting_owner_acknowledgment` from the go_vehicle_driver_access row, which
-// is the authoritative source and the thing §7.24 clears; this label exists so
+// is the authoritative source and the thing §7.29 clears; this label exists so
 // the schedule row can say WHY it is sitting there, and so the seed is never a
 // silent no-claim row that later reads as an unexplained silence.
 const SetupOutcomeAwaitingOwnerAck = "awaiting_owner_ack"

@@ -117,21 +117,33 @@ func (p *OwnerProvisioner) ClearDriverAccess(ctx context.Context, vin, userID st
 
 // queryAcknowledgeDriverAccess stamps the acknowledgment on one car's row.
 //
-// LAST WRITE WINS on both columns, deliberately, and the pair is what makes it
-// coherent: the standing row answers "what is currently acknowledged, and as of
-// when", so a driver who re-acknowledges a NEWER version of the copy must move
-// both values together or the row would claim a v2 agreement at a v1 instant.
-// The HISTORY — every acknowledgment ever made, each with its own version — is
-// the append-only AuditLog trail the handler writes, which is the right place
-// for it and the only place that can hold more than one.
+// FIRST WRITE WINS — that is what `AND acknowledged_at IS NULL` is for, and it
+// is the opposite of the usual last-write-wins upsert in this package.
 //
-// Matching zero rows is the OWNER-ACCESS case and is not an error: the caller
-// reads the row count to tell "acknowledged" from "there was nothing to
-// acknowledge", and answers 200 either way.
+// The row is a CONSENT RECORD, and the instant a person first agreed is the
+// thing the platform would point to if an owner ever complained. A later call
+// must not be able to move it: a client that lost a response and retried, a
+// background re-sync, or a second tap would otherwise quietly restate a
+// months-old agreement as today's, and the one fact worth having would be the
+// one fact that drifts. Consent, once given, is not re-dated.
+//
+// It follows that this statement is SELF-DEBOUNCING, and the handler leans on
+// that: matching zero rows means "nothing to record here", which covers the
+// OWNER-ACCESS car (no row at all) and the ALREADY-ACKNOWLEDGED one (a row the
+// predicate excludes) — and in both cases the right behaviour is identical: no
+// stamp, no audit row, 200, and the ordinary setup state. The endpoint stays
+// idempotent because the PUSH still runs on every call; only the record is
+// written once.
+//
+// A driver who is later shown a NEWER version of the copy therefore does not
+// overwrite this row. The append-only AuditLog trail is where a second
+// acknowledgment would be recorded, and it is the only surface that can hold
+// more than one — which is the right shape for a history.
 const queryAcknowledgeDriverAccess = `
 UPDATE go_vehicle_driver_access
 SET acknowledged_at = $2, acknowledgment_version = $3
-WHERE vehicle_id = $1`
+WHERE vehicle_id = $1
+  AND acknowledged_at IS NULL`
 
 // ownerApprovalAuditMetadata is the whole P0 payload of the
 // `vehicle.owner_approval_acknowledged` audit row: the copy version and
@@ -147,8 +159,8 @@ type ownerApprovalAuditMetadata struct {
 
 // AcknowledgeOwnerApproval records that the driver of vehicleID acknowledged
 // the owner's approval, under the copy version they were shown, and writes the
-// matching audit row IN THE SAME TRANSACTION. Returns whether a driver-access
-// row existed to stamp.
+// matching audit row IN THE SAME TRANSACTION. Returns whether an
+// UNACKNOWLEDGED driver-access row existed to stamp.
 //
 // ONE TRANSACTION, because the two writes are one fact from two directions: the
 // standing row is the GATE ("this car may now be configured") and the audit row
@@ -156,7 +168,7 @@ type ownerApprovalAuditMetadata struct {
 // evidence is the state nobody could later explain, and evidence written for a
 // gate that never opened would be a record of a consent that had no effect.
 //
-// false + nil error is the ORDINARY answer for an owner's own car and the §7.24
+// false + nil error is the ORDINARY answer for an owner's own car and the §7.29
 // handler's 200 no-op path — never an error, because "this car needed no
 // acknowledgment" is a fact about the car and not a fault of the request. NO
 // AUDIT ROW IS WRITTEN in that case: nothing was acknowledged, and an audit
@@ -192,8 +204,10 @@ func (r *VehicleRepo) AcknowledgeOwnerApproval(
 		return false, fmt.Errorf("VehicleRepo.AcknowledgeOwnerApproval(%s): %w", vehicleID, err)
 	}
 	if tag.RowsAffected() == 0 {
-		// Owner-access car. Commit the (empty) transaction rather than rolling
-		// back so the two exits are indistinguishable to anything watching.
+		// Nothing to record: an owner-access car (no row) or one already
+		// acknowledged (the predicate excluded it). Commit the (empty)
+		// transaction rather than rolling back so the two exits are
+		// indistinguishable to anything watching.
 		if err := tx.Commit(ctx); err != nil {
 			r.metrics.IncQueryError("vehicle.acknowledge_owner_approval")
 			return false, fmt.Errorf("VehicleRepo.AcknowledgeOwnerApproval(%s): commit: %w", vehicleID, err)
@@ -229,7 +243,7 @@ func (r *VehicleRepo) AcknowledgeOwnerApproval(
 
 // GetDriverAccess reads one car's driver-access row.
 //
-// The §7.24 handler already holds a VehicleSnapshotRow (which carries the row
+// The §7.29 handler already holds a VehicleSnapshotRow (which carries the row
 // through the snapshot's LEFT JOIN), so this exists for the OPS surfaces and
 // for tests that assert the write half without going through a vehicle read.
 // Absence is not an error — it is owner access, the zero value.

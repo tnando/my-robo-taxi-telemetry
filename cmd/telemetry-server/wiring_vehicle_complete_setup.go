@@ -67,4 +67,23 @@ func setupVehicleCompleteSetupEndpoint(deps httpRouteDeps) {
 	deps.srv.HandleFunc("POST /api/tesla/vehicles/{vehicleId}/complete-setup", handler.ServeHTTP)
 	logger.Info("vehicle complete-setup endpoint enabled (POST /api/tesla/vehicles/{vehicleId}/complete-setup)",
 		slog.Bool("config_push_available", deps.fleetConfigReconciler != nil))
+
+	// MYR-599 §7.29, mounted HERE rather than in a wiring file of its own, and
+	// that is the point: it is handed the SAME `completer` value the route
+	// above uses. "The acknowledge endpoint performs the same best-effort push
+	// complete-setup performs" is then a fact about one object in memory, not a
+	// promise two constructions have to keep. The identical reasoning applies
+	// to the always-mounted rule in this file's header: a 404 here would tell an
+	// SDK the server is too old to record an acknowledgment, when what is
+	// actually true on a proxy-less deployment is that the CONSENT can still be
+	// recorded and only the push that follows it is unavailable.
+	ackHandler := telemetry.NewOwnerApprovalHandler(
+		deps.authenticator,
+		&vehicleSnapshotAdapter{repo: deps.vehicleRepo},
+		deps.vehicleRepo,
+		completer,
+		logger.With(slog.String("subcomponent", "owner-approval")),
+	)
+	deps.srv.HandleFunc("POST /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval", ackHandler.ServeHTTP)
+	logger.Info("owner-approval acknowledgment endpoint enabled (POST /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval)")
 }

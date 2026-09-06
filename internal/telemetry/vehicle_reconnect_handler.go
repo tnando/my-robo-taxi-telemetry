@@ -236,7 +236,7 @@ func (h *VehicleReconnectHandler) resolveOwnedVIN(
 	// current state, and there is a specific thing the caller can do to change
 	// that. The client already knows what: the same row carries
 	// `teslaAccessType: "driver"` and a `setupState` of
-	// `awaiting_owner_acknowledgment`, and §7.24 is the way through.
+	// `awaiting_owner_acknowledgment`, and §7.29 is the way through.
 	//
 	// In practice this is close to unreachable — a suspension episode requires a
 	// car that WAS configured and streaming, which an unacknowledged driver car

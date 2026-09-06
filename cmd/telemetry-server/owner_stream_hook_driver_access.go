@@ -32,7 +32,7 @@ package main
 // The car IS provisioned. Nothing is pushed at it. The gap between those two
 // sentences is the whole feature: a driver-linked car exists, can be named, can
 // be seen, and keeps the virtual key its linker may already have paired — but no
-// fleet-telemetry config reaches it, from ANY path, until §7.24 records that
+// fleet-telemetry config reaches it, from ANY path, until §7.29 records that
 // its owner approved adding it.
 //
 // WHAT THIS RECORDS IS EVIDENCE, NOT PERMISSION. The platform cannot verify an
