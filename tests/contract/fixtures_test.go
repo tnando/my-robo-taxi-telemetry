@@ -185,6 +185,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 	// matters most here, a `streaming` leaking onto a read surface or a null
 	// leaking onto this one.
 	setupCompletionSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/vehicle-setup-completion.schema.json")
+	// MYR-602 §7.30.2. The TripListResponse envelope, and through its `items`
+	// $ref the whole Trip shape — the same object every other §7.30 route
+	// returns, so validating the list fixture validates the detail, the create
+	// echo, the patch echo and the end echo at once. Compiled here rather than
+	// asserted field by field for the reason the vehicles-list schema is: a
+	// hand-written required-field list only catches what somebody remembered.
+	tripListSchema := compileSchema(t, c, "https://myrobotaxi.com/schemas/trip.schema.json")
 
 	// Pre-compile all WS message payload schemas.
 	payloadSchemas := map[string]*jsonschema.Schema{
@@ -306,6 +313,13 @@ func TestFixturesValidateAgainstSchemas(t *testing.T) {
 					// `sharePermission` (§5.2.0).
 					validateVehiclesList(t, stripped, baseName)
 					validate(t, vehicleSummaryListSchema, stripped, "VehicleListResponse")
+
+				case baseName == "trips_list.json":
+					// MYR-602: TripListResponse — `{ items: Trip[] }` per
+					// rest-api.md §7.30.2. The fixture carries all three
+					// TripStatus members deliberately; see its _meta.
+					validate(t, tripListSchema, stripped, "TripListResponse")
+					assertTripEndedAtMatchesStatus(t, stripped)
 
 				case baseName == "complete_setup.json":
 					// MYR-505: the §7.23 action response.
@@ -819,4 +833,54 @@ func mustGlobJSONRecursive(t *testing.T, dir string) []string {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
 	return files
+}
+
+// assertTripEndedAtMatchesStatus pins the ONE cross-field rule on Trip that a
+// JSON Schema cannot state (MYR-602): `endedAt` is non-null if and only if
+// `status` is `ended`.
+//
+// It is worth a hand-written assertion because the rule is what makes the field
+// safe to read. `endedAt` records that an action ALREADY HAPPENED — its only
+// writer is `SET ended_at = NOW()` — so a consumer treats a non-null value as
+// terminal and never compares it against a clock. That reading is only sound
+// while the two fields agree, and a fixture that drifted (an `active` row with
+// an `endedAt`, or an `ended` row without one) would document the opposite.
+//
+// The `scheduled`/`active` direction is the one with a live bug behind it: the
+// status was once derived in Go against the SERVER'S clock rather than the
+// database's, and a testcontainers Postgres running 76 ms ahead made an
+// owner's own end-trip response say the trip was still active.
+func assertTripEndedAtMatchesStatus(t *testing.T, m map[string]any) {
+	t.Helper()
+
+	items, ok := m["items"].([]any)
+	if !ok {
+		t.Fatalf("trips fixture has no items array")
+	}
+	for i, raw := range items {
+		row, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("items[%d] is not an object", i)
+		}
+		status, _ := row["status"].(string)
+		endedAt, hasKey := row["endedAt"]
+		if !hasKey {
+			t.Errorf("items[%d] (status=%q): endedAt is REQUIRED and must be present as null when the trip has not ended", i, status)
+			continue
+		}
+		ended := endedAt != nil
+
+		if ended != (status == "ended") {
+			t.Errorf("items[%d]: status=%q but endedAt=%v — the two must agree; a non-null endedAt is what makes the trip terminal",
+				i, status, endedAt)
+		}
+		// A closed window has no open leg. The converse is NOT asserted: an
+		// active trip with no currentLeg is the ordinary overnight state, which
+		// is exactly why the field is informational and never a gate.
+		if status == "ended" {
+			if _, hasLeg := row["currentLeg"]; hasLeg {
+				t.Errorf("items[%d]: an ended trip carries a currentLeg; a closed window has no open leg", i)
+			}
+		}
+	}
 }

@@ -614,7 +614,58 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		"activity_started_at"  TIMESTAMPTZ,
 		"activity_ended_at"    TIMESTAMPTZ,
 		"created_at"           TIMESTAMPTZ NOT NULL DEFAULT NOW()
-	);`
+	);
+
+	-- go_live_activities: the Live Activity registry, IN ITS POST-0047 SHAPE.
+	--
+	-- Provisioned here because migration 0047's riskiest statement lives on this
+	-- table and had no conformance coverage at all: it DROPS ride_request_id's
+	-- NOT NULL so a leg can be the anchor instead, and compensates in the same
+	-- migration with go_live_activities_one_anchor. A harness that omitted the
+	-- table would let every trip test pass while saying nothing about whether
+	-- the compensation is installed — and a dropped NOT NULL with an absent
+	-- CHECK is a row anchored to NOTHING, addressed to a phone, that no cascade
+	-- can ever reach.
+	--
+	-- THE CHECK IS THE POINT, and it is written here exactly as 0047 writes it
+	-- (<> over the two NULL tests, which is XOR for booleans) rather than as a
+	-- looser paraphrase: EXACTLY ONE anchor, never both and never neither. It is
+	-- STRICTER than the constraint it replaced, which is what makes the drop
+	-- safe — no state the old schema forbade is permitted by the new one.
+	--
+	-- The ride FK is deliberately NOT declared. go_ride_requests is provisioned
+	-- above, but 0047's own leg reference (REFERENCES go_trip_legs) is what
+	-- the trips path depends on, and keeping the ride side FK-free here matches
+	-- what this harness does everywhere else: model the columns and the
+	-- constraints a conformance assertion can observe, not the whole schema.
+	--
+	-- The two UNIQUEs are both here because they answer different questions and
+	-- one of them is PARTIAL: the ride pair is a table constraint (Postgres
+	-- treats NULLs as distinct, so trip rows never collide through it), while
+	-- the leg pair must be a partial index so the ride rows are EXCLUDED rather
+	-- than merely tolerated.
+	CREATE TABLE go_live_activities (
+		"id"                  TEXT        PRIMARY KEY,
+		-- NULLABLE since 0047. Was NOT NULL; see the CHECK below.
+		"ride_request_id"     TEXT,
+		-- The second anchor (0047). Cascades with the leg.
+		"trip_leg_id"         TEXT        REFERENCES go_trip_legs ("id") ON DELETE CASCADE,
+		"user_id"             TEXT        NOT NULL,
+		-- P1 CAPABILITY: addresses ONE RUNNING CARD. Distinct from
+		-- go_trip_activity_tokens.push_to_start_token, which addresses the APP.
+		"activity_push_token" TEXT        NOT NULL,
+		"sandbox"             BOOLEAN     NOT NULL DEFAULT FALSE,
+		"created_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"updated_at"          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		"ended_at"            TIMESTAMPTZ,
+		CONSTRAINT go_live_activities_ride_user_key UNIQUE ("ride_request_id", "user_id"),
+		CONSTRAINT go_live_activities_one_anchor
+			CHECK (("ride_request_id" IS NOT NULL) <> ("trip_leg_id" IS NOT NULL))
+	);
+
+	CREATE UNIQUE INDEX idx_go_live_activities_leg_user
+		ON go_live_activities ("trip_leg_id", "user_id")
+		WHERE "trip_leg_id" IS NOT NULL;`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
