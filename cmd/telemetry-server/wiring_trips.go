@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
@@ -23,6 +24,14 @@ import (
 //	GET    /api/trips/{tripId}/drives
 //	POST   /api/trips/{tripId}/activity-start-token
 //	DELETE /api/trips/{tripId}/activity-start-token
+//	POST   /api/trips/{tripId}/legs/{legId}/activity-token
+//	DELETE /api/trips/{tripId}/legs/{legId}/activity-token
+//
+// The last PAIR is the LEG anchor of §7.21's per-Activity path, and it is the
+// other half of push-to-start: §7.30.8 registers the token that lets the server
+// CREATE a card, and these file the per-Activity token that addresses the card
+// once it exists. Without them the server can raise a leg's card and never
+// update or end it.
 //
 // ALWAYS MOUNTED. The kill switch is passed INTO the handler rather than
 // deciding whether to register the routes, and the difference matters: an
@@ -55,7 +64,7 @@ func setupTripEndpoints(
 
 	handler := telemetry.NewTripHandler(
 		deps.authenticator,
-		&tripStoreAdapter{repo: repo},
+		&tripStoreAdapter{repo: repo, activities: deps.liveActivityRepo},
 		snapshotAdapter,
 		deps.cfg.TripsEnabled(),
 		logger,
@@ -71,8 +80,12 @@ func setupTripEndpoints(
 	deps.srv.HandleFunc("GET /api/trips/{tripId}/drives", handler.ServeDrives)
 	deps.srv.HandleFunc("POST /api/trips/{tripId}/activity-start-token", handler.ServeRegisterActivityToken)
 	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", handler.ServeDeleteActivityToken)
+	deps.srv.HandleFunc("POST /api/trips/{tripId}/legs/{legId}/activity-token", handler.ServeRegisterLegActivityToken)
+	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/legs/{legId}/activity-token", handler.ServeEndLegActivityToken)
 
-	logger.Info("trip endpoints enabled (§7.30)", slog.Bool("feature_enabled", deps.cfg.TripsEnabled()))
+	logger.Info("trip endpoints enabled (§7.30)",
+		slog.Int("routes", 11),
+		slog.Bool("feature_enabled", deps.cfg.TripsEnabled()))
 
 	// RETURNED, not discarded: the same repository is the drives handlers'
 	// window gate and the catalog's third merge leg. One instance rather than
@@ -88,7 +101,14 @@ func setupTripEndpoints(
 // HANDLER'S. The two sets are deliberately separate — the handler package
 // cannot see the store's — and this is the one place they meet, so a store
 // error that reaches a client has been through exactly one mapping.
-type tripStoreAdapter struct{ repo *store.TripRepo }
+type tripStoreAdapter struct {
+	repo *store.TripRepo
+	// activities is the go_live_activities registry, reached by the two LEG
+	// token routes only. The SAME instance the ride token endpoints and the
+	// Live Activity sender use, so a card cannot be registered in one place and
+	// looked for in another.
+	activities *store.LiveActivityRepo
+}
 
 func (a *tripStoreAdapter) CreateTrip(ctx context.Context, in telemetry.TripCreateInput) (telemetry.TripData, error) {
 	view, err := a.repo.Create(ctx, store.CreateTripInput{
@@ -157,6 +177,35 @@ func (a *tripStoreAdapter) RegisterTripActivityStartToken(ctx context.Context, t
 func (a *tripStoreAdapter) DeleteTripActivityStartToken(ctx context.Context, tripID, userID string) error {
 	return translateTripError(a.repo.DeleteActivityStartToken(ctx, tripID, userID))
 }
+
+// The LEG anchor of §7.21's per-Activity path (§7.30.10 / §7.30.11). It reaches
+// a DIFFERENT repository from everything above — go_live_activities rather than
+// go_trips — because the two tokens are two different things: the start token
+// is the app's capability to create a card, this one addresses one card that
+// already exists.
+func (a *tripStoreAdapter) RegisterTripLegActivityToken(
+	ctx context.Context, tripID, legID, userID, token string, sandbox bool,
+) error {
+	if a.activities == nil {
+		return errLegActivityRegistryUnwired
+	}
+	return translateTripError(a.activities.RegisterLegActivity(ctx, tripID, legID, userID, token, sandbox))
+}
+
+func (a *tripStoreAdapter) EndTripLegActivityToken(ctx context.Context, legID, userID string) (bool, error) {
+	if a.activities == nil {
+		return false, errLegActivityRegistryUnwired
+	}
+	ended, err := a.activities.EndLegActivity(ctx, legID, userID)
+	return ended, translateTripError(err)
+}
+
+// errLegActivityRegistryUnwired is a DEPLOYMENT error, not a runtime state: the
+// registry is the same *store.LiveActivityRepo the ride path has always had, so
+// a nil here means the composition root skipped a line. It falls through
+// writeTripError's default arm to a logged 500, which is the honest answer —
+// nothing the caller can change would help.
+var errLegActivityRegistryUnwired = errors.New("trips: live activity registry not wired")
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MYR-602 TRIPS — composition root. END

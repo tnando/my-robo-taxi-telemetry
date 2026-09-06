@@ -39,6 +39,20 @@ type fakeTripStore struct {
 	tokenCalls  int
 	deleteCalls int
 
+	// The LEG anchor of §7.21's per-Activity path (§7.30.10 / §7.30.11).
+	legTokenCalls  int
+	legEndCalls    int
+	lastLegTripID  string
+	lastLegID      string
+	lastLegToken   string
+	lastLegSandbox bool
+	legRegisterErr error
+	// legEndErr is separate from err so a test can express the DELETE's whole
+	// point: the trip read would refuse this caller, and the delete succeeds
+	// anyway because it only ever touches their own row.
+	legEndErr error
+	legEnded  bool
+
 	// lastCreate captures the input so the path-vs-body vehicleId rule can be
 	// asserted directly.
 	lastCreate TripCreateInput
@@ -82,6 +96,21 @@ func (f *fakeTripStore) RegisterTripActivityStartToken(context.Context, string, 
 func (f *fakeTripStore) DeleteTripActivityStartToken(context.Context, string, string) error {
 	f.deleteCalls++
 	return f.err
+}
+func (f *fakeTripStore) RegisterTripLegActivityToken(
+	_ context.Context, tripID, legID, _, token string, sandbox bool,
+) error {
+	f.legTokenCalls++
+	f.lastLegTripID, f.lastLegID, f.lastLegToken, f.lastLegSandbox = tripID, legID, token, sandbox
+	if f.legRegisterErr != nil {
+		return f.legRegisterErr
+	}
+	return f.err
+}
+func (f *fakeTripStore) EndTripLegActivityToken(_ context.Context, legID, _ string) (bool, error) {
+	f.legEndCalls++
+	f.lastLegID = legID
+	return f.legEnded, f.legEndErr
 }
 
 // recordingNotifier captures the fan-out so the "who gets told" rules are
@@ -152,6 +181,8 @@ func newTripTestHandler(t *testing.T, store TripStore, enabled bool, opts ...Tri
 	mux.HandleFunc("GET /api/trips/{tripId}/drives", h.ServeDrives)
 	mux.HandleFunc("POST /api/trips/{tripId}/activity-start-token", h.ServeRegisterActivityToken)
 	mux.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", h.ServeDeleteActivityToken)
+	mux.HandleFunc("POST /api/trips/{tripId}/legs/{legId}/activity-token", h.ServeRegisterLegActivityToken)
+	mux.HandleFunc("DELETE /api/trips/{tripId}/legs/{legId}/activity-token", h.ServeEndLegActivityToken)
 	return mux
 }
 
@@ -201,6 +232,8 @@ func TestTripsKillSwitchAnswers503OnEveryRoute(t *testing.T) {
 		{http.MethodGet, "/api/trips/" + tripTestID + "/drives"},
 		{http.MethodPost, "/api/trips/" + tripTestID + "/activity-start-token"},
 		{http.MethodDelete, "/api/trips/" + tripTestID + "/activity-start-token"},
+		{http.MethodPost, "/api/trips/" + tripTestID + "/legs/cleg_1/activity-token"},
+		{http.MethodDelete, "/api/trips/" + tripTestID + "/legs/cleg_1/activity-token"},
 	}
 	for _, rt := range routes {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {

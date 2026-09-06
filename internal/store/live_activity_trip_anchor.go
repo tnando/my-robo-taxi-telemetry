@@ -37,12 +37,21 @@ import (
 
 // queryUpsertLegActivity registers a per-Activity UPDATE token against a leg.
 //
-// The guard is the INSERT … SELECT's WHERE: the leg must exist and still be
-// open. A miss affects zero rows, which the caller reports as
-// ErrLiveActivityClosed — the same sentinel the ride path uses, because the
-// HTTP layer's answer is identical (409, "end your Activity locally") and
-// minting a second error would make the handler branch on which anchor it
-// happened to be holding.
+// The guard is the INSERT … SELECT's WHERE, and it asks TWO questions at once:
+// the leg must belong to the named trip, and it must still be open. A miss
+// affects zero rows, which the caller reports as ErrLiveActivityClosed — the
+// same sentinel the ride path uses, because the HTTP layer's answer is
+// identical (409, "end your Activity locally") and minting a second error would
+// make the handler branch on which anchor it happened to be holding.
+//
+// THE TRIP SCOPE IS IN THE STATEMENT RATHER THAN IN THE HANDLER, and it is what
+// makes the §7.30.10 route safe. The handler establishes that the caller is on
+// the TRIP; nothing there establishes that the leg they named is that trip's,
+// and a leg id from somebody else's trip would otherwise register a card on
+// their journey. Asked here, the two conditions share one refusal and one race
+// — and the answer is deliberately the same for "the leg ended" and "the leg
+// isn't yours", so the endpoint cannot be used to probe whether a leg id
+// exists.
 //
 // `alerted_phase` is seeded at 0 rather than at a ride-status-derived rung. The
 // ladder in activity_alert.go is a RIDE ladder — requested, accepted, arrived,
@@ -71,7 +80,7 @@ INSERT INTO go_live_activities
     (id, trip_leg_id, user_id, activity_push_token, sandbox, alerted_phase, created_at, updated_at)
 SELECT $1, l.id, $3, $4, $5, 0, NOW(), NOW()
 FROM go_trip_legs l
-WHERE l.id = $2 AND l.ended_at IS NULL
+WHERE l.id = $2 AND l.trip_id = $6 AND l.ended_at IS NULL
 ON CONFLICT (trip_leg_id, user_id) WHERE trip_leg_id IS NOT NULL DO UPDATE
 SET activity_push_token = EXCLUDED.activity_push_token,
     sandbox             = EXCLUDED.sandbox,
@@ -142,12 +151,17 @@ WHERE trip_leg_id = $1 AND user_id = $2 AND ended_at IS NULL`
 // Live Activity on one trip leg, replacing a rotated token in place and
 // clearing any previous end-tombstone.
 //
-// Returns ErrLiveActivityClosed when the leg is gone or already closed —
-// the same sentinel and the same 409 as the ride path, see queryUpsertLegActivity.
+// Returns ErrLiveActivityClosed when the leg is gone, already closed, or not on
+// the named trip — the same sentinel and the same 409 as the ride path, see
+// queryUpsertLegActivity.
 //
-// The caller is responsible for having established that userID is the trip's
-// owner or a live participant.
-func (r *LiveActivityRepo) RegisterLegActivity(ctx context.Context, legID, userID, token string, sandbox bool) error {
+// The caller is responsible for having established that userID is the TRIP's
+// owner or a live participant. Whether the LEG is that trip's is this
+// statement's job, not the caller's.
+func (r *LiveActivityRepo) RegisterLegActivity(ctx context.Context, tripID, legID, userID, token string, sandbox bool) error {
+	if strings.TrimSpace(tripID) == "" {
+		return fmt.Errorf("store.RegisterLegActivity: empty trip id")
+	}
 	if strings.TrimSpace(legID) == "" {
 		return fmt.Errorf("store.RegisterLegActivity: empty leg id")
 	}
@@ -159,7 +173,7 @@ func (r *LiveActivityRepo) RegisterLegActivity(ctx context.Context, legID, userI
 		return fmt.Errorf("store.RegisterLegActivity(leg=%s, user=%s): empty activity token", legID, userID)
 	}
 
-	tag, err := r.pool.Exec(ctx, queryUpsertLegActivity, newProvisionID(), legID, userID, token, sandbox)
+	tag, err := r.pool.Exec(ctx, queryUpsertLegActivity, newProvisionID(), legID, userID, token, sandbox, tripID)
 	if err != nil {
 		return fmt.Errorf("store.RegisterLegActivity(leg=%s, user=%s): %w", legID, userID, err)
 	}

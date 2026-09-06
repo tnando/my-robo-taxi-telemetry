@@ -380,11 +380,11 @@ func TestRegisterLegActivity_UpsertsOnTheLegUserPair(t *testing.T) {
 	}
 
 	activities := newLiveActivityRepo(t)
-	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg", "aaaa1111", true); err != nil {
+	if err := activities.RegisterLegActivity(ctx, tripID, leg.ID, "cuser0602reg", "aaaa1111", true); err != nil {
 		t.Fatalf("RegisterLegActivity: %v — a 42P10 here means the ON CONFLICT clause "+
 			"lost the partial index's predicate and no leg card can ever register", err)
 	}
-	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg", "bbbb2222", false); err != nil {
+	if err := activities.RegisterLegActivity(ctx, tripID, leg.ID, "cuser0602reg", "bbbb2222", false); err != nil {
 		t.Fatalf("RegisterLegActivity (rotation): %v", err)
 	}
 
@@ -404,10 +404,50 @@ func TestRegisterLegActivity_UpsertsOnTheLegUserPair(t *testing.T) {
 	if err := legs.EndLeg(ctx, leg.ID, now.Add(time.Minute), true); err != nil {
 		t.Fatalf("EndLeg: %v", err)
 	}
-	err = activities.RegisterLegActivity(ctx, leg.ID, "cuser0602reg2", "cccc3333", false)
+	err = activities.RegisterLegActivity(ctx, tripID, leg.ID, "cuser0602reg2", "cccc3333", false)
 	if !errors.Is(err, store.ErrLiveActivityClosed) {
 		t.Errorf("registering against a CLOSED leg = %v, want ErrLiveActivityClosed — "+
 			"clearing that tombstone would resume an ETA countdown to a place the car left", err)
+	}
+}
+
+// TestRegisterLegActivity_RefusesALegFromAnotherTrip is the §7.30.10 route's
+// second guard, and it lives in the STATEMENT rather than in the handler.
+//
+// The handler establishes that the caller is on the TRIP. Nothing there
+// establishes that the leg they named is that trip's, so an id from somebody
+// else's journey would otherwise register a card on it — and the refusal has to
+// be indistinguishable from "the leg has ended", or the endpoint becomes an
+// oracle for leg ids.
+func TestRegisterLegActivity_RefusesALegFromAnotherTrip(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	seedTripWindow(t, "ctrip0602mine", "cveh0602mine", "cowner0602x", now.Add(-time.Hour), now.Add(time.Hour))
+	seedTripWindow(t, "ctrip0602theirs", "cveh0602theirs", "cowner0602y", now.Add(-time.Hour), now.Add(time.Hour))
+
+	legs := newTripLegRepo(t)
+	theirs, err := legs.StartLeg(ctx, "ctrip0602theirs", "cveh0602theirs", "Somewhere", now)
+	if err != nil {
+		t.Fatalf("StartLeg: %v", err)
+	}
+
+	activities := newLiveActivityRepo(t)
+	err = activities.RegisterLegActivity(ctx, "ctrip0602mine", theirs.ID, "cuser0602x", "eeee5555", false)
+	if !errors.Is(err, store.ErrLiveActivityClosed) {
+		t.Errorf("registering against ANOTHER trip's open leg = %v, want ErrLiveActivityClosed "+
+			"— a card would otherwise be raised on somebody else's journey", err)
+	}
+	rows, err := activities.ActivitiesForLeg(ctx, theirs.ID)
+	if err != nil {
+		t.Fatalf("ActivitiesForLeg: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("%d rows were written against another trip's leg", len(rows))
 	}
 }
 
@@ -435,7 +475,7 @@ func TestMarkLegActivitiesPushed_KeepsALiveCardOutOfTheReaper(t *testing.T) {
 		t.Fatalf("StartLeg: %v", err)
 	}
 	activities := newLiveActivityRepo(t)
-	if err := activities.RegisterLegActivity(ctx, leg.ID, "cuser0602mark", "dddd4444", false); err != nil {
+	if err := activities.RegisterLegActivity(ctx, tripID, leg.ID, "cuser0602mark", "dddd4444", false); err != nil {
 		t.Fatalf("RegisterLegActivity: %v", err)
 	}
 	// Age the registration past the 24-hour horizon, as a real leg that has

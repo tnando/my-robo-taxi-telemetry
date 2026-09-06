@@ -166,4 +166,22 @@ type TripStore interface {
 
 	// DeleteTripActivityStartToken removes it. Idempotent.
 	DeleteTripActivityStartToken(ctx context.Context, tripID, userID string) error
+
+	// RegisterTripLegActivityToken files the per-ACTIVITY update token for one
+	// running card (§7.30.10). A DIFFERENT TOKEN AND A DIFFERENT TABLE from the
+	// two above: those address the APP's capability to create a card, this
+	// addresses one card that already exists.
+	//
+	// The tripID is passed as well as the legID so the implementation can scope
+	// the leg to the trip in the same statement that guards on the leg being
+	// open — one refusal, one race, ErrLiveActivityClosed for both.
+	//
+	// Also a P1 CAPABILITY: never logged beyond a short prefix, never echoed,
+	// never in an error.
+	RegisterTripLegActivityToken(ctx context.Context, tripID, legID, userID, token string, sandbox bool) error
+
+	// EndTripLegActivityToken tombstones the caller's own card on a leg,
+	// reporting whether a live row matched (§7.30.11). Caller-scoped so nobody
+	// can end another person's card, and idempotent: a miss is not an error.
+	EndTripLegActivityToken(ctx context.Context, legID, userID string) (bool, error)
 }
