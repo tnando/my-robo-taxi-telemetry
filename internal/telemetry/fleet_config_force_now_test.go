@@ -104,3 +104,38 @@ func TestForceConfigRepushNowToleratesAMissingConfig(t *testing.T) {
 		t.Errorf("push calls = %d, want 1", h.writer.calls)
 	}
 }
+
+// MYR-599 — THE SECOND DOOR TO THE DELETE-THEN-CREATE.
+//
+// ForceConfigRepushNow does NOT pass through reconcileOne, where the consent
+// gate lives, so it carries its own. That is belt-and-braces today — the only
+// caller (complete-setup) already refuses an unacknowledged driver car at its
+// step 0 — but "held shut by a check in another file" is exactly the
+// arrangement the pairing-signal hole taught us not to rely on, and the action
+// behind this door DELETES a config, which Tesla permits for a driver token
+// right now.
+//
+// The assertions are deliberately about the WRITER: not one call of either
+// verb, so a regression cannot pass by refusing the push while still issuing
+// the delete.
+func TestForceConfigRepushNowRefusesAnUnacknowledgedDriverCar(t *testing.T) {
+	h := newForceHarness(nil, nil)
+	c := syncedQuietCandidate(nil)[0]
+	c.PendingOwnerAck = true
+
+	if h.rec.ForceConfigRepushNow(context.Background(), c, "tok") {
+		t.Fatal("ForceConfigRepushNow reported applied for a car awaiting the owner-approval acknowledgment")
+	}
+
+	if h.writer.deleteCalls != 0 {
+		t.Errorf("deleteCalls = %d, want 0 — a third party's config must never be deleted", h.writer.deleteCalls)
+	}
+	if h.writer.calls != 0 {
+		t.Errorf("push calls = %d, want 0", h.writer.calls)
+	}
+	// No epoch stamp either: nothing was escalated, so nothing may spend the
+	// one force this pairing epoch allows.
+	if len(h.attempts.forced) != 0 {
+		t.Errorf("forced writes = %+v, want none", h.attempts.forced)
+	}
+}

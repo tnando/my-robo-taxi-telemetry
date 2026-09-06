@@ -27,7 +27,10 @@
 
 package telemetry
 
-import "context"
+import (
+	"context"
+	"log/slog"
+)
 
 // epochForceSpent reports whether this vehicle has already spent its one forced
 // config re-push for the CURRENT key-pairing epoch.
@@ -50,11 +53,21 @@ func epochForceSpent(c FleetConfigCandidate) bool {
 // ForceConfigRepushNow runs the MYR-489 escalation immediately for one
 // candidate and reports whether the config was actually recreated.
 //
-// It is the reconciler's on-demand face for MYR-505 and performs NO gating of
-// its own: the caller owns the decision, because the caller is the one holding
-// the evidence (Tesla's fleet_status answer, an accepted wake). What it does
-// guarantee is that the ACTION and its consequences — including the schedule
-// write and the epoch stamp — are byte-identical to a background escalation.
+// It is the reconciler's on-demand face for MYR-505 and performs no gating of
+// its own on the EVIDENCE: the caller owns that decision, because the caller is
+// the one holding it (Tesla's fleet_status answer, an accepted wake). What it
+// does guarantee is that the ACTION and its consequences — including the
+// schedule write and the epoch stamp — are byte-identical to a background
+// escalation.
+//
+// THE ONE EXCEPTION IS CONSENT (MYR-599), and it is an exception precisely
+// because it is NOT a decision the caller owns. Every other gate here protects
+// our own user from a wasted call; this one protects the actual owner of a car
+// that somebody else linked, and the whole lesson of the pairing-signal hole
+// closed in reconcileOne is that a check delegated to each caller is a check
+// that the next caller will not make. This function is the SECOND door to the
+// delete-then-create — it does not pass through reconcileOne — so it carries
+// the same refusal rather than trusting the door in front of it.
 //
 // A false return means the create step did not apply. The car may at that
 // instant have NO config (the delete-then-create window), which `forceRepush`
@@ -70,6 +83,18 @@ func epochForceSpent(c FleetConfigCandidate) bool {
 func (r *FleetConfigReconciler) ForceConfigRepushNow(
 	ctx context.Context, c FleetConfigCandidate, accessToken string,
 ) bool {
+	if c.PendingOwnerAck {
+		// Belt AND braces, deliberately. The only caller today (complete-setup)
+		// has already refused this car at its own step 0, so reaching here means
+		// something upstream changed — which is exactly the moment a gate earns
+		// its keep. Logged at WARN rather than Info because, unlike the ordinary
+		// reconcileOne refusal, arriving here at all is a surprise.
+		r.logger.Warn("fleet-config force re-push: refused, driver-access car awaiting the owner-approval acknowledgment",
+			slog.String("event", "fleet_config_awaiting_owner_ack"),
+			slog.String("vehicle_id", c.VehicleID),
+			slog.String("vin", redactVIN(c.VIN)))
+		return false
+	}
 	var out ReconcileOutcome
 	r.forceRepush(ctx, ctx, c, accessToken, redactVIN(c.VIN), &out)
 	return out.ForcedRepushes > 0

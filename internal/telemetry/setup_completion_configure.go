@@ -127,6 +127,22 @@ func (s *SetupCompleter) candidate(ctx context.Context, row VehicleSnapshotRow) 
 		LastAttemptAt:   row.SetupSchedule.LastAttemptAt,
 		SignedCommandAt: row.SetupSchedule.SignedCommandAt,
 		ForcedRepushAt:  row.SetupSchedule.ForcedRepushAt,
+		// MYR-599. CARRIED, not left at the zero value, even though this
+		// candidate cannot reach an unacknowledged car today: Complete's step 0
+		// refuses one before the sequence ever gets here.
+		//
+		// The reason to set it anyway is that this candidate goes to
+		// ForceConfigRepushNow — the DELETE-then-POST escalation — which does
+		// NOT pass through reconcileOne, where the gate lives. So this is a
+		// SECOND DOOR to the same action, currently held shut by a check in a
+		// different file. One refactor that moved, weakened or short-circuited
+		// step 0 would open it silently, and the failure would be a config
+		// deleted from a third party's car.
+		//
+		// `row` is the fresh GetByID above, which joins go_vehicle_driver_access,
+		// so this is a real reading rather than a hopeful default — the one
+		// condition PendingOwnerAck's doc attaches to trusting it.
+		PendingOwnerAck: row.DriverAccess.PendingAcknowledgment(),
 	}
 }
 
