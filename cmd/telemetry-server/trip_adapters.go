@@ -179,6 +179,9 @@ func (a *tripVehicleListerAdapter) ListTripVehiclesByUser(ctx context.Context, u
 		out = append(out, telemetry.TripVehicleRow{
 			VehicleCatalogRow: rows[i].VehicleCatalogRow,
 			TripID:            byVehicle[rows[i].ID],
+			// The caller's OWN ride capability, carried through so the trip
+			// row's `sharePermission` matches the share row it replaces.
+			AllowRides: rows[i].AllowRides,
 		})
 	}
 	return out, nil

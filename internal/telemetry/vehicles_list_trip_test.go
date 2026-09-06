@@ -259,3 +259,73 @@ func TestActiveTripIDIsOptionalInTheSchema(t *testing.T) {
 		}
 	}
 }
+
+// TestATripUpGRADESTheShareRowRatherThanBeingSkipped is the regression this
+// merge exists for, and the bug it was written after finding.
+//
+// EVERY TRIP PARTICIPANT IS BY CONSTRUCTION A SHARE-HOLDER — the picker's
+// candidates ARE the car's accepted shares — so the share merge has already
+// emitted a row for that car by the time the trip leg runs, projected through
+// the plain-VIEWER mask, which since MYR-602 carries NO `location`.
+//
+// A dedupe that merely SKIPPED it (the member merge's rule, which is right for
+// membership) would leave the participant holding a coordinate-less row for the
+// entire window, and the client's per-row pickup ETA blank for the one car they
+// were invited to watch. The row is replaced instead, and `sharePermission`
+// survives the replacement because the trip row carries the caller's own
+// AllowRides — a trip elevates the ROLE, it does not replace the relationship.
+func TestATripUpgradesTheShareRowRatherThanBeingSkipped(t *testing.T) {
+	lat, lng := 32.7767, -96.797
+	shared := VehicleCatalogRow{
+		ID: "cveh_shared", VIN: "7SAYGDET7TA888888", Name: "Nabil's car",
+		Model: "Model S", Year: 2023, Color: "black", Status: "driving",
+		Latitude: &lat, Longitude: &lng,
+	}
+
+	t.Run("without a trip the share row has no location", func(t *testing.T) {
+		items := catalogItems(t,
+			WithSharedVehicles(&fakeSharedLister{rows: []SharedVehicleRow{{VehicleCatalogRow: shared, AllowRides: true}}}),
+		)
+		row := items["cveh_shared"]
+		if row["location"] != nil {
+			t.Fatalf("a plain viewer's row carries a location: %v — MYR-602 narrowed that away", row["location"])
+		}
+	})
+
+	t.Run("with an open window the same row gains it", func(t *testing.T) {
+		items := catalogItems(t,
+			WithSharedVehicles(&fakeSharedLister{rows: []SharedVehicleRow{{VehicleCatalogRow: shared, AllowRides: true}}}),
+			WithTripVehicles(&fakeTripVehicleLister{
+				active: map[string]string{"cveh_shared": tripTestID},
+				rows: []TripVehicleRow{{
+					VehicleCatalogRow: shared,
+					TripID:            tripTestID,
+					AllowRides:        true,
+				}},
+			}),
+		)
+
+		if len(items) != 2 {
+			t.Fatalf("expected the owner's car and the shared one, got %d rows", len(items))
+		}
+		row := items["cveh_shared"]
+		if row["location"] == nil {
+			t.Fatalf("the trip did not upgrade the share row: %v", row)
+		}
+		// THE CAPABILITY MUST SURVIVE THE REPLACEMENT. A trip participant who
+		// could request rides before the window opened must still be able to
+		// during it; silently downgrading the tier would take a booking button
+		// away at the moment the person is most likely to use it.
+		if row["sharePermission"] != "rides" {
+			t.Errorf("sharePermission = %v, want the share's own tier to survive", row["sharePermission"])
+		}
+		if row["activeTripId"] != tripTestID {
+			t.Errorf("activeTripId = %v, want %q", row["activeTripId"], tripTestID)
+		}
+		// The WIRE role is unchanged — the elevation is in the field set, never
+		// in the enum every shipped client decodes.
+		if row["role"] != string(auth.RoleViewer) {
+			t.Errorf("role = %v, want the wire value viewer", row["role"])
+		}
+	})
+}

@@ -1042,8 +1042,24 @@ func TestHub_BroadcastMasked_ViewerStripsVIN(t *testing.T) {
 	if _, present := pl.Fields["vin"]; present {
 		t.Errorf("viewer received the full vin; mask did not strip it: %v", pl.Fields)
 	}
-	if pl.Fields["speed"] != float64(65) {
-		t.Errorf("speed missing or wrong: %v", pl.Fields["speed"])
+	// MYR-602 NARROWED `viewer`, so the SPEED VALUE no longer reaches a plain
+	// share-holder — but the KEY still must, because `speed` is in
+	// vehicle-state.schema.json's `required` array and dropping it would make
+	// the frame undecodable for every installed client rather than merely
+	// narrower. It arrives as the schema's own no-value spelling
+	// (internal/mask/sentinels.go).
+	//
+	// The assertion is on the SENTINEL rather than the absence, because that is
+	// the property a client depends on: the key is there and the value says
+	// nothing.
+	speed, present := pl.Fields["speed"]
+	if !present {
+		t.Errorf("speed was dropped; the schema declares it required: %v", pl.Fields)
+	} else if speed != float64(0) {
+		t.Errorf("speed = %v, want the no-value sentinel 0 for a plain viewer", speed)
+	}
+	if pl.Fields["chargeLevel"] != float64(82) {
+		t.Errorf("chargeLevel = %v — the narrowing was scoped to location, not to the catalog floor", pl.Fields["chargeLevel"])
 	}
 }
 

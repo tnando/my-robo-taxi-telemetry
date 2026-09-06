@@ -56,10 +56,18 @@ type TripVehicleLister interface {
 	ActiveTripIDsByUser(ctx context.Context, userID string) (map[string]string, error)
 }
 
-// TripVehicleRow is a catalog row plus the id of the trip that admits it.
+// TripVehicleRow is a catalog row, the id of the trip that admits it, and the
+// caller's ride capability on the underlying share.
 type TripVehicleRow struct {
 	VehicleCatalogRow
 	TripID string
+
+	// AllowRides is the caller's OWN share capability, carried because a trip
+	// row REPLACES the share row for the same car (see appendTripRows) and the
+	// replacement must not silently downgrade `sharePermission`. The trip
+	// elevates the ROLE; it does not replace the relationship, and the grant
+	// travels with the person.
+	AllowRides bool
 }
 
 // WithTripVehicles enables the trip merge. Omitting it leaves the endpoint
@@ -107,34 +115,55 @@ func (h *VehiclesListHandler) appendTripRows(ctx context.Context, userID string,
 		rows = nil
 	}
 
-	// DEDUPE KEEPS THE ROW ALREADY IN HAND, exactly as the member merge does.
-	// An owner row carries the owner mask and a share row carries a real
-	// capability; both say strictly more about the same car than a trip
-	// membership does. The trip row appears only when the window is the ONLY
-	// way the caller reaches the car — which cannot actually happen today,
-	// since every participant is by construction a share-holder and the share
-	// leg runs first, but the merge is written to be correct rather than to
-	// depend on that. If shares and trips ever come apart, this leg is what
-	// keeps the catalog honest instead of silently dropping a car.
-	seen := make(map[string]bool, len(resp.Items))
-	for _, item := range resp.Items {
+	// ⚠ THIS LEG UPGRADES, IT DOES NOT ONLY APPEND — and that is the whole
+	// difference between it and the member merge above it.
+	//
+	// EVERY TRIP PARTICIPANT IS BY CONSTRUCTION A SHARE-HOLDER: the picker's
+	// candidates ARE the car's accepted shares. So by the time this leg runs,
+	// the share merge has ALREADY emitted a row for that car — projected
+	// through the plain-VIEWER mask, which since MYR-602 carries no `location`.
+	// A dedupe that merely skipped it (the member merge's rule) would leave the
+	// participant holding a row with no coordinate for the entire window, and
+	// the client's per-row pickup ETA (MYR-577) blank for the one car they were
+	// invited to watch — the exact regression the member merge exists to
+	// prevent for riders, reappearing one leg later for participants.
+	//
+	// So a NON-OWNER row for a car with an open window is REPLACED by the
+	// trip_participant projection of the same catalog row. It is strictly
+	// richer: the same fields plus the location group. `sharePermission`
+	// survives because the row carries the caller's own AllowRides — the trip
+	// elevates the ROLE, it does not replace the relationship.
+	//
+	// AN OWNER ROW IS NEVER TOUCHED. The owner mask is the widest there is, and
+	// downgrading an owner to a participant on their own car would be a
+	// narrowing dressed as a merge.
+	index := make(map[string]int, len(resp.Items))
+	for i, item := range resp.Items {
 		if id, ok := item["vehicleId"].(string); ok {
-			seen[id] = true
+			index[id] = i
 		}
 	}
 
-	// One clock reading for the appended rows, matching the other three legs:
-	// every row of one catalog response judges its MYR-491 setup state against
-	// the same instant.
+	// One clock reading for this leg, matching the other three: every row of one
+	// catalog response judges its MYR-491 setup state against the same instant.
 	now := time.Now()
 	for i := range rows {
-		if seen[rows[i].ID] {
+		projected := nonOwnerSummaryMap(
+			rows[i].VehicleCatalogRow,
+			auth.ShareGrant{AllowRides: rows[i].AllowRides},
+			now, auth.RoleTripParticipant,
+		)
+
+		at, existing := index[rows[i].ID]
+		if !existing {
+			index[rows[i].ID] = len(resp.Items)
+			resp.Items = append(resp.Items, projected)
 			continue
 		}
-		seen[rows[i].ID] = true
-		resp.Items = append(resp.Items, nonOwnerSummaryMap(
-			rows[i].VehicleCatalogRow, auth.ShareGrant{}, now, auth.RoleTripParticipant,
-		))
+		if wire, _ := resp.Items[at]["role"].(string); wire == string(auth.RoleOwner) {
+			continue
+		}
+		resp.Items[at] = projected
 	}
 
 	// STAMPED ON EVERY ROW, whichever leg produced it. `activeTripId` is how a
