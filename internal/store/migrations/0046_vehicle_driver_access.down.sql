@@ -1,0 +1,41 @@
+-- 0046_vehicle_driver_access.down.sql
+--
+-- Reverts MYR-599's consent record: drops the Go-owned go_vehicle_driver_access
+-- table.
+--
+-- READ THIS BEFORE RUNNING IT. This table is the ONLY record that a person who
+-- does not own a car told us the owner approved their adding it, and the only
+-- thing that holds the config-push gate shut for a car nobody has acknowledged.
+-- Dropping it therefore does two things at once, and the second is the
+-- dangerous one:
+--
+--   1. IT DESTROYS EVIDENCE. The acknowledgment (who, when, which text version)
+--      exists precisely to be produced if an owner ever objects. There is no
+--      other copy — the AuditLog row records that an acknowledgment happened,
+--      but the standing per-vehicle fact lives only here.
+--   2. IT OPENS THE GATE. Every push path reads "no unacknowledged driver row"
+--      as permission. With the table gone, an UNACKNOWLEDGED driver-linked car
+--      becomes indistinguishable from an owner's own car, and the very next
+--      reconciler pass will push a fleet-telemetry config at a vehicle whose
+--      owner never agreed to anything — the exact outcome the feature exists to
+--      prevent.
+--
+-- IF THE INTENT IS TO UNDO THE FEATURE: roll the SERVER back first, then
+-- inspect the table for rows with `acknowledged_at IS NULL` and tear those
+-- vehicles down (DELETE /api/tesla/vehicles/{vehicleId}) so no unacknowledged
+-- driver car survives the revert, and only then run this. Export the
+-- acknowledged rows before dropping them if anything downstream may need the
+-- evidence.
+--
+-- FAILURE MODE IF RUN AGAINST A LIVE SERVER: five readers are compiled against
+-- this table — the §7.0 catalog's LEFT JOIN (three queries), the §7.1 snapshot
+-- read, the reconciler's candidate NOT EXISTS, the acknowledge endpoint's
+-- upsert, and the teardown/deletion statements — and all of them fail with
+-- `relation "go_vehicle_driver_access" does not exist`. The catalog join takes
+-- the vehicle LIST down for EVERY user, not just affected ones. Roll the SERVER
+-- back first. Always.
+--
+-- Schema rollback only; no sibling-owned data is touched, and no Tesla-side call
+-- is made.
+
+DROP TABLE IF EXISTS go_vehicle_driver_access;

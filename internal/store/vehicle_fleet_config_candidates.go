@@ -42,6 +42,25 @@ type FleetConfigCandidate struct {
 	// APPLIED to this car — proof the virtual key is paired and the car was
 	// reachable then. Zero when never observed. Opens the pairing epoch.
 	SignedCommandAt time.Time
+	// PendingOwnerAck is true when this car carries an UNACKNOWLEDGED
+	// go_vehicle_driver_access row (MYR-599) — it was linked by someone Tesla
+	// calls a DRIVER of it, and nothing may be pushed at it or deleted from it
+	// until they acknowledge the owner approved adding it.
+	//
+	// IT TRAVELS ON THE CANDIDATE RATHER THAN BEING RE-QUERIED because the
+	// reconciler has TWO candidate producers and gating only one of them left a
+	// live hole: the periodic pass builds candidates from
+	// queryFleetConfigCandidates (which carries a NOT EXISTS), but the
+	// pairing-signal path builds them from
+	// queryResetFleetConfigScheduleOnPairing and hands them straight to
+	// reconcileOne. Every producer now reports the fact and the single consumer
+	// enforces it, so a third producer added later inherits the gate instead of
+	// silently reopening it.
+	//
+	// The zero value is false = "push away", which is the UNSAFE direction. That
+	// is tolerable only because both producers set it explicitly in SQL; a
+	// hand-built candidate must never be handed to reconcileOne.
+	PendingOwnerAck bool
 	// ForcedRepushAt is when the reconciler last performed a forced
 	// (delete-then-create) config re-push. Zero when never. Compared against
 	// SignedCommandAt to ration escalations to one per epoch.
@@ -81,6 +100,15 @@ type FleetConfigCandidate struct {
 //     is missing is inverted, and the consequence is resurrecting a car its
 //     owner deliberately removed. go_removed_vehicles carries `vin` for exactly
 //     this correlation.
+//   - the go_vehicle_driver_access NOT EXISTS (MYR-599) — CONSENT-WINS, and it
+//     is the strongest gate in this query because it is the only one that
+//     protects somebody who is not our user. A car linked by a DRIVER is
+//     provisioned like any other, but nothing may be pushed at it until that
+//     driver acknowledges the owner approved it, and the reconciler is the one
+//     actor here that would otherwise do so unattended, on a background pass,
+//     for as long as the car kept not streaming. Unlike the tombstone guard
+//     above it needs no OR: `vehicle_id` is this table's primary key and is
+//     never NULL, so the anti-join cannot open on a missing join key.
 //   - the attempt-schedule arm — a car is due when it has never been attempted
 //     or its backoff has elapsed. Ordering by OUR schedule rather than by
 //     "lastUpdated" is what stops unfixable cars permanently occupying the
@@ -112,7 +140,12 @@ const queryFleetConfigCandidates = `
 SELECT v."id", v."vin", v."userId", v."lastUpdated", v."status",
        COALESCE(fa.attempt_count, 0),
        COALESCE(fa.last_outcome, ''),
-       fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at
+       fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at,
+       -- Always false here, by construction: the NOT EXISTS below has already
+       -- removed every row that could make it true. Projected anyway so this
+       -- producer states the fact rather than assuming it — see
+       -- pendingOwnerAckExprV for why the redundancy is the invariant.
+       ` + pendingOwnerAckExprV + `
 FROM "Vehicle" v
 LEFT JOIN go_fleet_config_attempts fa ON fa.vehicle_id = v."id"
 WHERE length(v."vin") = 17
@@ -130,6 +163,8 @@ WHERE length(v."vin") = 17
         FROM go_removed_vehicles rv
         WHERE rv.user_id = v."userId"
           AND (rv.tesla_vehicle_id = v."teslaVehicleId" OR rv.vin = v."vin")
+      )
+  AND NOT EXISTS (` + unacknowledgedDriverAccessGate + `
       )
 ORDER BY COALESCE(fa.next_attempt_at, TO_TIMESTAMP(0)) ASC, v."lastUpdated" ASC
 LIMIT $3`
@@ -184,7 +219,8 @@ func (r *VehicleRepo) ListFleetConfigCandidates(
 		var lastAttemptAt, signedCommandAt, forcedRepushAt *time.Time
 		if err := rows.Scan(&c.VehicleID, &c.VIN, &c.UserID, &c.LastUpdated, &c.Status,
 			&c.AttemptCount, &c.LastOutcome,
-			&lastAttemptAt, &signedCommandAt, &forcedRepushAt); err != nil {
+			&lastAttemptAt, &signedCommandAt, &forcedRepushAt,
+			&c.PendingOwnerAck); err != nil {
 			r.metrics.IncQueryError("vehicle.list_fleet_config_candidates")
 			return nil, fmt.Errorf("VehicleRepo.ListFleetConfigCandidates: scan: %w", err)
 		}

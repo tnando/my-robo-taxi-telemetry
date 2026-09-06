@@ -191,6 +191,21 @@ type Vehicle struct {
 	// "no claim", so a Vehicle from GetByVIN or the wide ListByUser simply
 	// carries no setup state rather than a wrong one.
 	SetupSchedule SetupSchedule
+
+	// DriverAccess is this car's go_vehicle_driver_access row (MYR-599), LEFT
+	// JOINed by the same snapshot read. RAW STORAGE behind TWO derived wire
+	// values — VehicleState.teslaAccessType and the
+	// `awaiting_owner_acknowledgment` member of setupState — both produced in
+	// internal/telemetry, exactly as the schedule above is.
+	//
+	// POPULATED ONLY BY GetByID, like its side-table neighbours, and the zero
+	// value points the SAFE way for the WIRE (Present false reads as owner
+	// access, which every car in the fleet had before MYR-599). It points the
+	// UNSAFE way for the GATE — a hand-built row reads as "nothing to
+	// acknowledge, push away" — so the push paths must only ever gate on a row
+	// that came from GetByID. Every one of them already does: each already
+	// calls GetByID to establish ownership.
+	DriverAccess VehicleDriverAccess
 }
 
 // VehicleUpdate holds the subset of vehicle fields that can change from

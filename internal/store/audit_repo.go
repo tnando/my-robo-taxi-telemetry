@@ -104,6 +104,39 @@ const (
 	// AuditActionDrivesPruned records a batch of drives deleted by the
 	// NFR-3.27 retention pruning job.
 	AuditActionDrivesPruned AuditAction = "drives_pruned"
+
+	// AuditActionOwnerApprovalAcknowledged records that the person who linked a
+	// car they only DRIVE on Tesla's side stated that the car's owner approved
+	// adding it (MYR-599, rest-api.md §7.29).
+	//
+	// THIS ROW IS THE POINT OF THE FEATURE, not bookkeeping around it. The
+	// platform cannot verify the owner's approval with Tesla — no API exposes
+	// it — so what it holds instead is an attributable, append-only record that
+	// a named account, at a named instant, was shown a named version of the
+	// text and agreed. It is what would be produced if an owner ever objected,
+	// and it is deliberately the ONE part of this feature that outlives the
+	// account: the standing go_vehicle_driver_access row goes with a deletion
+	// (step 8f), the audit row does not (data-lifecycle.md §3).
+	//
+	// Metadata is the copy VERSION and nothing else (CG-DL-5, P0-only). Not the
+	// rendered text, which is a published document with a stable id; not the
+	// VIN, which is P1; not the owner, whom this platform cannot name.
+	AuditActionOwnerApprovalAcknowledged AuditAction = "vehicle.owner_approval_acknowledged"
+
+	// AuditActionDriverLinkSupersededByOwner records that a car provisioned by
+	// somebody who only DRIVES it was transferred to the account Tesla calls its
+	// OWNER, when that owner linked their own Tesla account (MYR-599).
+	//
+	// IT IS THE ONLY RECORD THE FORMER DRIVER HAS. The car simply leaves their
+	// list — there is no notification, no sheet and no undo — and their shares
+	// on it are revoked in the same transaction, so if they ever ask where it
+	// went this row is the answer. It is filed under THEIR user id for that
+	// reason: the data that changed was theirs.
+	//
+	// Metadata is the arriving owner's id and nothing else (CG-DL-5, P0-only) —
+	// two opaque cuids across the row and its metadata, no VIN (P1), and no list
+	// of the shares that were revoked.
+	AuditActionDriverLinkSupersededByOwner AuditAction = "vehicle.driver_link_superseded_by_owner"
 )
 
 // AuditLog targetType / initiator enum values used by Go-emitted rows
@@ -127,6 +160,11 @@ const (
 	// auditInitiatorSystemPruner marks an action initiated by the background
 	// retention pruning job (data-lifecycle.md §4.2 initiator enum).
 	auditInitiatorSystemPruner = "system_pruner"
+	// auditInitiatorSystemProvisioner marks an action taken by the link-time
+	// provisioning transaction rather than by a person: nobody pressed anything,
+	// a Tesla listing simply said something that changed who a car belongs to
+	// (MYR-599's owner-wins transfer).
+	auditInitiatorSystemProvisioner = "system_provisioner"
 )
 
 // AuditEntry mirrors the AuditLog table one-to-one. Every field maps to a

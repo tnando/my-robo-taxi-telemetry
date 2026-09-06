@@ -39,15 +39,34 @@ func (a *ownedVehicleListerAdapter) ListOwnedVehicleIDs(ctx context.Context, use
 // for a car whose Prisma column is NULL (linked but never synced); the deletion
 // sequence treats that as "no Tesla-side config to delete" and still tears the
 // row down.
+//
+// IT ALSO CARRIES THE MYR-599 CONSENT GATE, resolved by a SECOND, NARROW read
+// rather than by widening ListByUser. `queryVehiclesByUser` is the wide snapshot
+// projection every list caller pays for; this fact is needed by exactly one
+// caller that runs once per account, ever, so it is fetched as an id set from a
+// statement covered by the partial index instead.
+//
+// A FAILURE IS RETURNED, NOT SWALLOWED. Defaulting the set to empty would report
+// every car as ungated, which is the fail-OPEN direction on a gate that protects
+// somebody who is not our user — and the consequence here is a Tesla DELETE
+// against a third party's fleet-telemetry config.
 func (a *ownedVehicleListerAdapter) ListOwnedVehicles(ctx context.Context, userID string) ([]telemetry.OwnedVehicle, error) {
 	vehicles, err := a.repo.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	pending, err := a.repo.PendingDriverAcknowledgmentIDs(ctx, userID)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]telemetry.OwnedVehicle, 0, len(vehicles))
 	// Indexed: store.Vehicle is a wide snapshot struct and only two fields are read.
 	for i := range vehicles {
-		out = append(out, telemetry.OwnedVehicle{ID: vehicles[i].ID, VIN: vehicles[i].VIN})
+		out = append(out, telemetry.OwnedVehicle{
+			ID:                  vehicles[i].ID,
+			VIN:                 vehicles[i].VIN,
+			DriverAccessPending: pending[vehicles[i].ID],
+		})
 	}
 	return out, nil
 }
@@ -140,6 +159,15 @@ func (a *accountDataDeleterAdapter) DeleteRemovedVehicleTombstones(ctx context.C
 	return a.deleter.DeleteRemovedVehicleTombstones(ctx, userID)
 }
 
+// DeleteVehicleDriverAccess drops the account's driver-access rows (MYR-599,
+// §3.1 step 8f) — the standing "this car is driver-linked" claim and the open
+// push gate that goes with it. Ordered after the per-vehicle teardown, which
+// deletes one per car in its own transaction. The acknowledgment EVIDENCE lives
+// on in the AuditLog and is untouched here.
+func (a *accountDataDeleterAdapter) DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteVehicleDriverAccess(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) RevokeRefreshTokens(ctx context.Context, userID string) (int, error) {
 	return a.deleter.RevokeRefreshTokens(ctx, userID)
 }
@@ -171,6 +199,7 @@ func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope te
 		UserActivityRowsDeleted:         counts.UserActivityRowsDeleted,
 		TeslaTokenKeepaliveRowsDeleted:  counts.TeslaTokenKeepaliveRowsDeleted,
 		RemovedVehicleTombstonesDeleted: counts.RemovedVehicleTombstonesDeleted,
+		VehicleDriverAccessRowsDeleted:  counts.VehicleDriverAccessRowsDeleted,
 	})
 	if err != nil {
 		return telemetry.AccountIdentityOutcome{}, err

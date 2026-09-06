@@ -247,6 +247,11 @@ func toSharedVehicleRows(rows []store.SharedVehicleSummary) []telemetry.SharedVe
 				// shared car as "setting up" rather than silently omitting it or
 				// badging a never-streamed car "offline".
 				SetupSchedule: setupScheduleRow(row.SetupSchedule),
+				// MYR-599: viewers and group-ride members see
+				// `teslaAccessType` too — the party meeting a car their friend
+				// DRIVES rather than owns is the one most helped by knowing
+				// that access rests on somebody else's permission.
+				DriverAccess: driverAccessRow(row.DriverAccess),
 			},
 			AllowRides: row.AllowRides,
 		})

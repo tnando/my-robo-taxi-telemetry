@@ -582,6 +582,12 @@ func setupFleetConfigEndpoint(
 		logger.Warn("Tesla token auto-refresh disabled: AUTH_TESLA_ID not set")
 	}
 
+	// MYR-599: the consent gate for the VIN-keyed push route. Appended after
+	// the token options rather than folded into them because it guards a
+	// different thing — not whether we CAN reach Tesla for this owner, but
+	// whether we MAY act on this car at all.
+	fleetOpts = append(fleetOpts, telemetry.WithDriverAccessGate(vehicleRepo))
+
 	fleetHandler := telemetry.NewFleetConfigHandler(
 		authenticator,
 		&vehicleOwnerAdapter{cache: vinCache},

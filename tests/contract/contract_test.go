@@ -438,6 +438,38 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	CREATE TABLE go_user_activity (
 		"user_id"      TEXT PRIMARY KEY,
 		"last_seen_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+
+	-- go_vehicle_driver_access: the Go-owned consent gate for a car linked by
+	-- someone Tesla calls a DRIVER of it rather than its owner (migration 0046,
+	-- MYR-599). The snapshot read and ALL THREE catalog reads LEFT JOIN it to
+	-- emit VehicleSummary/VehicleState.teslaAccessType and the
+	-- awaiting_owner_acknowledgment setup state, so the harness MUST provision
+	-- it or every vehicle read hits a missing relation and 500s — which is
+	-- precisely how this table announced itself, exactly as
+	-- go_fleet_config_attempts and go_vehicle_telemetry_suspensions above each
+	-- announced themselves when their joins landed.
+	--
+	-- Full shape rather than the reader's two columns, for the same reason its
+	-- neighbours carry theirs: acknowledgment_version and the raw
+	-- tesla_access_type are what a future §7.29 conformance test would need to
+	-- plant, and a harness missing them would refuse the seed.
+	CREATE TABLE go_vehicle_driver_access (
+		"vehicle_id"             TEXT PRIMARY KEY,
+		"user_id"                TEXT        NOT NULL,
+		-- Tesla's access_type VERBATIM, '' included. NOT NULL with no default,
+		-- exactly as migration 0046 declares it: a row exists because a listing
+		-- said something, so there is no state a NULL could describe.
+		"tesla_access_type"      TEXT        NOT NULL,
+		-- Both nullable with NO default, exactly as 0046 declares them. NULL on
+		-- acknowledged_at IS the shut gate; a default would open every gate the
+		-- moment a row was created.
+		"acknowledged_at"        TIMESTAMPTZ,
+		"acknowledgment_version" TEXT,
+		-- NOT NULL, and load-bearing: row presence is read off it through the
+		-- catalog LEFT JOIN, so a nullable created_at would make a driver car
+		-- indistinguishable from an owner's on every read.
+		"created_at"             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 	);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		return fmt.Errorf("create schema: %w", err)

@@ -68,6 +68,26 @@ const (
 	// resolved or refreshed, so neither config pushes nor commands can reach
 	// the car. ACTION: the owner reconnects their Tesla account.
 	SetupStateTokenFailed = "token_failed"
+	// SetupStateOwnerAccessRequired — Tesla REFUSED to create this car's
+	// fleet-telemetry config because the account that linked it holds DRIVER
+	// access, and Tesla's Fleet API lets only the vehicle's OWNER account create
+	// one (MYR-599, contracts v0.40.0). ACTION: NOT "reconnect your Tesla
+	// account" — that is SetupStateTokenFailed's action and here it would send a
+	// person round a loop that cannot end. The only thing that works is for the
+	// car's Tesla OWNER to add it in MyRoboTaxi under their own account and
+	// share it with the driver.
+	//
+	// It replaced a report of `token_failed` for this condition. That was the
+	// honest choice while v0.39.0 was the newest contract — "this Tesla
+	// authorization cannot do this" is true of both — but its copy sends the
+	// wrong person to fix the wrong thing, and v0.40.0 added the member.
+	SetupStateOwnerAccessRequired = "owner_access_required"
+	// SetupStateAwaitingOwnerAcknowledgment — this car was linked by someone
+	// Tesla reports as a DRIVER of it rather than its owner, and the platform
+	// will not configure telemetry until that person acknowledges the owner
+	// approved adding it (MYR-599, contracts v0.39.0). ACTION: the driver
+	// confirms the acknowledgment sheet, which POSTs §7.29.
+	SetupStateAwaitingOwnerAcknowledgment = "awaiting_owner_acknowledgment"
 )
 
 // Attempt-outcome labels this file reads out of go_fleet_config_attempts.
@@ -84,6 +104,8 @@ const (
 	setupOutcomePushFailed   = outcomePushFailed
 	setupOutcomeForced       = outcomeForcedRepush
 	setupOutcomeForcedFailed = outcomeForcedRepushFail
+	setupOutcomeOwnerAccess  = outcomeOwnerAccessRequired
+	setupOutcomeOwnerAck     = outcomeAwaitingOwnerAck
 )
 
 // setupQuietHorizon is how stale a vehicle row must be before the derivation
@@ -164,7 +186,37 @@ func deriveSetupState(
 	status string,
 	lastUpdated time.Time,
 	s VehicleSetupSchedule,
+	d VehicleDriverAccess,
 ) *SetupState {
+	// MYR-599 — EVALUATED BEFORE EVERY OTHER ARM, INCLUDING THE `!s.Present`
+	// SHORT-CIRCUIT, and the precedence is the contract's (v0.39.0) rather than
+	// a local preference. Three reasons, each independently sufficient:
+	//
+	//  1. IT IS THE ONLY ARM THAT NEEDS NO SCHEDULE ROW. Every other state is
+	//     read out of go_fleet_config_attempts, where "no row" means "no
+	//     claim". This one is read out of the driver row, which exists from the
+	//     instant the car was provisioned — so short-circuiting on the schedule
+	//     first would blind the state for any car whose seed write failed, i.e.
+	//     exactly the best-effort write we promise never to gate on.
+	//  2. NOTHING HAS BEEN PUSHED AT THIS CAR, so `awaiting_virtual_key`,
+	//     `configuring` and `token_failed` cannot truthfully apply — all three
+	//     are claims ABOUT A PUSH. A driver who paired their key (Tesla makes
+	//     them do it in the car, with a keycard) would otherwise read
+	//     "connecting…" about a car nobody has consented to connect.
+	//  3. CONSENT COMES BEFORE PAIRING EVIDENCE. Even if another arm could
+	//     truthfully apply, it would name the wrong next action: there is one
+	//     thing to do here and someone else's approval is what it rests on.
+	//
+	// Note the asymmetry with the push gates: they refuse an UNACKNOWLEDGED
+	// driver car, and so does this. An ACKNOWLEDGED driver car falls through to
+	// the ordinary derivation and is indistinguishable from an owner's car here
+	// — which is right, because from the setup machinery's point of view it now
+	// is one. What stays different is `teslaAccessType`, which is a fact about
+	// the car and not about its setup.
+	if d.PendingAcknowledgment() {
+		return setupStateAt(SetupStateAwaitingOwnerAcknowledgment, d.CreatedAt, now)
+	}
+
 	if !s.Present {
 		return nil
 	}
@@ -188,6 +240,60 @@ func deriveSetupState(
 			return setupStateAt(SetupStateConfiguring, s.SignedCommandAt, now)
 		}
 		return setupStateAt(SetupStateAwaitingVirtualKey, s.LastAttemptAt, now)
+
+	case setupOutcomeOwnerAck:
+		// MYR-599. EXPLICITLY NO CLAIM, and written as its own arm rather than
+		// left to the default for the same reason the `""` seed is: silence
+		// that was reasoned about should not be indistinguishable from silence
+		// nobody considered.
+		//
+		// The label means "this car was linked by a driver and nothing was
+		// pushed at it". The WIRE answer for that condition is
+		// `awaiting_owner_acknowledgment` — and it has already been returned,
+		// far above, from the DRIVER ROW, which is the authoritative source and
+		// the thing §7.29 clears. Reaching here means the row is gone or
+		// acknowledged while a stale schedule label survives, and in that case
+		// the schedule is simply out of date: claiming anything from it would
+		// contradict the row that outranks it.
+		return nil
+
+	case setupOutcomeOwnerAccess:
+		// MYR-599. Tesla refused to configure this VIN for this account
+		// (`404 … not_found` on the config push for a car the same token can
+		// LIST). Gated on streaming for the same reason token_failed is: the
+		// refusal concerns a config push, not an mTLS stream that is already
+		// up, and a car happily reporting its position needs no setup card.
+		//
+		// THE SPLIT BELOW IS THE CONTRACT'S TRUST RULE, NOT A PREFERENCE.
+		// Tesla's 404 is GENERIC — the identical answer comes back for a
+		// revoked grant and for a VIN genuinely absent from the account — so
+		// contracts v0.40.0 permits `owner_access_required` only on POSITIVE
+		// EVIDENCE, and the driver-access row is that evidence. With a row, the
+		// refusal has a cause we can name and an action that works (the car's
+		// real owner adds it under their own account). Without one, the honest
+		// class is still `token_failed`, whose copy — reconnect your Tesla
+		// account — is right for a revoked grant, which is what a bare 404
+		// overwhelmingly is.
+		//
+		// A car reaching here with a driver row is necessarily ACKNOWLEDGED:
+		// the unacknowledged arm returned far above, and nothing pushes at a car
+		// whose gate is shut, so no push could have produced this label. That is
+		// the second half of the contract's evidence rule, satisfied by
+		// construction rather than by a second check.
+		//
+		// The third condition v0.40.0 names — the VIN still appearing in the
+		// same token's vehicle list — is established at LINK time, which is the
+		// only moment this server lists a fleet and the moment the driver row
+		// was written from. It is not re-verified per push, and re-listing on
+		// every refusal would spend a Tesla read to re-answer a question whose
+		// answer created the row we are already reading.
+		if streaming {
+			return nil
+		}
+		if d.Present {
+			return setupStateAt(SetupStateOwnerAccessRequired, s.LastAttemptAt, now)
+		}
+		return setupStateAt(SetupStateTokenFailed, s.LastAttemptAt, now)
 
 	case setupOutcomeTokenFailed:
 		// Gated on streaming. A dead refresh token does not stop an mTLS

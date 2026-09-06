@@ -660,3 +660,73 @@ func skipWriter(reason string) *fakeConfigWriter {
 		},
 	}}
 }
+
+// MYR-599 — THE CONSENT GATE AT reconcileOne, asserted for BOTH candidate
+// producers because gating only one of them is exactly the bug this test was
+// written after.
+//
+// The periodic pass filters unacknowledged driver cars out in SQL, so a
+// candidate reaching this function with PendingOwnerAck set can only come from
+// the OTHER producer — handlePairingSignal, which resets one named car's
+// schedule and calls reconcileOne directly. That path is reachable from ANY
+// signed command Tesla applies, so a driver who linked a borrowed car, paired
+// the key and tapped unlock once used to drive this function into a config
+// read, a push, and potentially the MYR-489 forced re-push's DELETE — against a
+// third party's car, unattended.
+//
+// The assertions that matter are the NEGATIVE ones: not one Tesla call.
+func TestReconcileRefusesAnUnacknowledgedDriverCar(t *testing.T) {
+	pending := oneCandidate()
+	pending[0].PendingOwnerAck = true
+
+	lister := &fakeCandidateLister{rows: pending}
+	reader := &fakeConfigReader{}
+	writer := &fakeConfigWriter{}
+	attempts := &fakeAttemptRecorder{}
+	r := newTestReconcilerWithAttempts(lister, reader, writer, okToken(), attempts)
+
+	out, err := r.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// NOT ONE upstream call. A read would leak that we hold this VIN; a push or
+	// a delete would act on somebody else's property.
+	if reader.calls != 0 {
+		t.Errorf("GetTelemetryConfig calls = %d, want 0", reader.calls)
+	}
+	if writer.calls != 0 {
+		t.Errorf("PushTelemetryConfig calls = %d, want 0 — nothing may be pushed at an unacknowledged driver car", writer.calls)
+	}
+	if out.Repaired != 0 || out.PushFailures != 0 {
+		t.Errorf("outcome = %+v, want no push accounted for", out)
+	}
+
+	// Rescheduled with the honest label, so the schedule row says WHY the car is
+	// sitting there rather than going silent about it.
+	if len(attempts.recorded) != 1 {
+		t.Fatalf("recorded attempts = %v, want exactly one reschedule", attempts.recorded)
+	}
+	if got := attempts.recorded[0].outcome; got != outcomeAwaitingOwnerAck {
+		t.Errorf("outcome = %q, want %q", got, outcomeAwaitingOwnerAck)
+	}
+}
+
+// The gate must not swallow ordinary work. An ACKNOWLEDGED driver car — and an
+// owner's car, which is the same shape here — reconciles normally; a gate that
+// refused everything would also pass the test above.
+func TestReconcileProceedsForAnAcknowledgedCar(t *testing.T) {
+	lister := &fakeCandidateLister{rows: oneCandidate()} // PendingOwnerAck false
+	reader := &fakeConfigReader{synced: false}
+	writer := &fakeConfigWriter{result: &FleetConfigResponse{
+		Response: FleetConfigResult{UpdatedVehicles: 1},
+	}}
+	r := newTestReconciler(lister, reader, writer, okToken())
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if reader.calls != 1 {
+		t.Errorf("GetTelemetryConfig calls = %d, want 1 — the gate must not block ordinary healing", reader.calls)
+	}
+}

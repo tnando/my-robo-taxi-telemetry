@@ -227,6 +227,33 @@ func (h *VehicleReconnectHandler) resolveOwnedVIN(
 			"this vehicle has no VIN and has never streamed")
 		return "", false
 	}
+	// MYR-599: the consent gate. This endpoint's whole body is a config push at
+	// a real car, so an unacknowledged driver-access vehicle can go no further.
+	//
+	// 409 rather than 403, and it shares the shape of the no-VIN refusal
+	// directly above for the same reason: NOTHING FAILED and the caller is not
+	// forbidden — the request simply does not apply to this vehicle in its
+	// current state, and there is a specific thing the caller can do to change
+	// that. The client already knows what: the same row carries
+	// `teslaAccessType: "driver"` and a `setupState` of
+	// `awaiting_owner_acknowledgment`, and §7.29 is the way through.
+	//
+	// In practice this is close to unreachable — a suspension episode requires a
+	// car that WAS configured and streaming, which an unacknowledged driver car
+	// has never been — but "close to unreachable" is exactly the class of path
+	// that a later change makes reachable, and this is a gate on somebody else's
+	// property.
+	if row.DriverAccess.PendingAcknowledgment() {
+		h.logger.Info("vehicle reconnect: refused, driver-access car awaiting the owner-approval acknowledgment",
+			slog.String("event", "reconnect_awaiting_owner_ack"),
+			slog.String("vehicle_id", vehicleID),
+			slog.String("user_id", userID),
+			slog.String("vin", redactVIN(row.VIN)),
+		)
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
+			"confirm the owner approved adding this car before it can be connected")
+		return "", false
+	}
 	return row.VIN, true
 }
 

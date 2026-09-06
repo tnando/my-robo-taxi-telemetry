@@ -152,5 +152,10 @@ func toTelemetryFleetConfigCandidate(r *store.FleetConfigCandidate) telemetry.Fl
 		SignedCommandAt: r.SignedCommandAt,
 		ForcedRepushAt:  r.ForcedRepushAt,
 		ScheduleCreated: r.ScheduleCreated,
+		// MYR-599. THE FIELD THAT MOST NEEDS THIS ONE SHARED COPY TO EXIST: both
+		// producers above funnel through here, so the consent flag reaches
+		// reconcileOne from the periodic pass AND from the pairing-signal path.
+		// Dropping it here would silently re-open the gate on both at once.
+		PendingOwnerAck: r.PendingOwnerAck,
 	}
 }

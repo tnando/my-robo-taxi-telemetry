@@ -33,6 +33,32 @@ func TestFleetConfigAbsentOutcomesCoverSetupLabels(t *testing.T) {
 			because: "the push never landed, so there is no config to remove",
 		},
 		{
+			// MYR-599. THE DRIFT THIS ROW EXISTS TO CATCH is three-way: the SQL
+			// literal in fleetConfigAbsentOutcomes, store.SetupOutcomeAwaitingOwnerAck,
+			// and telemetry.outcomeAwaitingOwnerAck are three independent
+			// spellings with nothing in the compiler joining them. If they drift,
+			// the MYR-592 sweeper starts treating a never-configured driver car
+			// as "configured and billing" — a pointless Tesla DELETE, and a
+			// "your car has been disconnected" push to a driver whose car was
+			// never connected in the first place.
+			name:    "awaiting_owner_ack is excluded",
+			label:   SetupOutcomeAwaitingOwnerAck,
+			wantIn:  true,
+			because: "the link-time hook seeds it INSTEAD OF pushing, so there is no config at Tesla to remove",
+		},
+		{
+			// MYR-599, and the row that was MISSING when this list first shipped.
+			// `owner_access_required` is the label a REFUSED push earns, and a
+			// refused push installs nothing — so the sweeper would otherwise
+			// have treated a car Tesla never configured as configured and
+			// billing, warned its owner that it was about to be disconnected,
+			// and then spent a Tesla DELETE for a config that never existed.
+			name:    "owner_access_required is excluded",
+			label:   SetupOutcomeOwnerAccessRequired,
+			wantIn:  true,
+			because: "Tesla refused the config POST, so nothing was installed and nothing is billed",
+		},
+		{
 			name:   "the empty outcome is NOT excluded",
 			label:  SetupOutcomeNone,
 			wantIn: false,

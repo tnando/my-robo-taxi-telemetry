@@ -165,6 +165,34 @@ DELETE FROM go_tesla_token_keepalive WHERE user_id = $1`
 const queryDeleteRemovedVehiclesForUser = `
 DELETE FROM go_removed_vehicles WHERE user_id = $1`
 
+// queryDeleteVehicleDriverAccessForUser drops the person's driver-access rows
+// (MYR-599, migration 0046) — the record that they linked a car somebody else
+// owns, and their acknowledgment that the owner approved it.
+//
+// ORDERING IS NORMATIVE, the second step in the 8-family for which that is true
+// and for the same mechanical reason as 8e: step 3's per-vehicle teardown
+// deletes these rows car-for-car in its own transaction, so anything this
+// statement finds is a row the teardown could not reach — a driver-access row
+// whose "Vehicle" is already gone (a partial earlier run), or one for a car the
+// teardown skipped. Running it BEFORE step 3 would be harmless but pointless;
+// running it after is what makes "zero rows survive" true.
+//
+// THE EVIDENCE IS NOT DESTROYED BY THIS. The `vehicle.owner_approval_acknowledged`
+// AuditLog row records that this person acknowledged, when, and under which copy
+// version, and audit rows deliberately outlive the accounts they are about
+// (data-lifecycle.md §3). What goes here is the standing per-vehicle state — an
+// open push gate and a `teslaAccessType` claim — which is exactly the orphan
+// class §1.4.2 and §1.4.3 are written against once the account is gone.
+//
+// P0 throughout (data-classification.md §1.24): two opaque cuids, Tesla's role
+// token, a document version id and two timestamps. Removing it is hygiene
+// rather than an erasure obligation, like 8d and 8e and unlike 8c.
+//
+// Deleting zero rows on a re-run is a clean no-op, and zero is the ordinary
+// result — almost every account owns every car it linked.
+const queryDeleteVehicleDriverAccessForUser = `
+DELETE FROM go_vehicle_driver_access WHERE user_id = $1`
+
 // queryRevokeRefreshTokensForUser revokes every unrevoked refresh token in the
 // deleted user's name. Revoke rather than delete, matching the reuse-detection
 // model in migration 0003: the rotation lineage is evidence and stays. reason

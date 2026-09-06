@@ -52,6 +52,38 @@ const (
 	outcomePushFailed   = "push_failed"
 	outcomeTokenFailed  = "token_failed"
 	outcomeSyncedQuiet  = "synced_not_streaming"
+	// outcomeOwnerAccessRequired — Tesla answered the config push with
+	// `404 … not_found` for a VIN THIS ACCOUNT CAN SEE, which is Tesla's way of
+	// saying the caller's authorization may not configure this car.
+	//
+	// It is split out of push_failed because push_failed is a TRANSIENT label —
+	// the derivation lets it decay into `configuring` while a pairing epoch is
+	// live, and the reconciler keeps retrying it on a backoff. Neither is
+	// honest here. This is a STANDING refusal: retrying changes nothing, and a
+	// card that said "connecting…" for a car Tesla will not configure is the
+	// slow lie MYR-491's honesty bar was written against.
+	//
+	// The MYR-599 case that surfaced it: Tesla staff confirmed on
+	// teslamotors/fleet-telemetry#126 and #116 (March 2024) that
+	// `fleet_telemetry_config` POST is OWNER-only and that a DRIVER-access
+	// token gets exactly this 404 — while `GET /api/1/vehicles` still lists the
+	// VIN, so visibility is not evidence of capability. Tesla said DRIVER
+	// support was coming and never announced it. But the label is deliberately
+	// NOT spelled "driver_access_denied": the same 404 is what an account whose
+	// grant was revoked at Tesla gets, and both mean the same actionable thing.
+	outcomeOwnerAccessRequired = "owner_access_required"
+	// outcomeAwaitingOwnerAck — this car was linked by a DRIVER and nothing has
+	// been pushed at it, because the driver has not yet acknowledged that the
+	// owner approved adding it (MYR-599). Seeded at link time INSTEAD OF a
+	// push; never written by an attempt, because no attempt is made.
+	//
+	// It is wire-invisible on its own: deriveSetupState answers
+	// `awaiting_owner_acknowledgment` from the DRIVER ROW, which is the
+	// authoritative source and the thing the acknowledge endpoint clears. This
+	// label exists so the schedule row can say WHY it is sitting there — and so
+	// the MYR-592 suspension sweeper's `fleetConfigAbsentOutcomes` list can
+	// exclude a car that never had a config to remove.
+	outcomeAwaitingOwnerAck = "awaiting_owner_ack"
 )
 
 // FleetConfigCandidate is one vehicle that may be missing its telemetry
@@ -82,6 +114,20 @@ type FleetConfigCandidate struct {
 	LastAttemptAt   time.Time
 	SignedCommandAt time.Time
 	ForcedRepushAt  time.Time
+	// PendingOwnerAck is true when this car was linked by someone Tesla calls a
+	// DRIVER of it and they have not yet acknowledged that the owner approved
+	// adding it (MYR-599). reconcileOne refuses such a candidate outright.
+	//
+	// IT IS A FIELD ON THE CANDIDATE RATHER THAN A PREDICATE IN ONE QUERY, and
+	// that is the whole lesson of the hole it closes. This reconciler has TWO
+	// candidate producers — the periodic pass and the pairing-signal path — and
+	// only the first was filtered. The second resets one named car's schedule
+	// and hands the row STRAIGHT to reconcileOne, so a driver who linked a
+	// borrowed car and sent one signed command drove the reconciler into a
+	// config read, a push, and potentially the MYR-489 forced re-push's DELETE,
+	// against a car nobody consented to. Both producers now report the fact and
+	// the single consumer enforces it.
+	PendingOwnerAck bool
 	// ScheduleCreated is set when the schedule row was CREATED by the pairing
 	// reset that produced this candidate, rather than reset in place (MYR-517).
 	// A created row means we had never recorded a single thing about this car,
@@ -239,6 +285,39 @@ func (r *FleetConfigReconciler) Reconcile(ctx context.Context) (ReconcileOutcome
 // abort the pass.
 func (r *FleetConfigReconciler) reconcileOne(ctx context.Context, c FleetConfigCandidate, out *ReconcileOutcome) {
 	vin := redactVIN(c.VIN)
+
+	// MYR-599 — THE CONSENT GATE, AND IT IS THE FIRST THING THIS FUNCTION DOES,
+	// before even the free streaming check.
+	//
+	// IT LIVES HERE, AT THE SINGLE CONSUMER, RATHER THAN IN THE CANDIDATE SQL
+	// ALONE, because putting it only in the SQL left a live hole. There are two
+	// producers of a candidate: the periodic pass (filtered by
+	// queryFleetConfigCandidates' NOT EXISTS) and handlePairingSignal, which
+	// builds one from ResetFleetConfigScheduleOnPairing and calls this function
+	// directly. That second door is reachable from ANY signed command Tesla
+	// applies — internal/commands' notifyApplied — so a driver who linked a
+	// borrowed car, paired the key and tapped unlock ONCE would have driven this
+	// function into a config read and a push at a third party's vehicle.
+	//
+	// THE DELETE IS WHY THIS IS NOT MERELY BELT-AND-BRACES. Tesla's POST is
+	// owner-only today, so most pushes would 404 — but that is TESLA's gate, not
+	// ours, and Tesla has said DRIVER POST support is coming. The MYR-489
+	// escalation reached from handleSyncedQuiet issues DELETE, which Tesla
+	// permits for a DRIVER token RIGHT NOW: a car the real owner had configured
+	// through their own account could have had its telemetry config torn down,
+	// unattended, by us.
+	//
+	// Rescheduled rather than dropped, so the car keeps a truthful schedule row
+	// saying WHY it is sitting there, and picked up normally the moment §7.29
+	// records the acknowledgment.
+	if c.PendingOwnerAck {
+		r.logger.Info("fleet-config reconcile: refusing a driver-access car awaiting the owner-approval acknowledgment",
+			slog.String("event", "fleet_config_awaiting_owner_ack"),
+			slog.String("vehicle_id", c.VehicleID),
+			slog.String("vin", vin))
+		r.reschedule(ctx, c, outcomeAwaitingOwnerAck)
+		return
+	}
 
 	if r.cancelIfStreaming(ctx, c, vin, out) {
 		return

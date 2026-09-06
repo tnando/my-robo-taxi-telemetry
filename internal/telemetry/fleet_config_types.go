@@ -65,6 +65,33 @@ func WithTokenRefresher(refresher TeslaTokenRefresher, updater TeslaTokenUpdater
 	}
 }
 
+// DriverAccessGate answers, for one VIN, whether the car is driver-linked with
+// its owner-approval acknowledgment still outstanding (MYR-599). Satisfied by
+// *store.VehicleRepo.PendingDriverAcknowledgmentByVIN.
+//
+// Consumer-site interface, and the error is deliberately part of it: this gate
+// protects somebody who is not our user, so a caller that cannot tell must
+// refuse rather than proceed. Folding the failure into the bool would make
+// fail-open the path of least resistance.
+type DriverAccessGate interface {
+	PendingDriverAcknowledgmentByVIN(ctx context.Context, vin string) (pending bool, err error)
+}
+
+// WithDriverAccessGate installs the MYR-599 consent gate on the VIN-keyed push
+// route.
+//
+// WHY IT IS AN OPTION AND NOT A CONSTRUCTOR PARAMETER, stated plainly because
+// "optional consent gate" deserves the scrutiny: the vehicleId-keyed route —
+// the one a client can actually reach, since browsers and the app receive VINs
+// masked to their last 4 — gates UNCONDITIONALLY on the driver-access row it
+// already holds from GetByID, with no option and no way to omit it. This option
+// covers the VIN-keyed sibling, whose caller must already possess a full VIN and
+// is in practice the bench and ops surface. cmd/ wires it always; leaving it out
+// is a dev/test configuration, and pushForVIN says so in its log.
+func WithDriverAccessGate(gate DriverAccessGate) FleetConfigOption {
+	return func(h *FleetConfigHandler) { h.driverAccess = gate }
+}
+
 // WithTokenRotator serializes the refresh through the account row's lock
 // (MYR-595), so two pushes racing for one owner cannot both spend the same
 // single-use refresh token and hand one of them a spurious "re-link your Tesla

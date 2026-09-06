@@ -23,6 +23,17 @@ type ReconcileOutcome struct {
 	// synced-but-quiet car, proven awake, whose config was deleted and
 	// recreated to make its firmware re-establish the telemetry session.
 	ForcedRepushes int
+	// OwnerAccessRefusals counts pushes Tesla refused with its owner-only
+	// `404 … not_found` for a VIN the same token can still LIST (MYR-599).
+	//
+	// COUNTED SEPARATELY FROM PushFailures, which it also increments, because
+	// the two need opposite operator responses: a push failure is a thing to
+	// retry, and this is a thing that will never succeed until either Tesla
+	// ships DRIVER-token config creation or the car's real owner adds it under
+	// their own account. It is also how ForceConfigRepushNow reports the
+	// distinction back to §7.23 / §7.29, which answer `owner_access_required`
+	// rather than a 502.
+	OwnerAccessRefusals int
 	// AlreadyStreaming counts candidates that were found to be streaming from
 	// the listing row alone (MYR-529) — examined, resolved, and costing nothing
 	// upstream. Distinct from AlreadySynced, which means Tesla holds a config
@@ -46,5 +57,6 @@ func (r *FleetConfigReconciler) logPassComplete(out ReconcileOutcome) {
 		slog.Int("read_failures", out.ReadFailures),
 		slog.Int("push_failures", out.PushFailures),
 		slog.Int("forced_repushes", out.ForcedRepushes),
+		slog.Int("owner_access_refusals", out.OwnerAccessRefusals),
 		slog.Bool("truncated", out.Truncated))
 }

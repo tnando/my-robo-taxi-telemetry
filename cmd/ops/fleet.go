@@ -76,6 +76,11 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("fleet-config push", flag.ContinueOnError)
 	vin := fs.String("vin", "", "17-character Tesla VIN")
 	userID := fs.String("user-id", "", "MyRoboTaxi user id (owner of the VIN)")
+	// MYR-599. Opt-in only, and deliberately not implied by anything else — see
+	// fleet_driver_gate.go for why this is an override rather than a
+	// prohibition, and why the refusal is printed even when it is overridden.
+	force := fs.Bool("force-unacknowledged", false,
+		"push even for a driver-linked vehicle whose owner-approval acknowledgment is outstanding")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -109,46 +114,11 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// MYR-447. Two audit rows, not one, and the split is forced by which
-	// subject is KNOWABLE at which moment.
-	//
-	// The vehicle lookup is keyed on the VIN alone, so the operator's
-	// --user-id is an unverified claim until the row comes back. Writing a
-	// single row against that claim before the lookup — which is what this
-	// did first — records the wrong data subject whenever the two disagree:
-	// the operator names user A, the row decrypted belongs to user B, and B
-	// (whose location columns were actually read) has no audit trail of it.
-	// That is precisely the accountability the feature is sold on, failing
-	// in the case it most matters: a wrong or malicious --user-id.
-	//
-	// So the vehicle-row decrypt is audited against the OWNER the lookup
-	// resolves — after the read, before the value is used or the command
-	// proceeds. Nothing is printed or transmitted in between; this matches
-	// `ops fields snapshot`, which is VIN-keyed for the same reason and
-	// audits at the same point.
-	auditor := newOperatorAuditor(db)
-	owner, err := auditedVehicleOwner(ctx, auditor, vehicleRepo, operator, *vin)
-	if err != nil {
+	// Ownership, the MYR-447 audit rows and the MYR-599 consent gate, in the
+	// one order that keeps nothing-decrypts-before-it-is-authorized true. See
+	// authorizePushTarget.
+	if err := authorizePushTarget(ctx, db, vehicleRepo, operator, *vin, *userID, *force); err != nil {
 		return err
-	}
-	if owner != *userID {
-		return fmt.Errorf("vehicle owner mismatch: VIN belongs to user %q, not %q", owner, *userID)
-	}
-
-	// The token decrypt IS knowable in advance — the credentials belong to
-	// the account being acted on by definition — so this one stays
-	// strictly fail-closed: written BEFORE the resolve that decrypts the
-	// tokens and transmits them to Tesla. Not printed, but "not printed"
-	// is not "not accessed".
-	if err := auditor.RecordDecrypt(ctx, store.OperatorAccess{
-		Operator:   operator,
-		Command:    "ops fleet-config push",
-		UserID:     *userID,
-		TargetType: store.OperatorTargetUser,
-		TargetID:   *userID,
-		Fields:     teslaTokenAuditFields,
-	}); err != nil {
-		return fmt.Errorf("record operator decrypt: %w", err)
 	}
 
 	token, refreshed, err := resolveTeslaToken(ctx, logger, accountRepo, *userID)
@@ -177,6 +147,77 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	// believes the car is configured. Exit non-zero so scripts and humans both
 	// notice. The JSON above is still written first so the reason is visible.
 	return telemetry.SkipErrorFor(resp, *vin)
+}
+
+// authorizePushTarget settles EVERYTHING that must be true before this command
+// may touch the owner's Tesla credentials: who owns the VIN, whether the
+// operator's claim about that matches, and whether the platform has standing to
+// configure the car at all.
+//
+// Extracted from runFleetConfigPush so the three checks and their two audit
+// rows read as one sequence with one ordering rule — nothing that decrypts
+// happens before the thing that authorizes it — rather than as steps scattered
+// through a wiring function.
+//
+// ── MYR-447: TWO AUDIT ROWS, NOT ONE ─────────────────────────────────────────
+//
+// The split is forced by which subject is KNOWABLE at which moment.
+//
+// The vehicle lookup is keyed on the VIN alone, so the operator's --user-id is
+// an unverified claim until the row comes back. Writing a single row against
+// that claim before the lookup — which is what this did first — records the
+// wrong data subject whenever the two disagree: the operator names user A, the
+// row decrypted belongs to user B, and B (whose location columns were actually
+// read) has no audit trail of it. That is precisely the accountability the
+// feature is sold on, failing in the case it most matters: a wrong or malicious
+// --user-id.
+//
+// So the vehicle-row decrypt is audited against the OWNER the lookup resolves —
+// after the read, before the value is used or the command proceeds. Nothing is
+// printed or transmitted in between; this matches `ops fields snapshot`, which
+// is VIN-keyed for the same reason and audits at the same point.
+//
+// The token decrypt IS knowable in advance — the credentials belong to the
+// account being acted on by definition — so that one stays strictly fail-closed:
+// written BEFORE the resolve that decrypts the tokens and transmits them to
+// Tesla. Not printed, but "not printed" is not "not accessed".
+//
+// ── MYR-599: WHERE THE CONSENT GATE SITS ─────────────────────────────────────
+//
+// Between the two. Refusing there means the operator's Tesla credentials are
+// never decrypted, never audited as decrypted, and never transmitted for a car
+// the platform has no standing to configure.
+func authorizePushTarget(
+	ctx context.Context,
+	db *store.DB,
+	vehicleRepo *store.VehicleRepo,
+	operator, vin, userID string,
+	force bool,
+) error {
+	auditor := newOperatorAuditor(db)
+	owner, err := auditedVehicleOwner(ctx, auditor, vehicleRepo, operator, vin)
+	if err != nil {
+		return err
+	}
+	if owner != userID {
+		return fmt.Errorf("vehicle owner mismatch: VIN belongs to user %q, not %q", owner, userID)
+	}
+
+	if err := refuseUnacknowledgedDriverCar(ctx, vehicleRepo, vin, force); err != nil {
+		return err
+	}
+
+	if err := auditor.RecordDecrypt(ctx, store.OperatorAccess{
+		Operator:   operator,
+		Command:    "ops fleet-config push",
+		UserID:     userID,
+		TargetType: store.OperatorTargetUser,
+		TargetID:   userID,
+		Fields:     teslaTokenAuditFields,
+	}); err != nil {
+		return fmt.Errorf("record operator decrypt: %w", err)
+	}
+	return nil
 }
 
 // verifyVINOwnership fails fast if the VIN is not registered to the given

@@ -67,6 +67,28 @@ func (h *AccountDeletionHandler) deleteStreamConfigs(ctx context.Context, owned 
 	}
 	deleted := 0
 	for _, ref := range owned {
+		// MYR-599: NOT OUR CONFIG TO DELETE. A car whose driver-access gate is
+		// still shut has never had a config installed BY US — the link hook
+		// pushes nothing at it and every other push path refuses it — so any
+		// config Tesla holds for that VIN belongs to the car's real OWNER, put
+		// there through their own account.
+		//
+		// A DRIVER token is permitted to DELETE it. That is the whole danger:
+		// somebody deleting their MyRoboTaxi account would silently tear down a
+		// third party's telemetry, and neither party would ever be told why the
+		// owner's car went quiet.
+		//
+		// The symmetric case is deliberately NOT skipped. Once the
+		// acknowledgment is on record we may well have installed a config
+		// ourselves, so the delete is ours to make and the ordinary
+		// cost-and-privacy argument for making it applies unchanged.
+		if ref.Vehicle.DriverAccessPending {
+			h.logger.Info("account deletion: skipping the Tesla config delete for an unacknowledged driver-access car",
+				slog.String("event", "stream_config_delete_skipped_owner_ack"),
+				slog.String("vehicle_id", ref.Vehicle.ID),
+			)
+			continue
+		}
 		if h.deps.StreamConfigs.DeleteStreamConfig(ctx, ref.OwnerID, ref.Vehicle.VIN) {
 			deleted++
 		}

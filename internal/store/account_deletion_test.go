@@ -66,6 +66,7 @@ func setupAccountDeletion(t *testing.T) {
 		`DELETE FROM go_users`,
 		`DELETE FROM go_ride_requests`,
 		`DELETE FROM go_removed_vehicles`,
+		`DELETE FROM go_vehicle_driver_access`,
 	} {
 		if _, err := testPool.Exec(ctx, stmt); err != nil {
 			t.Fatalf("clean (%s): %v", stmt, err)
@@ -129,6 +130,25 @@ func seedRemovedVehicleTombstone(t *testing.T, userID, teslaVehicleID, vin strin
 		VALUES ($1, $2, NULLIF($3, ''), NOW())`,
 		userID, teslaVehicleID, vin); err != nil {
 		t.Fatalf("seed removed-vehicle tombstone %s/%s: %v", userID, teslaVehicleID, err)
+	}
+}
+
+// seedDriverAccess inserts one go_vehicle_driver_access row — the MYR-599
+// record that a person linked a car Tesla says they only DRIVE, and (when
+// acknowledged is true) their acknowledgment that the owner approved it.
+// Step 8f takes it with the account.
+func seedDriverAccess(t *testing.T, vehicleID, userID string, acknowledged bool) {
+	t.Helper()
+	var ackAt, version any
+	if acknowledged {
+		ackAt, version = "2026-09-05T00:00:00Z", "owner-approval-v1"
+	}
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO go_vehicle_driver_access
+			(vehicle_id, user_id, tesla_access_type, acknowledged_at, acknowledgment_version)
+		VALUES ($1, $2, 'DRIVER', $3::timestamptz, $4)`,
+		vehicleID, userID, ackAt, version); err != nil {
+		t.Fatalf("seed driver access %s/%s: %v", vehicleID, userID, err)
 	}
 }
 
@@ -222,6 +242,7 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		SavedPlacesDeleted: 2, RefreshTokensRevoked: 4,
 		UserActivityRowsDeleted: 1, TeslaTokenKeepaliveRowsDeleted: 1,
 		RemovedVehicleTombstonesDeleted: 2,
+		VehicleDriverAccessRowsDeleted:  1,
 	}
 	res, err := newAccountDeleter(t).DeleteIdentity(context.Background(), soloScope(delUserApple), counts)
 	if err != nil {
@@ -292,6 +313,15 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// only ever the number. Recording a VIN, or a redacted tail of one,
 		// here would be the violation.
 		"removedVehicleTombstonesDeleted": true,
+		// MYR-599. A COUNT of the driver-access rows deleted (step 8f) — one
+		// per car this person linked but did not own. P0 by shape AND by
+		// count: the row pairs two opaque cuids with Tesla's role token
+		// ("DRIVER") and a document version id, none of which is P1 — but the
+		// count is still the only thing that may cross, because "which cars
+		// somebody drives for somebody else" is a fact about a THIRD PARTY
+		// (the owner) who never consented to appear in this person's audit
+		// trail. The number says nothing about whose cars they were.
+		"vehicleDriverAccessRowsDeleted": true,
 	}
 	for k, v := range got {
 		if !allowed[k] {
@@ -302,7 +332,8 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		got["savedPlacesDeleted"] != float64(2) ||
 		got["userActivityRowsDeleted"] != float64(1) ||
 		got["teslaTokenKeepaliveRowsDeleted"] != float64(1) ||
-		got["removedVehicleTombstonesDeleted"] != float64(2) {
+		got["removedVehicleTombstonesDeleted"] != float64(2) ||
+		got["vehicleDriverAccessRowsDeleted"] != float64(1) {
 		t.Fatalf("audit metadata counts = %v", got)
 	}
 
@@ -368,6 +399,13 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 	seedRemovedVehicleTombstone(t, delUserApple, "tesla_1", "5YJ3E1EA1JF000001")
 	seedRemovedVehicleTombstone(t, delUserApple, "tesla_2", "5YJ3E1EA1JF000002")
 	seedRemovedVehicleTombstone(t, delUserOther, "tesla_3", "5YJ3E1EA1JF000003")
+	// Two cars this person DRIVES but does not own — one acknowledged, one not
+	// — plus one somebody else drives (MYR-599). Both of theirs go regardless
+	// of acknowledgment: the standing row is what step 8f removes, and the
+	// acknowledgment EVIDENCE lives on in the AuditLog.
+	seedDriverAccess(t, "cveh_drv1", delUserApple, true)
+	seedDriverAccess(t, "cveh_drv2", delUserApple, false)
+	seedDriverAccess(t, "cveh_drv3", delUserOther, true)
 
 	steps := []struct {
 		name    string
@@ -416,6 +454,23 @@ func TestAccountDeleter_StepsAreScopedAndIdempotent(t *testing.T) {
 				if n := countQuery(t,
 					`SELECT count(*) FROM go_removed_vehicles WHERE user_id = $1`, delUserOther); n != 1 {
 					t.Fatalf("another owner's tombstone was deleted (%d left, want 1)", n)
+				}
+			},
+		},
+		{
+			// MYR-599 step 8f. Keyed on user_id alone, exactly like 8e, so
+			// "every car this account driver-linked" is the row set — and the
+			// UNACKNOWLEDGED one goes too, which matters: a surviving
+			// unacknowledged row would be an open question about a deleted
+			// person, and a surviving ACKNOWLEDGED one would be an open push
+			// gate for a car nobody can consent about any more.
+			name: "delete vehicle driver access",
+			run:  func() (int, error) { return deleter.DeleteVehicleDriverAccess(ctx, delUserApple) },
+			want: 2,
+			survive: func(t *testing.T) {
+				if n := countQuery(t,
+					`SELECT count(*) FROM go_vehicle_driver_access WHERE user_id = $1`, delUserOther); n != 1 {
+					t.Fatalf("another driver's row was deleted (%d left, want 1)", n)
 				}
 			},
 		},

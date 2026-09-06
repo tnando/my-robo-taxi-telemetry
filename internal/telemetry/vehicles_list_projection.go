@@ -79,7 +79,11 @@ func newVehicleSummary(v *VehicleCatalogRow, role auth.Role, grant auth.ShareGra
 		// Calling it from both surfaces rather than copying the rules is what
 		// makes "the catalog and the detail sheet can never disagree" a
 		// structural property instead of a convention.
-		SetupState: deriveSetupState(now, v.Status, v.LastUpdated, v.SetupSchedule),
+		SetupState: deriveSetupState(now, v.Status, v.LastUpdated, v.SetupSchedule, v.DriverAccess),
+		// MYR-599: derived from the SAME row the setup state above reads, by
+		// the same one-line rule the snapshot applies — presence of a
+		// driver-access row IS the claim.
+		TeslaAccessType: teslaAccessTypeWire(v.DriverAccess),
 	}
 	if role == auth.RoleViewer {
 		// DERIVED, not stored (MYR-369): the grant's flags decide the

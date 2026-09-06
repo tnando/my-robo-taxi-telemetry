@@ -268,6 +268,21 @@ var vehicleStateOwnerFields = []string{
 	// needs before trying to book it. Withholding it would leave the picker
 	// with the wrong word for the only state it gets wrong today.
 	"setupState",
+	// MYR-599 — how the linking account relates to this car on TESLA's side
+	// ("owner" / "driver"). P0 both roles, and it is a smaller disclosure than
+	// its neighbours here: it names a RELATIONSHIP between the caller and a car
+	// they already hold a row for, and never the other party — the platform
+	// cannot name the Tesla owner and this field does not try to.
+	//
+	// Both roles because both have something to render from it. The owner-side
+	// client says "you drive this car" on the picker row and in Settings; the
+	// viewer meeting a car their friend DRIVES rather than owns is if anything
+	// the party most helped by knowing that access to it rests on somebody
+	// else's permission and can be withdrawn at Tesla at any time.
+	//
+	// REST-read-time only, exactly like `setupState` above: no `vehicle_update`
+	// allow-list carries it, so there is nothing for the frame merger to fold.
+	"teslaAccessType",
 	// Odometer / FSD. Both roles — neither media, cabin, nor a control.
 	"odometerMiles",
 	"fsdMilesSinceReset",
@@ -380,6 +395,21 @@ var vehicleStateViewerFields = []string{
 	// looking at a shared car that has never streamed must read "still being
 	// set up" rather than a bare "offline" they can do nothing with.
 	"setupState",
+	// MYR-599 — how the linking account relates to this car on TESLA's side
+	// ("owner" / "driver"). P0 both roles, and it is a smaller disclosure than
+	// its neighbours here: it names a RELATIONSHIP between the caller and a car
+	// they already hold a row for, and never the other party — the platform
+	// cannot name the Tesla owner and this field does not try to.
+	//
+	// Both roles because both have something to render from it. The owner-side
+	// client says "you drive this car" on the picker row and in Settings; the
+	// viewer meeting a car their friend DRIVES rather than owns is if anything
+	// the party most helped by knowing that access to it rests on somebody
+	// else's permission and can be withdrawn at Tesla at any time.
+	//
+	// REST-read-time only, exactly like `setupState` above: no `vehicle_update`
+	// allow-list carries it, so there is nothing for the frame merger to fold.
+	"teslaAccessType",
 	// Odometer / FSD lifetime counters. Kept: these are neither media, cabin,
 	// nor a control tile, so MYR-435 does not reach them, and `odometerMiles` /
 	// `fsdMilesSinceReset` are both `required` in vehicle-state.schema.json.
@@ -566,6 +596,21 @@ var vehicleSummaryOwnerFields = []string{
 	// picker reads catalog rows, not snapshots. The viewer list below inherits
 	// it (that list subtracts nothing).
 	"setupState",
+	// MYR-599 — how the linking account relates to this car on TESLA's side
+	// ("owner" / "driver"). P0 both roles, and it is a smaller disclosure than
+	// its neighbours here: it names a RELATIONSHIP between the caller and a car
+	// they already hold a row for, and never the other party — the platform
+	// cannot name the Tesla owner and this field does not try to.
+	//
+	// Both roles because both have something to render from it. The owner-side
+	// client says "you drive this car" on the picker row and in Settings; the
+	// viewer meeting a car their friend DRIVES rather than owns is if anything
+	// the party most helped by knowing that access to it rests on somebody
+	// else's permission and can be withdrawn at Tesla at any time.
+	//
+	// REST-read-time only, exactly like `setupState` above: no `vehicle_update`
+	// allow-list carries it, so there is nothing for the frame merger to fold.
+	"teslaAccessType",
 	// MYR-507 — the display-safe trim label. P0, and NOT owner-private, for the
 	// simplest reason on this list: `trimLabel` is an EQUIPMENT FACT of exactly
 	// the same tier as its identity siblings `model`, `year` and `color`, which

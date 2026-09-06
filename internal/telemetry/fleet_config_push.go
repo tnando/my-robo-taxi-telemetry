@@ -28,6 +28,25 @@ func (r *FleetConfigReconciler) push(
 	result, err := r.deps.Writer.PushTelemetryConfig(callCtx, accessToken, r.request(c.VIN))
 	if err != nil {
 		out.PushFailures++
+		// MYR-599: separate the STANDING refusal from the transient failure
+		// before recording either. Both are push failures for the pass tally —
+		// nothing was configured — but they earn different schedule labels
+		// because they mean different things to the card and to the next pass.
+		if isOwnerAccessRefusal(err) {
+			out.OwnerAccessRefusals++
+			// Tesla will not configure this VIN for this authorization. Logged
+			// at WARN with the whole shape of the answer, because the operator
+			// question this raises ("is this a driver-access car, or a grant
+			// that got revoked?") is answerable from the driver-access table
+			// and not from here — see fleet_config_owner_access.go.
+			r.logger.Warn("fleet-config reconcile: Tesla refused to configure this VIN for this authorization (owner-only endpoint; retrying will not help)",
+				slog.String("event", "fleet_config_owner_access_required"),
+				slog.String("vehicle_id", c.VehicleID),
+				slog.String("vin", vin),
+				slog.String("error", redactedErrorText(err)))
+			r.reschedule(schedCtx, c, outcomeOwnerAccessRequired)
+			return
+		}
 		r.logger.Warn("fleet-config reconcile: push failed (will retry after backoff)",
 			slog.String("event", "fleet_config_push_failed"),
 			slog.String("vehicle_id", c.VehicleID),

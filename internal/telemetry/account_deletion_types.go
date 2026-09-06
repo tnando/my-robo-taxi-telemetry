@@ -30,6 +30,14 @@ type OwnedVehicle struct {
 	// never synced has no VIN yet. An empty VIN has no Tesla-side config to
 	// delete and is skipped for that step alone — the row teardown still runs.
 	VIN string
+	// DriverAccessPending is true when this account only DRIVES the car and has
+	// not acknowledged the owner's approval (MYR-599). The Tesla-side config
+	// DELETE is SKIPPED for such a car; see deleteStreamConfigs.
+	//
+	// It is a THIRD fact on a struct whose doc boasts of carrying two, and the
+	// reason is the same one that put the VIN here: it has to come from the same
+	// read. Resolving it per car later would reopen the window MYR-593 closed.
+	DriverAccessPending bool
 }
 
 // AccountOwnedVehicleReader lists the cars an account owns, id AND VIN, so the
@@ -96,10 +104,17 @@ type AccountDataDeleter interface {
 	// erasure obligation; see the store query for why it goes regardless.
 	DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error)
 	// DeleteRemovedVehicleTombstones drops the account's removed-vehicle
-	// tombstones (MYR-596, data-lifecycle.md §3.1 step 8e). It is the ONE
-	// position-constrained member of the 8-family: the per-vehicle teardown
-	// writes a tombstone per car, so this must run after it.
+	// tombstones (MYR-596, data-lifecycle.md §3.1 step 8e). It is one of only
+	// TWO position-constrained members of the 8-family — 8f below is the other
+	// — because the per-vehicle teardown writes a tombstone per car, so this
+	// must run after it.
 	DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error)
+	// DeleteVehicleDriverAccess drops the account's driver-access rows
+	// (MYR-599, data-lifecycle.md §3.1 step 8f). The SECOND
+	// position-constrained member of the 8-family, for the same reason as 8e:
+	// the per-vehicle teardown deletes these rows with the car, so this must
+	// run after it.
+	DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
@@ -156,6 +171,10 @@ type AccountDeletionCounts struct {
 	// removed (MYR-596) — one per car this person ever removed, 0 for the
 	// large majority who never removed one.
 	RemovedVehicleTombstonesDeleted int
+	// VehicleDriverAccessRowsDeleted counts the driver-access rows removed
+	// (MYR-599) — one per car this person linked but did not own, 0 for the
+	// large majority who only ever linked their own.
+	VehicleDriverAccessRowsDeleted int
 	// RideMembershipsDeleted counts the GROUP-RIDE memberships the account
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.

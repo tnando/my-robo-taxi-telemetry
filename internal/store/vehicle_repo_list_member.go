@@ -61,10 +61,11 @@ const queryVehiclesForRideMember = `SELECT DISTINCT ON ("Vehicle"."id") ` + shar
 	` + catalogOwnerNameExpr + `,
 	` + catalogTelemetrySuspendedExpr + `,
 	` + setupScheduleColumns + `,
+	` + catalogDriverAccessExpr + `,
 	FALSE
 FROM "Vehicle"` + memberSummaryJoin + `
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = "Vehicle"."id"` +
-	catalogTelemetrySuspendedJoin + setupScheduleJoin + `
+	catalogTelemetrySuspendedJoin + setupScheduleJoin + driverAccessJoin + `
 ORDER BY "Vehicle"."id"`
 
 // ListMemberVehicleSummaries returns the vehicles serving live group rides the

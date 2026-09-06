@@ -91,6 +91,14 @@ type AccountDeletionCounts struct {
 	// person, and "did we take the consent record too" is a question the trail
 	// must answer.
 	ProfileNameConfirmationsDeleted int `json:"profileNameConfirmationsDeleted"`
+	// VehicleDriverAccessRowsDeleted is the number of driver-access rows removed
+	// (MYR-599, §3.1 step 8f) — one per car this person linked but did not own,
+	// usually 0. A COUNT and never the rows: they pair an opaque cuid with
+	// Tesla's role token, which is P0, but the count is what the audit trail
+	// needs and the shape of the field keeps the boundary obvious. Recorded
+	// because "did the deletion reach the consent table" is precisely the
+	// question an owner-side complaint would ask about a deleted driver.
+	VehicleDriverAccessRowsDeleted int `json:"vehicleDriverAccessRowsDeleted"`
 	// RideMembershipsDeleted is the number of GROUP-RIDE memberships the user
 	// held that were deleted (MYR-540) — the rides they JOINED, as opposed to
 	// RidesCancelled, which counts the rides they BOOKED. A count, never a ride
@@ -245,6 +253,19 @@ func (a *AccountDeleter) DeleteTeslaTokenKeepalive(ctx context.Context, userID s
 // queryDeleteRemovedVehiclesForUser for the rest of the argument.
 func (a *AccountDeleter) DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeleteRemovedVehicleTombstones", queryDeleteRemovedVehiclesForUser, userID)
+}
+
+// DeleteVehicleDriverAccess removes the person's driver-access rows (MYR-599),
+// which record that they linked a car they do not own and that they acknowledged
+// the owner's approval. Returns the number of rows deleted (0..n). Idempotent.
+//
+// ORDERING IS NORMATIVE: like step 8e it MUST run AFTER step 3, because the
+// per-vehicle teardown deletes these rows in its own transaction and anything
+// left is what the teardown could not reach. See
+// queryDeleteVehicleDriverAccessForUser for why the acknowledgment EVIDENCE is
+// not lost with it.
+func (a *AccountDeleter) DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteVehicleDriverAccess", queryDeleteVehicleDriverAccessForUser, userID)
 }
 
 // DeleteRideMemberships removes every group-ride membership the user holds

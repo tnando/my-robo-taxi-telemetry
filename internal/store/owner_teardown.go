@@ -126,6 +126,23 @@ DELETE FROM go_vehicle_telemetry_suspensions WHERE vehicle_id = $1`
 const queryTeardownDeleteFleetConfigAttempts = `
 DELETE FROM go_fleet_config_attempts WHERE vehicle_id = $1`
 
+// queryTeardownDeleteDriverAccess removes the car's driver-access row
+// (MYR-599, migration 0046) — the third Go-owned table keyed by vehicle id with
+// no FK to cascade it away (CG-DL-9 forbids one), and it goes for the same
+// reason its two neighbours do.
+//
+// Worth stating what is NOT lost: the acknowledgment itself survives as the
+// AuditLog row the §7.29 endpoint wrote, which is the durable, append-only
+// record. What this deletes is the standing per-vehicle FACT — "this car is
+// driver-linked, and its gate is open" — which is meaningless once the car is
+// gone and dangerous if a cuid were ever reused: a surviving open gate is a
+// pre-granted permission for a car nobody has consented about.
+//
+// Idempotent: the overwhelming majority of teardowns are of owner-access cars
+// that never had a row, and a missing row is success.
+const queryTeardownDeleteDriverAccess = `
+DELETE FROM go_vehicle_driver_access WHERE vehicle_id = $1`
+
 // queryTeardownDeleteVehicle deletes the target vehicle, owner-scoped. The
 // Prisma FKs cascade Drive / TripStop / vehicle-scoped Invite / the encrypted
 // route blobs, and the Next.js-owned AFTER DELETE trigger fires the
@@ -326,6 +343,11 @@ func applyTeardownDeletes(ctx context.Context, tx pgx.Tx, d teardownDeletion) er
 	// until now it did not.
 	if _, err := tx.Exec(ctx, queryTeardownDeleteFleetConfigAttempts, d.vehicleID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete fleet-config attempts: %w", d.userID, err)
+	}
+	// MYR-599: and the driver-access row, third in the same family and for the
+	// same reason. See queryTeardownDeleteDriverAccess for what survives it.
+	if _, err := tx.Exec(ctx, queryTeardownDeleteDriverAccess, d.vehicleID); err != nil {
+		return fmt.Errorf("store.RemoveVehicle(user=%s): delete driver access: %w", d.userID, err)
 	}
 	if _, err := tx.Exec(ctx, queryTeardownDeleteVehicle, d.vehicleID, d.userID); err != nil {
 		return fmt.Errorf("store.RemoveVehicle(user=%s): delete vehicle: %w", d.userID, err)

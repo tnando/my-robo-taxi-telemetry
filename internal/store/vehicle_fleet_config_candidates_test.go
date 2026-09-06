@@ -301,14 +301,6 @@ func candidateIDs(rows []store.FleetConfigCandidate) []string {
 	return out
 }
 
-func keysOf(m map[string]store.FleetConfigCandidate) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
-}
-
 func mustApplyOwnerSchema(t *testing.T) {
 	t.Helper()
 	if _, err := testPool.Exec(context.Background(), ownerSchemaSQL); err != nil {
@@ -321,6 +313,7 @@ func cleanFleetCandidateTables(t *testing.T) {
 	ctx := context.Background()
 	for _, stmt := range []string{
 		`DELETE FROM go_removed_vehicles`,
+		`DELETE FROM go_vehicle_driver_access`,
 		`DELETE FROM "Account"`,
 	} {
 		if _, err := testPool.Exec(ctx, stmt); err != nil {
@@ -376,4 +369,143 @@ func seedFCCTombstone(t *testing.T, userID, teslaVehicleID, vin string) {
 	if err != nil {
 		t.Fatalf("seedFCCTombstone(%s): %v", teslaVehicleID, err)
 	}
+}
+
+// MYR-599 — THE RECONCILER IS THE ONE ACTOR THAT WOULD PUSH AT A CAR
+// UNATTENDED, on a background pass, for as long as it kept not streaming. It is
+// therefore the gate that most needs a test, and before this one existed the
+// predicate could have been deleted with the whole suite still green.
+//
+// Both directions are asserted, because only the pair is meaningful: a gate
+// that never admits anything would also pass a one-sided test.
+func TestFleetConfigCandidates_ExcludeUnacknowledgedDriverCars(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	mustApplyOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanFleetCandidateTables(t)
+
+	ctx := context.Background()
+	const owner = "user_fcc_drv"
+	seedFCCAccount(t, "acct_fcc_drv", owner, "tesla-sub-drv")
+
+	quiet := time.Now().Add(-3 * time.Hour)
+	seedFleetCandidateVehicle(t, "veh_drv_owned", owner, "5YJ3E1EA1NF000701", "tv_drv_owned", quiet)
+	seedFleetCandidateVehicle(t, "veh_drv_pending", owner, "5YJ3E1EA1NF000702", "tv_drv_pending", quiet)
+	seedFleetCandidateVehicle(t, "veh_drv_acked", owner, "5YJ3E1EA1NF000703", "tv_drv_acked", quiet)
+
+	// An unacknowledged driver row, and an acknowledged one.
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type)
+		VALUES ($1, $2, 'DRIVER')`, "veh_drv_pending", owner); err != nil {
+		t.Fatalf("seed pending driver row: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO go_vehicle_driver_access
+			(vehicle_id, user_id, tesla_access_type, acknowledged_at, acknowledgment_version)
+		VALUES ($1, $2, 'DRIVER', NOW(), 'owner-approval-v1')`, "veh_drv_acked", owner); err != nil {
+		t.Fatalf("seed acknowledged driver row: %v", err)
+	}
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	rows, err := repo.ListFleetConfigCandidates(
+		ctx, time.Now().Add(-30*time.Minute), time.Now(), time.Time{}, 100)
+	if err != nil {
+		t.Fatalf("ListFleetConfigCandidates: %v", err)
+	}
+
+	got := map[string]store.FleetConfigCandidate{}
+	for _, r := range rows {
+		got[r.VehicleID] = r
+	}
+
+	if _, ok := got["veh_drv_pending"]; ok {
+		t.Error("an UNACKNOWLEDGED driver car is a reconciler candidate — " +
+			"the background pass would configure a third party's vehicle unattended")
+	}
+	// Both directions. An owner's car and an ACKNOWLEDGED driver car are
+	// ordinary candidates; a gate that excluded them would disable the healing
+	// this reconciler exists for.
+	for _, id := range []string{"veh_drv_owned", "veh_drv_acked"} {
+		if _, ok := got[id]; !ok {
+			t.Errorf("%s is missing from the candidate set; got %v", id, keysOf(got))
+		}
+	}
+	// The flag rides on the candidate for reconcileOne's own gate (the pairing
+	// path produces candidates this query never sees), so it must be FALSE on
+	// everything this query returns.
+	for id, c := range got {
+		if c.PendingOwnerAck {
+			t.Errorf("%s came back with PendingOwnerAck=true from the filtered listing", id)
+		}
+	}
+}
+
+// TestResetFleetConfigScheduleOnPairing_ReportsPendingOwnerAck covers the
+// SECOND candidate producer — the one the NOT EXISTS above does not touch.
+//
+// This is the path that made the gate a real hole rather than a theoretical
+// one: it is reached from ANY signed command Tesla applies, so a driver who
+// linked a borrowed car, paired the key and tapped unlock once would have
+// driven reconcileOne into a config read, a push, and potentially the MYR-489
+// forced re-push's DELETE against somebody else's car. This query does not
+// filter — deliberately, it is keyed on one named VIN — so it must REPORT.
+func TestResetFleetConfigScheduleOnPairing_ReportsPendingOwnerAck(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable; skipping store integration test")
+	}
+	mustApplyGoMigrations(t)
+	mustApplyOwnerSchema(t)
+	cleanTables(t, testPool)
+	cleanFleetCandidateTables(t)
+
+	ctx := context.Background()
+	const owner = "user_fcc_pair"
+	seedFCCAccount(t, "acct_fcc_pair", owner, "tesla-sub-pair")
+
+	quiet := time.Now().Add(-3 * time.Hour)
+	seedFleetCandidateVehicle(t, "veh_pair_owned", owner, "5YJ3E1EA1NF000801", "tv_pair_owned", quiet)
+	seedFleetCandidateVehicle(t, "veh_pair_pending", owner, "5YJ3E1EA1NF000802", "tv_pair_pending", quiet)
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type)
+		VALUES ($1, $2, 'DRIVER')`, "veh_pair_pending", owner); err != nil {
+		t.Fatalf("seed pending driver row: %v", err)
+	}
+
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+	now := time.Now()
+	debounce := now.Add(-time.Hour)
+
+	cases := []struct {
+		name        string
+		vin         string
+		wantPending bool
+	}{
+		{"an owner's car reports nothing pending", "5YJ3E1EA1NF000801", false},
+		{"an unacknowledged driver car reports pending", "5YJ3E1EA1NF000802", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, found, err := repo.ResetFleetConfigScheduleOnPairing(ctx, tc.vin, now, debounce)
+			if err != nil {
+				t.Fatalf("ResetFleetConfigScheduleOnPairing: %v", err)
+			}
+			if !found {
+				t.Fatal("candidate not found — the reset should still happen; it is the PUSH that is gated")
+			}
+			if c.PendingOwnerAck != tc.wantPending {
+				t.Errorf("PendingOwnerAck = %v, want %v", c.PendingOwnerAck, tc.wantPending)
+			}
+		})
+	}
+}
+
+func keysOf(m map[string]store.FleetConfigCandidate) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }

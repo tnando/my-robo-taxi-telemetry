@@ -27,14 +27,31 @@ type fakeCompleter struct {
 	// block, when non-nil, holds each call until it is closed — the only way
 	// to make two requests genuinely overlap.
 	block chan struct{}
+
+	// mu guards got, the LAST row handed to Complete. It is how MYR-599's
+	// §7.29 tests assert what the completer was actually given — specifically
+	// that the acknowledgment had been applied to it, since a pre-stamp row
+	// would walk into the gate the request just opened.
+	mu  sync.Mutex
+	got VehicleSnapshotRow
 }
 
-func (f *fakeCompleter) Complete(_ context.Context, _ VehicleSnapshotRow) (SetupState, error) {
+func (f *fakeCompleter) Complete(_ context.Context, row VehicleSnapshotRow) (SetupState, error) {
 	f.calls.Add(1)
+	f.mu.Lock()
+	f.got = row
+	f.mu.Unlock()
 	if f.block != nil {
 		<-f.block
 	}
 	return f.state, f.err
+}
+
+// lastRow returns the row Complete was last given.
+func (f *fakeCompleter) lastRow() VehicleSnapshotRow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.got
 }
 
 // newCompletionHandler wires a handler for the owner of the seeded rows.

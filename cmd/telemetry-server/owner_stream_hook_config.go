@@ -88,13 +88,32 @@ func (h *ownerStreamHook) pushConfig(ctx context.Context, userID, accessToken, v
 // input must never surface to an owner who has just successfully linked their
 // Tesla account, so this logs and returns.
 func (h *ownerStreamHook) seedSetupSchedule(ctx context.Context, userID, vin, outcome string) {
-	if err := h.upsert.SeedFleetConfigSchedule(ctx, vin, outcome, time.Now()); err != nil {
-		h.logger.Warn("owner stream setup: could not record the setup schedule row (card and self-heal will fill in on the next reconcile pass)",
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-			slog.String("outcome", outcome),
-			slog.String("error", err.Error()))
+	err := h.upsert.SeedFleetConfigSchedule(ctx, vin, outcome, time.Now())
+	if err == nil {
+		return
 	}
+	// THE CONSOLATION IS NOT THE SAME ON BOTH BRANCHES, and this line used to
+	// promise the wrong one for half of them (MYR-599 review finding F).
+	//
+	// For an owner's car the promise holds: the reconciler's periodic pass will
+	// examine it, record a real outcome, and the card fills in. For a
+	// driver-access car seeded `awaiting_owner_ack` it is FALSE — the reconciler
+	// excludes an unacknowledged driver car from its candidate query by
+	// construction, so nothing will ever come along and write this row. It is
+	// written at §7.29 time instead, when the acknowledgment opens the gate.
+	//
+	// Saying so matters because the two failures need different operator
+	// responses: one is "wait", the other is "this card stays blank until the
+	// person taps the sheet".
+	msg := "owner stream setup: could not record the setup schedule row (card and self-heal will fill in on the next reconcile pass)"
+	if outcome == store.SetupOutcomeAwaitingOwnerAck {
+		msg = "owner stream setup: could not record the driver-access schedule row (no reconcile pass will fill it in — an unacknowledged driver car is not a candidate; the card stays blank until §7.29)"
+	}
+	h.logger.Warn(msg,
+		slog.String("user_id", userID),
+		slog.String("vin", redactVIN(vin)),
+		slog.String("outcome", outcome),
+		slog.String("error", err.Error()))
 }
 
 // vinLength is the fixed Tesla VIN length used to guard the fleet push.

@@ -73,6 +73,30 @@ type vehicleSummary struct {
 	// A pointer with NO omitempty: the key is always present, and "nothing to
 	// finish" is an explicit null.
 	SetupState *SetupState `json:"setupState"`
+	// TeslaAccessType is HOW THE PERSON WHO LINKED THIS CAR RELATES TO IT ON
+	// TESLA'S SIDE — `"owner"` or `"driver"` (MYR-599, contracts v0.39.0).
+	//
+	// WHY IT IS ON THE WIRE AT ALL, given `setupState` already reports the
+	// acknowledgment gate: the gate CLEARS. A driver who acknowledges gets a car
+	// that streams and behaves exactly like an owner's, and the client still has
+	// to say "you drive this car" on the picker row and in Settings — and still
+	// has to know, on a later app launch, that this is a car whose owner could
+	// revoke access at Tesla at any moment. `setupState` is about what is left
+	// to finish; this is about what the car IS.
+	//
+	// OPTIONAL ON THE CONTRACT, ALWAYS EMITTED HERE, with NO omitempty: an
+	// ABSENT value reads as `"owner"` (a server predating v0.39.0), so omitting
+	// the string "owner" would be technically correct and would make the two
+	// cases indistinguishable to anything reading the wire. Both roles: a viewer
+	// meeting a car their friend drives rather than owns is the party most
+	// helped by knowing it.
+	//
+	// REST-READ-TIME ONLY. A `vehicle_update` WS frame NEVER carries it, the
+	// same delivery rule `setupState` follows and for a stronger reason: it is
+	// not telemetry, no Tesla field feeds it, and it changes only when somebody
+	// re-links a car. See internal/mask — the vehicle_update allow-lists do not
+	// contain it, so there is nothing for VehicleStateMerger to fold.
+	TeslaAccessType string `json:"teslaAccessType"`
 	// TrimLabel is the display-ready trim of this car — "Plaid", "Performance",
 	// "Long Range" (MYR-507, contracts v0.31.0). The SAME value and the SAME
 	// column as VehicleState.trimLabel (§7.1, MYR-320): the snapshot does not

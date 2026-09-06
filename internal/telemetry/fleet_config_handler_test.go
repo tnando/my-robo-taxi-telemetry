@@ -309,6 +309,7 @@ func TestFleetConfigHandler_ServeHTTP(t *testing.T) {
 					CA:       "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----",
 				},
 				discardLogger(),
+				WithDriverAccessGate(&stubDriverAccessGate{}),
 			)
 
 			// Build the request using a mux to populate PathValue.
@@ -393,6 +394,7 @@ func TestFleetConfigHandler_TeslaTokenPassedToFleetAPI(t *testing.T) {
 			CA:       "ca-cert",
 		},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 
 	mux := http.NewServeMux()
@@ -438,6 +440,7 @@ func TestFleetConfigHandler_TeslaTokenNoExpiry(t *testing.T) {
 			CA:       "ca-cert",
 		},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 
 	mux := http.NewServeMux()
@@ -524,6 +527,7 @@ func TestFleetConfigHandler_Status(t *testing.T) {
 				newTestFleetClient(fleetSrv.URL),
 				EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
 				discardLogger(),
+				WithDriverAccessGate(&stubDriverAccessGate{}),
 			)
 
 			mux := http.NewServeMux()
@@ -583,6 +587,7 @@ func TestFleetConfigHandler_MethodNotAllowed(t *testing.T) {
 		newTestFleetClient(stubFleetServer(t, http.StatusOK, `{"response":{"synced":true}}`).URL),
 		EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 
 	// Register without a method so ServeHTTP's own dispatch handles the verb.
@@ -609,6 +614,7 @@ func TestFleetConfigHandler_StatusEnforcesOwnership(t *testing.T) {
 		newTestFleetClient(stubFleetServer(t, http.StatusOK, `{"response":{"synced":true}}`).URL),
 		EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 
 	mux := http.NewServeMux()
@@ -666,6 +672,7 @@ func TestFleetConfigHandler_FleetAPIUnreachable(t *testing.T) {
 			CA:       "ca-cert",
 		},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 
 	mux := http.NewServeMux()

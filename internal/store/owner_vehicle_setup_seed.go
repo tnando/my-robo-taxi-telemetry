@@ -99,6 +99,43 @@ const SetupOutcomePushFailed = "push_failed"
 // wire-invisible and scheduling-identical to no row at all.
 const SetupOutcomeNone = ""
 
+// SetupOutcomeAwaitingOwnerAck is the go_fleet_config_attempts.last_outcome
+// label meaning "this car was linked by a DRIVER and NOTHING WAS PUSHED at it,
+// because the driver has not yet acknowledged that the owner approved adding
+// it" (MYR-599). Duplicated from internal/telemetry.outcomeAwaitingOwnerAck for
+// the same reason its two neighbours above are duplicated.
+//
+// IT IS THE ONE LABEL IN THIS FILE THAT DESCRIBES A PUSH THAT NEVER HAPPENED.
+// The other three are all answers to a push — Tesla refused it, it errored, it
+// applied. This one is seeded INSTEAD OF a push, which is why it is also the
+// one label the MYR-592 inactivity sweeper must exclude from its
+// "configured and billing" set: there is no config at Tesla to delete, and a
+// "your car has been disconnected" push to a driver whose car was never
+// connected is worse than the pointless API call that precedes it.
+//
+// It is deliberately WIRE-INVISIBLE ON ITS OWN. deriveSetupState answers
+// `awaiting_owner_acknowledgment` from the go_vehicle_driver_access row, which
+// is the authoritative source and the thing §7.29 clears; this label exists so
+// the schedule row can say WHY it is sitting there, and so the seed is never a
+// silent no-claim row that later reads as an unexplained silence.
+const SetupOutcomeAwaitingOwnerAck = "awaiting_owner_ack"
+
+// SetupOutcomeOwnerAccessRequired is the go_fleet_config_attempts.last_outcome
+// label meaning "Tesla REFUSED to create this car's telemetry config for this
+// authorization" — the `404 <VIN> not_found` answered to a config POST for a
+// VIN the same token can still LIST (MYR-599). Duplicated from
+// internal/telemetry.outcomeOwnerAccessRequired for the same reason its three
+// neighbours above are duplicated.
+//
+// IT BELONGS IN fleetConfigAbsentOutcomes FOR THE SAME REASON push_failed DOES,
+// and the reason is worth stating because the label reads like a permission
+// problem rather than a config-state one: a refused POST installed NOTHING. So
+// there is no config at Tesla to delete and nothing being billed, and the
+// MYR-592 sweeper that treated this car as "configured" would spend a pointless
+// Tesla DELETE and — far worse — push "your car has been disconnected" at
+// somebody whose car was never connected.
+const SetupOutcomeOwnerAccessRequired = "owner_access_required"
+
 // querySeedFleetConfigSchedule records, against the vehicle owning vin, that a
 // link-time provisioning pass happened and what (if anything) it observed.
 //

@@ -166,6 +166,20 @@ func (h *SetupCompletionHandler) authorizeVehicle(
 // which is why none of them returns a 200 with a state attached. The client
 // renders a retry affordance from the code, not a setup card.
 func (h *SetupCompletionHandler) writeCompletionError(w http.ResponseWriter, row VehicleSnapshotRow, err error) {
+	writeSetupCompletionError(w, h.logger, row, err)
+}
+
+// writeSetupCompletionError is the mapping itself, lifted to a package function
+// so §7.29 (owner_approval_handler.go) shares it rather than restating it
+// (MYR-599).
+//
+// SHARED ON PURPOSE, not merely to avoid duplication: §7.29 runs the SAME
+// completion sequence §7.23 does, so one sentinel must produce one status on
+// both routes. A client that already handles complete-setup's errors handles
+// this route's the moment it calls it, and the two can never drift into
+// answering differently about the same car in the same condition.
+func writeSetupCompletionError(w http.ResponseWriter, logger *slog.Logger, row VehicleSnapshotRow, err error) {
+	h := &setupErrorWriter{logger: logger}
 	vin := redactVIN(row.VIN)
 	switch {
 	case errors.Is(err, ErrSetupVehicleUnreachable):
@@ -204,6 +218,19 @@ func (h *SetupCompletionHandler) writeCompletionError(w http.ResponseWriter, row
 			slog.String("error", redactedErrorText(err)))
 		h.writeError(w, http.StatusBadGateway, wserrors.ErrCodeCommandFailed, "setup completion failed upstream")
 	}
+}
+
+// setupErrorWriter is the minimal receiver writeSetupCompletionError needs: a
+// logger and the typed-envelope writer. It exists so the switch above can keep
+// reading `h.logger` / `h.writeError` verbatim after being lifted out of
+// SetupCompletionHandler — the mapping is the delicate part and was moved
+// without being retyped.
+type setupErrorWriter struct{ logger *slog.Logger }
+
+func (h *setupErrorWriter) writeError(
+	w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string,
+) {
+	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
 }
 
 // writeJSON / writeError mirror the sibling §7.15 handler (rest-api.md §4.1

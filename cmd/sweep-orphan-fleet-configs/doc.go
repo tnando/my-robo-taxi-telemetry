@@ -67,6 +67,32 @@
 // a refresh failure can be transient or Tesla-side and is worth retrying,
 // whereas a missing account row is permanent. Don't conflate the two.
 //
+// ── PER-VIN ACCESS TYPE (MYR-599) ───────────────────────────────────────────
+//
+// Every VIN line also carries `access`, and `teslaAccessType` when there is a
+// raw Tesla token to quote:
+//
+//	owner                  a "Vehicle" row exists for this owner and carries no
+//	                       driver-access row
+//	driver                 linked by a Tesla DRIVER of the car, acknowledged
+//	driver(unacknowledged) linked by a driver who never acknowledged the owner's
+//	                       approval — the fleet-config push gate is SHUT
+//	unknown                no "Vehicle" row for this (owner, VIN), so the
+//	                       question cannot be answered
+//
+// EXPECT `unknown` ON MOST LINES, and do not read it as `owner`. Every
+// candidate here is a VIN no local vehicle row claims — that is the definition
+// of the orphans this tool hunts — and the driver-access row is keyed by the
+// vehicle row's id. For a tombstoned orphan both ends of that join are usually
+// gone: teardown deletes the car's driver-access row with the car, and account
+// deletion deletes the person's with the account. The lines that DO resolve are
+// the interesting ones: a VIN Tesla still lists whose local row survives under
+// the same owner.
+//
+// `teslaAccessType` is Tesla's `access_type` VERBATIM, including the empty
+// string older Fleet API responses shipped — the field is omitted when there is
+// nothing to quote, because "Tesla said nothing" is not "Tesla said DRIVER".
+//
 // ── VIN REDACTION ───────────────────────────────────────────────────────────
 //
 // The slog lines on stderr carry redacted VINs (last 4, data-classification.md

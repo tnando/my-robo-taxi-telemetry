@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/commands"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
@@ -280,4 +281,73 @@ func (unknownReasonTransport) Command(_ context.Context, _ commands.TransportReq
 		Outcome: commands.OutcomeFailed,
 		Reason:  "car could not execute command: unspecified error",
 	}, nil
+}
+
+// MYR-599 REVIEW FINDING I: A COMMAND IS THE PLATFORM ACTING ON THE CAR.
+//
+// The obvious objection is that the person holds a paired virtual key and can
+// unlock the car from Tesla's own app, so refusing here protects nothing. What
+// this gate protects is not their ability to operate a car they legitimately
+// drive — it is MyRoboTaxi acting on somebody else's property on their behalf,
+// through our credentials and our audit trail, before we hold any evidence at
+// all that the car's owner agreed to it being here.
+//
+// It also closes a mechanical hole. A signed command Tesla applies feeds
+// `handlePairingSignal`, which resets the schedule and hands the car to the
+// reconciler — the exact producer an earlier review had to gate at its
+// consumer. Refusing here means that signal is never raised for a car whose
+// consent is outstanding, so the two defences are independent rather than
+// stacked on one check.
+func TestVehicleCommandHandler_RefusesUnacknowledgedDriverCar(t *testing.T) {
+	tests := []struct {
+		name     string
+		access   VehicleDriverAccess
+		wantCode int
+		wantExec int
+	}{
+		{
+			name:     "an unacknowledged driver car is refused",
+			access:   VehicleDriverAccess{Present: true},
+			wantCode: http.StatusConflict,
+		},
+		{
+			name: "an acknowledged driver car is not",
+			access: VehicleDriverAccess{
+				Present: true, AcknowledgedAt: time.Now().Add(-time.Hour),
+			},
+			wantCode: http.StatusOK,
+			wantExec: 1,
+		},
+		{
+			name:     "an owner's car is not",
+			wantCode: http.StatusOK,
+			wantExec: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := availableSnapshotRow()
+			row.UserID = "u1"
+			row.VIN = "5YJ3E1EA1PF000001"
+			row.DriverAccess = tt.access
+
+			exec := &fakeCommandExecutor{result: commands.Result{Command: "door_lock"}}
+			h := newCommandHandler(exec, &stubVehicleSnapshotReader{row: row}, &stubTokenValidator{userID: "u1"})
+			rec := postCommand(h, "v1", "door_lock", "", "Bearer t")
+
+			if rec.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body %s)", rec.Code, tt.wantCode, rec.Body.String())
+			}
+			if exec.calls != tt.wantExec {
+				t.Errorf("executor calls = %d, want %d — the refusal must land BEFORE anything "+
+					"reaches the car", exec.calls, tt.wantExec)
+			}
+			if tt.wantCode == http.StatusConflict &&
+				decodeErrCode(t, rec) != wserrors.ErrCodeInvalidRequest {
+				t.Errorf("error code = %q, want %q — the same shape the reconnect and "+
+					"fleet-config refusals use", decodeErrCode(t, rec), wserrors.ErrCodeInvalidRequest)
+			}
+		})
+	}
 }

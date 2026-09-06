@@ -380,3 +380,59 @@ func TestStreamConfigTeardown_NoTokenSourceIsASkip(t *testing.T) {
 		t.Error("called Tesla with no token source wired")
 	}
 }
+
+// TestAccountDeletion_SkipsStreamConfigDeleteForUnacknowledgedDriverCars is the
+// MYR-599 half of the same seam, and it points the OPPOSITE way to everything
+// above.
+//
+// MYR-593's whole argument is that a surviving config is a cost leak, so the
+// delete must always be attempted. MYR-599 introduces the one class of car where
+// the config is NOT OURS TO DELETE: a driver-linked vehicle whose owner-approval
+// acknowledgment was never recorded has never been pushed at by this platform,
+// so any config Tesla holds for that VIN was created by the car's real owner
+// through their own account. Tesla lets a DRIVER token DELETE it — so without
+// this skip, one person deleting their MyRoboTaxi account silently tears down a
+// third party's telemetry.
+//
+// The acknowledged car in the same fleet is the control: once the gate is open
+// we may well have installed the config, and MYR-593's argument applies to it
+// unchanged.
+func TestAccountDeletion_SkipsStreamConfigDeleteForUnacknowledgedDriverCars(t *testing.T) {
+	configs := &fakeStreamConfigDeleter{}
+	vehicles := &fakeOwnedVehicleLister{
+		ids: []string{"cveh_owned", "cveh_pending", "cveh_acked"},
+		vins: map[string]string{
+			"cveh_owned":   "5YJ3E1EA1PF000001",
+			"cveh_pending": "5YJ3E1EA1PF000002",
+			"cveh_acked":   "5YJ3E1EA1PF000003",
+		},
+		pendingAck: map[string]bool{"cveh_pending": true},
+	}
+
+	h := newDeletionHandler(t, AccountDeletionDeps{
+		Vehicles:      vehicles,
+		StreamConfigs: configs,
+		TeslaLink:     &fakeLinkRevoker{accepted: true},
+		Teardown:      newFakeAccountTeardown(),
+		Rides:         &fakeRideCanceller{},
+		Data:          &fakeAccountData{},
+	})
+
+	rec := callDelete(h)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204 — the gate changes ONE Tesla call, never the "+
+			"deletion; an account deletion must not be blockable", rec.Code)
+	}
+
+	got := configs.vins()
+	want := []string{"5YJ3E1EA1PF000001", "5YJ3E1EA1PF000003"}
+	if len(got) != len(want) {
+		t.Fatalf("config deletes = %v, want %v — the unacknowledged driver car's config "+
+			"belongs to its real OWNER, and Tesla would have honoured the delete", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("config delete[%d] = %s, want %s", i, got[i], want[i])
+		}
+	}
+}

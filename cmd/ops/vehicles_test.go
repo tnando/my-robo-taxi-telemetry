@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/myrobotaxi/telemetry/internal/store"
 )
 
 // TestRunVehiclesReadd_FlagValidation pins the `ops vehicles re-add` argument
@@ -77,5 +80,93 @@ func TestVehicleReaddOutput_JSONShape(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Errorf("json = %s, want it to contain %s", got, want)
 		}
+	}
+}
+
+// TestVehicleListItems_Access pins MYR-599's access column on `ops vehicles
+// list`: the label comes from the catalog's own driver-access row and the raw
+// Tesla token from the narrow ops-only lookup, keyed by VIN.
+//
+// `unknown` is deliberately absent from this table — every row on this surface
+// came from a "Vehicle" row, so the only surface that can report it is the
+// orphan sweep.
+func TestVehicleListItems_Access(t *testing.T) {
+	tests := []struct {
+		name    string
+		access  store.VehicleDriverAccess
+		raw     map[string]store.DriverAccessListing
+		want    string
+		wantRaw string
+	}{
+		{
+			name: "no driver-access row is owner and quotes nothing",
+			want: store.OperatorAccessOwner,
+		},
+		{
+			name:   "acknowledged driver row",
+			access: store.VehicleDriverAccess{Present: true, CreatedAt: time.Unix(1, 0), AcknowledgedAt: time.Unix(2, 0)},
+			raw: map[string]store.DriverAccessListing{
+				"VIN-1": {TeslaAccessType: "DRIVER"},
+			},
+			want:    store.OperatorAccessDriver,
+			wantRaw: "DRIVER",
+		},
+		{
+			name:    "unacknowledged driver row keeps the shut push gate visible",
+			access:  store.VehicleDriverAccess{Present: true, CreatedAt: time.Unix(1, 0)},
+			raw:     map[string]store.DriverAccessListing{"VIN-1": {TeslaAccessType: "DRIVER"}},
+			want:    store.OperatorAccessDriverUnacknowledged,
+			wantRaw: "DRIVER",
+		},
+		{
+			name:   "driver row from an older Fleet response quotes no token",
+			access: store.VehicleDriverAccess{Present: true, CreatedAt: time.Unix(1, 0)},
+			raw:    map[string]store.DriverAccessListing{"VIN-1": {TeslaAccessType: ""}},
+			want:   store.OperatorAccessDriverUnacknowledged,
+		},
+		{
+			name:   "a raw-lookup miss never downgrades the catalog's answer",
+			access: store.VehicleDriverAccess{Present: true, CreatedAt: time.Unix(1, 0), AcknowledgedAt: time.Unix(2, 0)},
+			raw:    nil,
+			want:   store.OperatorAccessDriver,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := vehicleListItems([]store.VehicleSummary{{
+				ID: "cveh1", VIN: "VIN-1", DriverAccess: tt.access,
+			}}, tt.raw)
+			if len(got) != 1 {
+				t.Fatalf("rendered %d items, want 1", len(got))
+			}
+			if got[0].Access != tt.want {
+				t.Errorf("access = %q, want %q", got[0].Access, tt.want)
+			}
+			if got[0].TeslaAccessType != tt.wantRaw {
+				t.Errorf("teslaAccessType = %q, want %q", got[0].TeslaAccessType, tt.wantRaw)
+			}
+
+			b, err := json.Marshal(got[0])
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !strings.Contains(string(b), `"access":"`+tt.want+`"`) {
+				t.Errorf("json = %s, want the access label", b)
+			}
+			// The raw token is OMITTED rather than emitted empty: "Tesla told
+			// us nothing" must stay distinguishable from a value.
+			if tt.wantRaw == "" && strings.Contains(string(b), "teslaAccessType") {
+				t.Errorf("json = %s, want no teslaAccessType key", b)
+			}
+		})
+	}
+}
+
+// TestVehicleVINs pins the lookup key list — full VINs, in row order.
+func TestVehicleVINs(t *testing.T) {
+	got := vehicleVINs([]store.VehicleSummary{{VIN: "VIN-A"}, {VIN: "VIN-B"}})
+	if len(got) != 2 || got[0] != "VIN-A" || got[1] != "VIN-B" {
+		t.Errorf("vehicleVINs = %v, want [VIN-A VIN-B]", got)
 	}
 }

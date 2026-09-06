@@ -68,7 +68,19 @@ import (
 // carrying it is configured and billing. Listing the empty label here would
 // exempt exactly the healthiest cars in the fleet and quietly disable the
 // feature for most of it.
-const fleetConfigAbsentOutcomes = `('awaiting_virtual_key', 'push_failed', 'token_failed', 'read_failed', 'skipped_other')`
+//
+// `awaiting_owner_ack` (MYR-599) joined the list for the plainest reason of
+// all: the link-time hook seeds it INSTEAD OF pushing, so a car carrying it has
+// never had a config created and there is nothing at Tesla to delete. Omitting
+// it would cost a pointless Tesla DELETE and — far worse — a "your car has been
+// disconnected" push to a driver whose car was never connected in the first
+// place, about a state they cannot fix by reconnecting.
+// `owner_access_required` (MYR-599) joined it for the same reason one step
+// further on: Tesla ANSWERED the push and answered no. A refused POST installs
+// nothing, so a car carrying this label has no config at Tesla either — the
+// label reads like a permission problem, but its consequence for this list is
+// identical to push_failed's.
+const fleetConfigAbsentOutcomes = `('awaiting_virtual_key', 'push_failed', 'token_failed', 'read_failed', 'skipped_other', 'awaiting_owner_ack', 'owner_access_required')`
 
 // InactiveOwnerVehicle is one candidate row: a configured, unsuspended vehicle
 // whose owner has not authenticated since the warning threshold.
@@ -110,6 +122,19 @@ type InactiveOwnerVehicle struct {
 // rather than merely unlikely: a vehicle becomes a candidate only once we hold
 // positive evidence about its owner.
 //
+// THE DRIVER-ACCESS ANTI-JOIN IS NOT REDUNDANT WITH THE OUTCOME LIST ABOVE, and
+// that is the whole reason it is here (MYR-599). `awaiting_owner_ack` is a
+// go_fleet_config_attempts label, and that row is BEST-EFFORT — the link-time
+// hook logs and shrugs if the seed write fails, and the teardown/reconciler
+// delete it on other paths. So a driver-linked car with no schedule row at all
+// passes `fca.vehicle_id IS NULL` and becomes a suspension candidate: the
+// sweeper would warn its linker that a car which never streamed is about to be
+// disconnected, and then spend a Tesla DELETE for a config that never existed.
+// The driver-access row is NOT best-effort — it is written in the provisioning
+// transaction — so gating on it is gating on the fact rather than on the
+// explanation, exactly as the reconciler's candidate query does with the same
+// shared `unacknowledgedDriverAccessGate` constant.
+//
 // ALREADY-SUSPENDED VEHICLES ARE EXCLUDED, which is what makes the sweeper
 // idempotent. There is no second action to take on them, they must not be warned
 // again, and they must not cost a Tesla call every hour for the rest of time.
@@ -129,6 +154,7 @@ WHERE a.last_seen_at <= $1
   AND v."vin" <> ''
   AND s.suspended_at IS NULL
   AND (fca.vehicle_id IS NULL OR fca.last_outcome NOT IN ` + fleetConfigAbsentOutcomes + `)
+  AND NOT EXISTS (` + unacknowledgedDriverAccessGate + `)
 ORDER BY a.last_seen_at ASC
 LIMIT $2`
 

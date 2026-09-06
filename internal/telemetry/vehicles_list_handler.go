@@ -118,6 +118,14 @@ type VehicleCatalogRow struct {
 	// shared car as "setting up" instead of "offline" (MYR-437) without a
 	// snapshot fetch per row. Zero value means "no claim" — the safe reading.
 	SetupSchedule VehicleSetupSchedule
+
+	// DriverAccess is the car's go_vehicle_driver_access row (MYR-599), LEFT
+	// JOINed alongside the schedule on all three §7.0 producers. RAW STORAGE
+	// behind TWO derived wire values: `teslaAccessType` and the
+	// `awaiting_owner_acknowledgment` member of `setupState`. Zero value reads
+	// as owner access — safe for the wire, and see the type's own doc for the
+	// direction in which it is NOT safe.
+	DriverAccess VehicleDriverAccess
 }
 
 // VehicleLister returns the catalog rows for vehicles owned by a
