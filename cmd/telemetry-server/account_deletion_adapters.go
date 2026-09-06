@@ -179,21 +179,37 @@ func (a *accountDataDeleterAdapter) DeleteRideMemberships(ctx context.Context, u
 	return a.deleter.DeleteRideMemberships(ctx, userID)
 }
 
+// DeleteTripActivityTokens drops the account's ActivityKit push-to-start
+// registrations (MYR-602, §3.1 step 8g), including the ones held on OTHER
+// people's trips — which the go_trips cascade cannot reach.
+func (a *accountDataDeleterAdapter) DeleteTripActivityTokens(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripActivityTokens(ctx, userID)
+}
+
+// DeleteTripLegActivities drops the account's leg-anchored Live Activity rows
+// (MYR-602, §3.1 step 8g), leaving its RIDE Activities to the ride teardown
+// that is responsible for end-pushing them first.
+func (a *accountDataDeleterAdapter) DeleteTripLegActivities(ctx context.Context, userID string) (int, error) {
+	return a.deleter.DeleteTripLegActivities(ctx, userID)
+}
+
 func (a *accountDataDeleterAdapter) DeleteIdentity(ctx context.Context, scope telemetry.AccountDeletionScope, counts telemetry.AccountDeletionCounts) (telemetry.AccountIdentityOutcome, error) {
 	res, err := a.deleter.DeleteIdentity(ctx, store.DeletionScope{
 		CallerID:    scope.CallerID,
 		CanonicalID: scope.CanonicalID,
 		IDs:         scope.IDs,
 	}, store.AccountDeletionCounts{
-		VehicleCount:           counts.VehicleCount,
-		DriveCount:             counts.DriveCount,
-		RidesCancelled:         counts.RidesCancelled,
-		SharesRevoked:          counts.SharesRevoked,
-		ShareLabelsScrubbed:    counts.ShareLabelsScrubbed,
-		PushDevicesDeleted:     counts.PushDevicesDeleted,
-		SavedPlacesDeleted:     counts.SavedPlacesDeleted,
-		RideMembershipsDeleted: counts.RideMembershipsDeleted,
-		RefreshTokensRevoked:   counts.RefreshTokensRevoked,
+		VehicleCount:              counts.VehicleCount,
+		DriveCount:                counts.DriveCount,
+		RidesCancelled:            counts.RidesCancelled,
+		SharesRevoked:             counts.SharesRevoked,
+		ShareLabelsScrubbed:       counts.ShareLabelsScrubbed,
+		PushDevicesDeleted:        counts.PushDevicesDeleted,
+		SavedPlacesDeleted:        counts.SavedPlacesDeleted,
+		RideMembershipsDeleted:    counts.RideMembershipsDeleted,
+		TripActivityTokensDeleted: counts.TripActivityTokensDeleted,
+		TripLegActivitiesDeleted:  counts.TripLegActivitiesDeleted,
+		RefreshTokensRevoked:      counts.RefreshTokensRevoked,
 
 		ProfileNameConfirmationsDeleted: counts.ProfileNameConfirmationsDeleted,
 		UserActivityRowsDeleted:         counts.UserActivityRowsDeleted,

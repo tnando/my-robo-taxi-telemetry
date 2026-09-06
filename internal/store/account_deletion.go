@@ -128,6 +128,18 @@ type AccountDeletionCounts struct {
 	// reached every table that named the person, and this is the last go_ table
 	// that used to be exempt.
 	RemovedVehicleTombstonesDeleted int `json:"removedVehicleTombstonesDeleted"`
+	// TripActivityTokensDeleted is the number of ActivityKit PUSH-TO-START
+	// registrations removed (MYR-602, §3.1 step 8g) — one per trip this person
+	// opened on an iPhone, usually 0. A COUNT and never the token: the value is
+	// a P1 capability and the audit row is P0-only (CG-DL-5).
+	TripActivityTokensDeleted int `json:"tripActivityTokensDeleted"`
+	// TripLegActivitiesDeleted is the number of LEG-anchored Live Activity
+	// registrations removed (MYR-602, §3.1 step 8g). Counted separately from
+	// the tokens above because the two are different kinds of address — a
+	// standing permission slip versus one running card — and a deletion that
+	// reached one and not the other is exactly the state the two counts exist
+	// to make visible.
+	TripLegActivitiesDeleted int `json:"tripLegActivitiesDeleted"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
 	// the dual-source identity fact, and the one thing that distinguishes an
 	// Apple-native account from a legacy web one in the audit trail.

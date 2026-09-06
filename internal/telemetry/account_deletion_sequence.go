@@ -483,6 +483,34 @@ func (h *AccountDeletionHandler) runPersonalEffects(
 	}
 	counts.VehicleDriverAccessRowsDeleted = driverAccess
 
+	// (8g) The two LIVE trip tables that address this person's PHONE
+	// (MYR-602). Both cascade from go_trips, which covers a trip's owner
+	// completely — their trips go, and everything under them goes — and covers
+	// a PARTICIPANT not at all: their push-to-start token and their running leg
+	// Activity live under somebody else's trip, which is still happening and
+	// which this deletion must not touch.
+	//
+	// Left behind, those rows are read by the leg detector on the trip's next
+	// leg: the server would raise a Live Activity on the phone of an account
+	// that no longer exists, and keep doing it for the rest of the window. The
+	// hazard is a DELIVERY rather than a leak — neither row holds anything
+	// about the person beyond an opaque cuid — which is why this is P0 hygiene
+	// in the 8-family rather than an erasure obligation like 8c.
+	//
+	// UNCONSTRAINED IN POSITION, unlike 8e and 8f: nothing in the per-vehicle
+	// teardown writes either row, so there is no ordering hazard against step 3.
+	tripTokens, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripActivityTokens)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trip_activity_tokens", cause: err}
+	}
+	counts.TripActivityTokensDeleted = tripTokens
+
+	legActivities, err := h.sumOverScope(ctx, scope, h.deps.Data.DeleteTripLegActivities)
+	if err != nil {
+		return &accountDeletionError{step: "delete_trip_leg_activities", cause: err}
+	}
+	counts.TripLegActivitiesDeleted = legActivities
+
 	// (9) Refresh tokens — revoked so no stored session can mint a new access
 	// token. The CURRENT access token deliberately keeps working until step 11,
 	// because it is what authenticates a re-run if step 10 fails.

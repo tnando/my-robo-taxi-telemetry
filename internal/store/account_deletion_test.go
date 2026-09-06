@@ -322,6 +322,17 @@ func TestAccountDeleter_DeleteIdentity_WritesTheAuditRow(t *testing.T) {
 		// (the owner) who never consented to appear in this person's audit
 		// trail. The number says nothing about whose cars they were.
 		"vehicleDriverAccessRowsDeleted": true,
+		// MYR-602. Two COUNTS from step 8g: the ActivityKit push-to-start
+		// registrations removed, and the leg-anchored Live Activity rows
+		// removed. Both rows are P0 by shape apart from the TOKEN, which is a
+		// P1 CAPABILITY — whoever holds one with the signing key can raise a
+		// Live Activity on that phone — and which is precisely why only the
+		// number may cross. Two keys rather than one because they are two
+		// different kinds of address (a standing permission slip and one
+		// running card), and a deletion that reached one and not the other is
+		// the state these counts exist to make visible.
+		"tripActivityTokensDeleted": true,
+		"tripLegActivitiesDeleted":  true,
 	}
 	for k, v := range got {
 		if !allowed[k] {

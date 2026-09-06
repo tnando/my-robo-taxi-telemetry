@@ -116,6 +116,15 @@ type AccountDataDeleter interface {
 	// run after it.
 	DeleteVehicleDriverAccess(ctx context.Context, userID string) (int, error)
 	DeleteRideMemberships(ctx context.Context, userID string) (int, error)
+	// DeleteTripActivityTokens drops the account's ActivityKit push-to-start
+	// registrations, and DeleteTripLegActivities its leg-anchored Live Activity
+	// rows (MYR-602, data-lifecycle.md §3.1 step 8g). Position-UNCONSTRAINED,
+	// unlike 8e and 8f: nothing in the per-vehicle teardown writes either row.
+	// They exist as a step because both tables cascade from go_trips, which
+	// covers a trip's OWNER completely and a PARTICIPANT not at all — their
+	// rows live under somebody else's trip, which this deletion does not touch.
+	DeleteTripActivityTokens(ctx context.Context, userID string) (int, error)
+	DeleteTripLegActivities(ctx context.Context, userID string) (int, error)
 	RevokeRefreshTokens(ctx context.Context, userID string) (int, error)
 	DeleteIdentity(ctx context.Context, scope AccountDeletionScope, counts AccountDeletionCounts) (AccountIdentityOutcome, error)
 }
@@ -179,7 +188,15 @@ type AccountDeletionCounts struct {
 	// held (MYR-540) — the rides they JOINED, as against RidesCancelled, the
 	// rides they BOOKED.
 	RideMembershipsDeleted int
-	RefreshTokensRevoked   int
+	// TripActivityTokensDeleted counts the ActivityKit push-to-start
+	// registrations removed (MYR-602) — one per trip this person opened on an
+	// iPhone, 0 for everybody else.
+	TripActivityTokensDeleted int
+	// TripLegActivitiesDeleted counts the leg-anchored Live Activity rows
+	// removed (MYR-602). Kept separate from the tokens for the reason the store
+	// struct gives: they are two different kinds of address.
+	TripLegActivitiesDeleted int
+	RefreshTokensRevoked     int
 }
 
 // AccountIdentityOutcome mirrors store.AccountIdentityResult.
