@@ -331,10 +331,38 @@ func TestDeriveSetupState(t *testing.T) {
 			wantSince: ago(time.Hour),
 		},
 		{
-			// Tesla's owner-only refusal of the config push (see
-			// fleet_config_owner_access.go). It reports token_failed on the
-			// wire — the only honest member the v0.39.0 enum offers — rather
-			// than the `configuring` a transient push_failed would decay into.
+			// MYR-599 finding G/J, THE POSITIVE-EVIDENCE HALF. Tesla's 404 is
+			// generic — the same answer comes back for a revoked grant — so
+			// contracts v0.40.0 permits `owner_access_required` only when a
+			// driver-access row names the cause. Here one does, so the state
+			// carries the copy whose action actually works: the car's real
+			// owner adds it under their own account.
+			//
+			// The row is necessarily ACKNOWLEDGED. The unacknowledged arm
+			// returns far above, and nothing pushes at a car whose gate is
+			// shut, so no push could have produced this label.
+			name:        "an owner-access refusal WITH a driver row reports owner_access_required",
+			status:      "offline",
+			lastUpdated: ago(6 * time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeOwnerAccess,
+				LastAttemptAt: ago(time.Hour), SignedCommandAt: ago(time.Minute),
+			},
+			driver: VehicleDriverAccess{
+				Present:        true,
+				CreatedAt:      ago(3 * time.Hour),
+				AcknowledgedAt: ago(2 * time.Hour),
+			},
+			wantState: SetupStateOwnerAccessRequired,
+			wantSince: ago(time.Hour),
+		},
+		{
+			// ...and WITHOUT one it stays token_failed. A bare 404 is
+			// overwhelmingly a revoked grant, and "reconnect your Tesla
+			// account" is the right advice for that. Naming the driver cause
+			// with no evidence for it would send the wrong person to fix the
+			// wrong thing — and it is still never the `configuring` a
+			// transient push_failed would decay into.
 			name:        "an owner-access refusal reports token_failed, never configuring",
 			status:      "offline",
 			lastUpdated: ago(6 * time.Hour),

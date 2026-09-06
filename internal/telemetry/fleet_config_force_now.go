@@ -69,11 +69,20 @@ func epochForceSpent(c FleetConfigCandidate) bool {
 // delete-then-create — it does not pass through reconcileOne — so it carries
 // the same refusal rather than trusting the door in front of it.
 //
-// A false return means the create step did not apply. The car may at that
+// A false `applied` means the create step did not apply. The car may at that
 // instant have NO config (the delete-then-create window), which `forceRepush`
 // has already logged as its uniquely greppable UNCONFIGURED event and
-// rescheduled at the base interval for the ordinary push path to repair. A
-// caller MUST NOT report success to a user on a false return.
+// rescheduled for the ordinary push path to repair. A caller MUST NOT report
+// success to a user on a false return.
+//
+// `ownerAccessRequired` separates the ONE not-applied cause that is a STANDING
+// answer rather than a failure (MYR-599): Tesla refused the create because this
+// authorization may not configure this car. The caller needs it because the two
+// deserve opposite responses on the wire — a failure is a 502 and a retry
+// affordance, while a standing refusal is a 200 carrying
+// `owner_access_required`, which is a state and not an error. Reporting the
+// refusal as a failure is what made the §7.29 acknowledge endpoint answer a card
+// reading "connecting…" for 24 hours about a car Tesla had just refused.
 //
 // ctx serves as both the Tesla-call context and the bookkeeping context. In the
 // reconciler those differ so that an expired per-vehicle budget still records
@@ -82,7 +91,7 @@ func epochForceSpent(c FleetConfigCandidate) bool {
 // bookkeeping write is the last thing to happen either way.
 func (r *FleetConfigReconciler) ForceConfigRepushNow(
 	ctx context.Context, c FleetConfigCandidate, accessToken string,
-) bool {
+) (applied, ownerAccessRequired bool) {
 	if c.PendingOwnerAck {
 		// Belt AND braces, deliberately. The only caller today (complete-setup)
 		// has already refused this car at its own step 0, so reaching here means
@@ -93,9 +102,9 @@ func (r *FleetConfigReconciler) ForceConfigRepushNow(
 			slog.String("event", "fleet_config_awaiting_owner_ack"),
 			slog.String("vehicle_id", c.VehicleID),
 			slog.String("vin", redactVIN(c.VIN)))
-		return false
+		return false, false
 	}
 	var out ReconcileOutcome
 	r.forceRepush(ctx, ctx, c, accessToken, redactVIN(c.VIN), &out)
-	return out.ForcedRepushes > 0
+	return out.ForcedRepushes > 0, out.OwnerAccessRefusals > 0
 }

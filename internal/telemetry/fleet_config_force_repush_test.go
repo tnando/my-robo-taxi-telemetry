@@ -350,3 +350,126 @@ func TestAwaitingKeyCapNeverInvertsTheCeilings(t *testing.T) {
 			cfg.AwaitingKeyMaxBackoff, cfg.MaxBackoff)
 	}
 }
+
+// MYR-599 FINDING G: THE FORCED DOOR HAD TO LEARN THE LESSON THE ORDINARY PUSH
+// ALREADY KNEW.
+//
+// `push` classified Tesla's owner-only 404 out of the transient bucket; this
+// door did not, and recorded `forced_repush_failed` — which the derivation
+// reads as `configuring` for a whole 24-hour window. It was reachable on the
+// ONE route a driver-access car actually takes, because §7.29's own best-effort
+// push runs through ForceConfigRepushNow rather than through `push`. So the
+// first thing a driver saw after consenting was a card saying "connecting…"
+// about a car Tesla had just refused outright.
+//
+// Three assertions, each pinning a separate half of the fix: the LABEL (so the
+// derivation can say `owner_access_required`), the GAP (a flat day rather than
+// a doubling ladder against an answer that cannot change), and the COUNT (so
+// the caller can answer 200-with-a-state instead of 502-with-a-retry).
+func TestForcedRepushClassifiesTeslasOwnerOnlyRefusal(t *testing.T) {
+	h := newForceHarness(syncedQuietCandidate(nil), func(h *forceHarness) {
+		h.writer.err = &FleetAPIError{
+			StatusCode: 404,
+			Body:       `{"response":null,"error":"` + reconTestVIN + ` not_found","error_description":""}`,
+		}
+	})
+
+	out, err := h.rec.Reconcile(context.Background())
+	if err != nil {
+		t.Fatalf("Reconcile: unexpected error: %v", err)
+	}
+	if out.OwnerAccessRefusals != 1 {
+		t.Errorf("OwnerAccessRefusals = %d, want 1 — the caller cannot tell a standing "+
+			"refusal from a failure without it", out.OwnerAccessRefusals)
+	}
+	if out.PushFailures != 1 || out.ForcedRepushes != 0 {
+		t.Errorf("PushFailures=%d ForcedRepushes=%d, want 1 and 0 — nothing was configured",
+			out.PushFailures, out.ForcedRepushes)
+	}
+	if len(h.attempts.forced) != 1 {
+		t.Fatalf("forced schedule writes = %d, want 1 (the epoch budget must still be spent, "+
+			"or re-forcing would delete a config once per epoch for nothing)", len(h.attempts.forced))
+	}
+	rec := h.attempts.forced[0]
+	if rec.outcome != outcomeOwnerAccessRequired {
+		t.Errorf("outcome = %q, want %q — %q is the transient label the derivation lets decay "+
+			"into `configuring`", rec.outcome, outcomeOwnerAccessRequired, outcomeForcedRepushFail)
+	}
+	if want := forceNow.Add(ownerAccessRetryGap); !rec.next.Equal(want) {
+		t.Errorf("next attempt = %v, want %v — a standing refusal earns the flat day, not the "+
+			"base interval a repairable failure earns", rec.next, want)
+	}
+}
+
+// ...and the on-demand entry point reports the distinction back to its caller,
+// which is what lets §7.23 / §7.29 answer `owner_access_required` (a state)
+// rather than a 502 (an error with a retry affordance).
+func TestForceConfigRepushNowReportsTheOwnerOnlyRefusal(t *testing.T) {
+	h := newForceHarness(nil, func(h *forceHarness) {
+		h.writer.err = &FleetAPIError{StatusCode: 404, Body: `{"error":"` + reconTestVIN + ` not_found"}`}
+	})
+
+	applied, ownerAccess := h.rec.ForceConfigRepushNow(context.Background(), syncedQuietCandidate(nil)[0], "tok")
+	if applied {
+		t.Error("reported applied for a push Tesla refused")
+	}
+	if !ownerAccess {
+		t.Error("reported a plain failure for Tesla's standing owner-only refusal — the caller " +
+			"would answer 502 and invite a retry that cannot succeed")
+	}
+}
+
+// TestOwnerAccessBackoffIsFlatAndIgnoresTheHotLadder.
+//
+// Every other outcome is retried on a doubling backoff because every other
+// outcome describes something that might have changed since. This one cannot
+// change until Tesla ships DRIVER-token config creation or the car's real owner
+// adds it under their own account, so the ladder buys nothing and costs Tesla
+// traffic on the way to the same practical answer.
+//
+// The hot-epoch case is the substantive assertion. A hot epoch means "somebody
+// just proved the virtual key is paired, so try hard" — pairing is not what is
+// wrong here, and hammering a refusal because a person tapped unlock would be
+// the wrong response to the right signal.
+func TestOwnerAccessBackoffIsFlatAndIgnoresTheHotLadder(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*FleetConfigCandidate)
+		outcome string
+		want    time.Duration
+	}{
+		{
+			name:    "a standing refusal waits a flat day",
+			outcome: outcomeOwnerAccessRequired,
+			want:    ownerAccessRetryGap,
+		},
+		{
+			name: "...even deep in the attempt curve, where a ladder would have doubled",
+			mutate: func(c *FleetConfigCandidate) {
+				c.AttemptCount = 12
+			},
+			outcome: outcomeOwnerAccessRequired,
+			want:    ownerAccessRetryGap,
+		},
+		{
+			name: "...and even inside a hot pairing epoch, which is about a different problem",
+			mutate: func(c *FleetConfigCandidate) {
+				c.SignedCommandAt = forceNow.Add(-time.Minute)
+				c.AttemptCount = 0
+			},
+			outcome: outcomeOwnerAccessRequired,
+			want:    ownerAccessRetryGap,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newForceHarness(nil, nil)
+			c := syncedQuietCandidate(tt.mutate)[0]
+
+			if got := h.rec.nextAttemptGap(c, tt.outcome); got != tt.want {
+				t.Errorf("nextAttemptGap(%q) = %v, want %v", tt.outcome, got, tt.want)
+			}
+		})
+	}
+}

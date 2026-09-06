@@ -52,7 +52,29 @@ func (s *SetupCompleter) configure(
 
 	s.resetSchedule(ctx, row, vin, &c)
 
-	if !s.deps.Repusher.ForceConfigRepushNow(ctx, c, token) {
+	applied, ownerAccessRequired := s.deps.Repusher.ForceConfigRepushNow(ctx, c, token)
+	if !applied {
+		// MYR-599: TESLA'S STANDING REFUSAL IS A STATE, NOT AN ERROR.
+		//
+		// Tesla's `fleet_telemetry_config` POST is owner-only, so a car linked
+		// by somebody who only DRIVES it is refused however correct everything
+		// else is — the key is paired, the car is awake, the acknowledgment is
+		// on record. Nothing failed on our side and nothing failed on the
+		// request, so a 502 with a retry affordance would be false twice over:
+		// it invites a retry that cannot succeed, and it hides an answer the
+		// client has copy for.
+		//
+		// This is the ordinary answer for the ONE route a driver-access car
+		// takes — §7.29's own best-effort push — and contracts v0.40.0 added the
+		// `owner_access_required` member for exactly it. `since` is now,
+		// because now is when the refusal was observed.
+		if ownerAccessRequired {
+			observed := s.now()
+			s.logger.Info("complete-setup: Tesla refused to configure this VIN for this authorization",
+				slog.String("event", "setup_complete_owner_access_required"),
+				slog.String("vehicle_id", row.ID), slog.String("vin", vin))
+			return *setupStateAt(SetupStateOwnerAccessRequired, observed, observed), nil
+		}
 		// forceRepush has already logged the failure — including the loud
 		// UNCONFIGURED event when the delete landed and the create did not —
 		// and scheduled the repair. Saying `configuring` here would claim a

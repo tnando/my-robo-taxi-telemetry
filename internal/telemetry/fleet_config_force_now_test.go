@@ -20,7 +20,7 @@ func TestForceConfigRepushNowIsTheSameAction(t *testing.T) {
 	h := newForceHarness(nil, nil)
 	c := syncedQuietCandidate(nil)[0]
 
-	if !h.rec.ForceConfigRepushNow(context.Background(), c, "tok") {
+	if applied, _ := h.rec.ForceConfigRepushNow(context.Background(), c, "tok"); !applied {
 		t.Fatal("ForceConfigRepushNow reported not-applied on a healthy push")
 	}
 
@@ -73,7 +73,7 @@ func TestForceConfigRepushNowReportsFailureHonestly(t *testing.T) {
 			h := newForceHarness(nil, tt.setup)
 			c := syncedQuietCandidate(nil)[0]
 
-			if h.rec.ForceConfigRepushNow(context.Background(), c, "tok") {
+			if applied, _ := h.rec.ForceConfigRepushNow(context.Background(), c, "tok"); applied {
 				t.Fatal("reported applied on a failed create")
 			}
 			if len(h.attempts.forced) != 1 || h.attempts.forced[0].outcome != tt.wantOutcome {
@@ -97,7 +97,7 @@ func TestForceConfigRepushNowToleratesAMissingConfig(t *testing.T) {
 		c.ForcedRepushAt = time.Time{}
 	})[0]
 
-	if !h.rec.ForceConfigRepushNow(context.Background(), c, "tok") {
+	if applied, _ := h.rec.ForceConfigRepushNow(context.Background(), c, "tok"); !applied {
 		t.Fatal("a 404 on the delete must not fail the escalation")
 	}
 	if h.writer.calls != 1 {
@@ -123,7 +123,7 @@ func TestForceConfigRepushNowRefusesAnUnacknowledgedDriverCar(t *testing.T) {
 	c := syncedQuietCandidate(nil)[0]
 	c.PendingOwnerAck = true
 
-	if h.rec.ForceConfigRepushNow(context.Background(), c, "tok") {
+	if applied, _ := h.rec.ForceConfigRepushNow(context.Background(), c, "tok"); applied {
 		t.Fatal("ForceConfigRepushNow reported applied for a car awaiting the owner-approval acknowledgment")
 	}
 

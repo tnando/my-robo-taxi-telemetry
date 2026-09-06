@@ -68,6 +68,20 @@ const (
 	// resolved or refreshed, so neither config pushes nor commands can reach
 	// the car. ACTION: the owner reconnects their Tesla account.
 	SetupStateTokenFailed = "token_failed"
+	// SetupStateOwnerAccessRequired — Tesla REFUSED to create this car's
+	// fleet-telemetry config because the account that linked it holds DRIVER
+	// access, and Tesla's Fleet API lets only the vehicle's OWNER account create
+	// one (MYR-599, contracts v0.40.0). ACTION: NOT "reconnect your Tesla
+	// account" — that is SetupStateTokenFailed's action and here it would send a
+	// person round a loop that cannot end. The only thing that works is for the
+	// car's Tesla OWNER to add it in MyRoboTaxi under their own account and
+	// share it with the driver.
+	//
+	// It replaced a report of `token_failed` for this condition. That was the
+	// honest choice while v0.39.0 was the newest contract — "this Tesla
+	// authorization cannot do this" is true of both — but its copy sends the
+	// wrong person to fix the wrong thing, and v0.40.0 added the member.
+	SetupStateOwnerAccessRequired = "owner_access_required"
 	// SetupStateAwaitingOwnerAcknowledgment — this car was linked by someone
 	// Tesla reports as a DRIVER of it rather than its owner, and the platform
 	// will not configure telemetry until that person acknowledges the owner
@@ -245,25 +259,39 @@ func deriveSetupState(
 
 	case setupOutcomeOwnerAccess:
 		// MYR-599. Tesla refused to configure this VIN for this account
-		// (`404 not_found` on the config push for a car the same token can
+		// (`404 … not_found` on the config push for a car the same token can
 		// LIST). Gated on streaming for the same reason token_failed is: the
 		// refusal concerns a config push, not an mTLS stream that is already
 		// up, and a car happily reporting its position needs no setup card.
 		//
-		// REPORTED AS token_failed ON THE WIRE, and that is a deliberate,
-		// documented compromise rather than a shrug. Contracts v0.39.0 adds
-		// exactly ONE new member (`awaiting_owner_acknowledgment`) and inventing
-		// a second server-side would be the contract drift contract-guard
-		// exists to block. Of the members that DO exist, `token_failed` is the
-		// only honest class — "this Tesla authorization cannot do this" — and
-		// for the two commonest causes (a revoked grant, an unlinked account)
-		// its copy, "reconnect your Tesla account", is also the right advice.
-		// For the driver-access cause the copy is imprecise, the client has
-		// `teslaAccessType: "driver"` on the same row to qualify it, and the
-		// PR records the gap: a dedicated member is a contracts decision, not
-		// one this file may take.
+		// THE SPLIT BELOW IS THE CONTRACT'S TRUST RULE, NOT A PREFERENCE.
+		// Tesla's 404 is GENERIC — the identical answer comes back for a
+		// revoked grant and for a VIN genuinely absent from the account — so
+		// contracts v0.40.0 permits `owner_access_required` only on POSITIVE
+		// EVIDENCE, and the driver-access row is that evidence. With a row, the
+		// refusal has a cause we can name and an action that works (the car's
+		// real owner adds it under their own account). Without one, the honest
+		// class is still `token_failed`, whose copy — reconnect your Tesla
+		// account — is right for a revoked grant, which is what a bare 404
+		// overwhelmingly is.
+		//
+		// A car reaching here with a driver row is necessarily ACKNOWLEDGED:
+		// the unacknowledged arm returned far above, and nothing pushes at a car
+		// whose gate is shut, so no push could have produced this label. That is
+		// the second half of the contract's evidence rule, satisfied by
+		// construction rather than by a second check.
+		//
+		// The third condition v0.40.0 names — the VIN still appearing in the
+		// same token's vehicle list — is established at LINK time, which is the
+		// only moment this server lists a fleet and the moment the driver row
+		// was written from. It is not re-verified per push, and re-listing on
+		// every refusal would spend a Tesla read to re-answer a question whose
+		// answer created the row we are already reading.
 		if streaming {
 			return nil
+		}
+		if d.Present {
+			return setupStateAt(SetupStateOwnerAccessRequired, s.LastAttemptAt, now)
 		}
 		return setupStateAt(SetupStateTokenFailed, s.LastAttemptAt, now)
 

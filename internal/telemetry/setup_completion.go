@@ -87,7 +87,7 @@ type setupProbeReader interface {
 // forcedConfigRepusher is MYR-489's escalation, invoked on demand. Satisfied by
 // *FleetConfigReconciler; nil when the deployment has no signing proxy.
 type forcedConfigRepusher interface {
-	ForceConfigRepushNow(ctx context.Context, c FleetConfigCandidate, accessToken string) bool
+	ForceConfigRepushNow(ctx context.Context, c FleetConfigCandidate, accessToken string) (applied, ownerAccessRequired bool)
 }
 
 // SetupCompleterDeps bundles the collaborators so the struct stays under the

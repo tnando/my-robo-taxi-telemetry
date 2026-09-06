@@ -146,7 +146,39 @@ func (r *FleetConfigReconciler) inHotEpoch(c FleetConfigCandidate) bool {
 // backoffForOutcome has the ladder's length subtracted, so the pass after the
 // ladder waits one plain Interval, the next two, and so on — the same sequence a
 // car that had never been hot would have seen.
+// ownerAccessRetryGap is how long a vehicle waits after Tesla's standing
+// owner-only refusal (MYR-599).
+//
+// A FLAT DAY, AND DELIBERATELY NOT A LADDER. Every other outcome in this
+// reconciler is retried on a doubling backoff because every other outcome
+// describes something that might have changed since: a car asleep, a key not yet
+// paired, a transient upstream error. `owner_access_required` describes an
+// answer that CANNOT change until either Tesla ships DRIVER-token config
+// creation — announced as "coming soon" in March 2024 and still unshipped as of
+// 2026-09-05 — or the car's real owner adds it under their own account. Neither
+// happens on a schedule this process can predict.
+//
+// So the doubling ladder buys nothing and costs something: it would climb to
+// MaxBackoff over a handful of passes, which is the same practical answer with
+// extra Tesla traffic on the way there, and it would make the interval depend on
+// an attempt count that says nothing about the condition. A flat day is the
+// honest reading — check again tomorrow, in case the world changed — and it is
+// short enough that a car un-blocked by either route starts streaming the next
+// day without an operator.
+//
+// It deliberately IGNORES the hot pairing ladder. A hot epoch means "somebody
+// just proved the virtual key is paired, so try hard"; pairing is not what is
+// wrong here, and hammering a refusal because a person tapped unlock would be
+// the wrong response to the right signal.
+const ownerAccessRetryGap = 24 * time.Hour
+
 func (r *FleetConfigReconciler) nextAttemptGap(c FleetConfigCandidate, outcome string) time.Duration {
+	// MYR-599 — checked BEFORE the hot-epoch branch, because the hot ladder's
+	// premise (pairing evidence means try harder) does not apply to a standing
+	// refusal that has nothing to do with pairing.
+	if outcome == outcomeOwnerAccessRequired {
+		return ownerAccessRetryGap
+	}
 	if !r.inHotEpoch(c) {
 		return r.cfg.backoffForOutcome(c.AttemptCount, outcome)
 	}

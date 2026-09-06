@@ -33,6 +33,7 @@ func (r *FleetConfigReconciler) push(
 		// nothing was configured — but they earn different schedule labels
 		// because they mean different things to the card and to the next pass.
 		if isOwnerAccessRefusal(err) {
+			out.OwnerAccessRefusals++
 			// Tesla will not configure this VIN for this authorization. Logged
 			// at WARN with the whole shape of the answer, because the operator
 			// question this raises ("is this a driver-access car, or a grant

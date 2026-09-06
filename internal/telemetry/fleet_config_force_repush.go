@@ -141,6 +141,24 @@ func (r *FleetConfigReconciler) forceRepush(
 
 	result, err := r.deps.Writer.PushTelemetryConfig(callCtx, accessToken, r.request(c.VIN))
 	if err != nil || SkipErrorFor(result, c.VIN) != nil {
+		// MYR-599 review finding G: THIS DOOR HAD TO LEARN THE SAME LESSON THE
+		// ORDINARY PUSH LEARNED, and it is the door that mattered most.
+		//
+		// `push` already classified Tesla's owner-only refusal out of the
+		// transient bucket; this one did not, so it recorded
+		// `forced_repush_failed` — which the derivation reads as `configuring`
+		// for a whole 24-hour window. That is precisely the slow lie MYR-491's
+		// honesty bar exists against, and it was reachable on the ONE route a
+		// driver-access car actually takes: the §7.29 acknowledge endpoint's own
+		// best-effort push runs through ForceConfigRepushNow, not through
+		// `push`. So the first thing a driver saw after consenting was a card
+		// saying "connecting…" about a car Tesla had just refused outright.
+		if isOwnerAccessRefusal(err) {
+			out.PushFailures++
+			out.OwnerAccessRefusals++
+			r.recordOwnerAccessRefusedForce(schedCtx, c, vin, deleted, err)
+			return
+		}
 		r.recordFailedForce(schedCtx, c, vin, deleted, err)
 		out.PushFailures++
 		return
@@ -211,4 +229,47 @@ func (r *FleetConfigReconciler) recordForce(
 			slog.String("outcome", outcome),
 			slog.String("error", err.Error()))
 	}
+}
+
+// recordOwnerAccessRefusedForce handles a forced re-push Tesla refused outright
+// (MYR-599).
+//
+// IT IS A DIFFERENT EVENT FROM recordFailedForce EVEN THOUGH THE CAR IS IN THE
+// SAME PHYSICAL STATE, and the difference is what a retry is worth. A failed
+// force may have left the car unconfigured and the ordinary push path can repair
+// that within one interval. This one may ALSO have left it unconfigured — the
+// delete is permitted for a driver token even though the create is not — and
+// nothing we do will repair it: Tesla will refuse the create every time until
+// either DRIVER-token config POST ships or the car's real owner adds it under
+// their own account.
+//
+// So the schedule records the standing refusal rather than a transient failure,
+// which is what lets §7.0 / §7.1 say `owner_access_required` instead of decaying
+// into `configuring`, and what puts the vehicle on the long fixed back-off
+// rather than a doubling ladder against an answer that cannot change.
+//
+// The delete-succeeded case still earns ERROR: whatever the cause, a car we left
+// with no config is the one state this feature can produce that is worse than
+// doing nothing, and an operator should be able to grep for it.
+func (r *FleetConfigReconciler) recordOwnerAccessRefusedForce(
+	ctx context.Context, c FleetConfigCandidate, vin string, deleted bool, err error,
+) {
+	msg := "fleet-config reconcile: forced re-push refused — Tesla will not configure this VIN for this authorization (retrying will not help)"
+	level := slog.LevelWarn
+	if deleted {
+		msg = "fleet-config reconcile: forced re-push DELETED the config and Tesla refused to recreate it — vehicle is UNCONFIGURED and cannot be reconfigured by this account"
+		level = slog.LevelError
+	}
+	r.logger.Log(ctx, level, msg,
+		slog.String("event", "fleet_config_owner_access_required"),
+		slog.String("vehicle_id", c.VehicleID),
+		slog.String("vin", vin),
+		slog.Bool("config_deleted", deleted),
+		slog.String("error", redactedErrorText(err)))
+
+	// recordForce rather than reschedule, so the epoch's escalation budget is
+	// still stamped as spent: an unstamped budget is a budget that can be spent
+	// again, and re-forcing against a standing refusal would delete a config
+	// once per epoch for nothing.
+	r.recordForce(ctx, c, r.now().Add(ownerAccessRetryGap), outcomeOwnerAccessRequired)
 }

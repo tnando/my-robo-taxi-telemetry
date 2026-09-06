@@ -80,17 +80,21 @@ func (f *fakeSetupProbe) counts() (wake, status int) {
 // row on the re-read than on the first read, which is how the
 // reconciler-raced-us case is exercised.
 type fakeSnapshotReader struct {
-	mu    sync.Mutex
-	rows  []VehicleSnapshotRow
-	err   error
-	calls int
+	mu   sync.Mutex
+	rows []VehicleSnapshotRow
+	err  error
+	// errAfter, when > 0, makes the reader succeed for that many calls and fail
+	// with err from then on. It is how a test builds the MYR-599 case where the
+	// acknowledgment COMMITTED and only the post-stamp re-read failed.
+	errAfter int
+	calls    int
 }
 
 func (f *fakeSnapshotReader) GetByID(_ context.Context, _ string) (VehicleSnapshotRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
-	if f.err != nil {
+	if f.err != nil && f.calls > f.errAfter {
 		return VehicleSnapshotRow{}, f.err
 	}
 	idx := f.calls - 1
@@ -104,14 +108,19 @@ func (f *fakeSnapshotReader) GetByID(_ context.Context, _ string) (VehicleSnapsh
 type fakeRepusher struct {
 	mu      sync.Mutex
 	applied bool
-	calls   int
-	got     []FleetConfigCandidate
+	// ownerAccess makes the fake report Tesla's standing owner-only refusal
+	// (MYR-599) rather than a plain not-applied. The two are different answers:
+	// one is a 502 with a retry affordance, the other is a 200 carrying
+	// `owner_access_required`.
+	ownerAccess bool
+	calls       int
+	got         []FleetConfigCandidate
 	// onPush runs inside the push, so a test can observe what had and had not
 	// happened yet at that instant (MYR-529 ordering).
 	onPush func()
 }
 
-func (f *fakeRepusher) ForceConfigRepushNow(_ context.Context, c FleetConfigCandidate, _ string) bool {
+func (f *fakeRepusher) ForceConfigRepushNow(_ context.Context, c FleetConfigCandidate, _ string) (bool, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -119,7 +128,7 @@ func (f *fakeRepusher) ForceConfigRepushNow(_ context.Context, c FleetConfigCand
 	if f.onPush != nil {
 		f.onPush()
 	}
-	return f.applied
+	return f.applied, f.ownerAccess
 }
 
 func (f *fakeRepusher) count() int {
@@ -286,6 +295,25 @@ func TestCompleteSetupStates(t *testing.T) {
 				h.repusher.applied = false
 			},
 			wantErr:    ErrSetupPushFailed,
+			wantWakes:  1,
+			wantPushes: 1,
+		},
+		{
+			// MYR-599 finding G. Tesla's config POST is owner-only, so a car
+			// linked by somebody who only DRIVES it is refused however correct
+			// everything else is — key paired, car awake, acknowledgment on
+			// record. Nothing failed, so a 502 would be false twice over: it
+			// invites a retry that cannot succeed, and it hides the one answer
+			// the client has copy for. This is the ordinary outcome of the ONE
+			// route a driver-access car takes (§7.29's own best-effort push),
+			// and it must NEVER be `configuring`.
+			name: "Tesla's owner-only refusal is a state, not an error",
+			row:  setupRow(nil),
+			setup: func(h *setupHarness) {
+				h.repusher.applied = false
+				h.repusher.ownerAccess = true
+			},
+			wantState:  SetupStateOwnerAccessRequired,
 			wantWakes:  1,
 			wantPushes: 1,
 		},
