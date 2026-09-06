@@ -431,3 +431,98 @@ func TestOwnerApprovalHandlerStoreFailurePushesNothing(t *testing.T) {
 		t.Errorf("completer calls = %d, want 0 — nothing may be pushed on an unrecorded consent", got)
 	}
 }
+
+// MYR-599 REVIEW FINDING H: §7.29 MUST NOT 500 FOR A REQUEST THAT DURABLY
+// SUCCEEDED.
+//
+// The acknowledgment is committed by the time the post-stamp re-read runs — the
+// row is stamped, the audit row is written, the gate is open. If that re-read
+// fails, a 500 tells the client the request failed when it did not. The client's
+// only sensible response to a 500 is to keep showing the acknowledgment sheet
+// for a car whose consent is already on record, and to retry into a call that,
+// being idempotent, will record nothing and can fail here again.
+//
+// The honest answer is a 200 carrying the state that can still be derived: the
+// row in hand with the acknowledgment applied. It must NEVER be `configuring`,
+// because no push ran on this path — the completer is deliberately not invoked
+// once the row is unreadable.
+func TestOwnerApprovalHandlerAnswers200WhenTheRereadFails(t *testing.T) {
+	tests := []struct {
+		name      string
+		row       VehicleSnapshotRow
+		wantState string
+		because   string
+	}{
+		{
+			name: "a car seeded awaiting_owner_ack answers owner_access_required",
+			row: driverRow(func(r *VehicleSnapshotRow) {
+				r.SetupSchedule = VehicleSetupSchedule{
+					Present: true, LastOutcome: outcomeAwaitingOwnerAck,
+				}
+			}),
+			wantState: SetupStateOwnerAccessRequired,
+			because: "the ordinary case — the seed label makes no claim once the gate is open, " +
+				"and Tesla's config POST is owner-only, so a refusal is exactly what the push " +
+				"we could not run would have met",
+		},
+		{
+			name: "a pre-existing awaiting_virtual_key schedule is answered as it stands",
+			row: driverRow(func(r *VehicleSnapshotRow) {
+				r.SetupSchedule = VehicleSetupSchedule{
+					Present:       true,
+					LastOutcome:   outcomeAwaitingKey,
+					LastAttemptAt: setupNow.Add(-time.Hour),
+				}
+			}),
+			wantState: SetupStateAwaitingVirtualKey,
+			because: "the schedule's own evidence survives the failed re-read and is a claim " +
+				"about a push that really did happen earlier",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Succeeds for the authorize read, fails for the post-stamp re-read.
+			reader := &fakeSnapshotReader{
+				rows:     []VehicleSnapshotRow{tc.row},
+				err:      errors.New("db down"),
+				errAfter: 1,
+			}
+			rec := &fakeApprovalRecorder{recorded: true}
+			comp := &fakeCompleter{state: SetupState{State: SetupStateConfiguring}}
+
+			w := httptest.NewRecorder()
+			newApprovalHandler(reader, rec, comp).ServeHTTP(w, approvalRequest("veh-1", validAckBody))
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 — the acknowledgment COMMITTED; reporting a "+
+					"failure strands the one piece of copy this feature exists for (body %s)",
+					w.Code, w.Body.String())
+			}
+			var body setupCompletionResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("decode body: %v", err)
+			}
+			if body.SetupState.State != tc.wantState {
+				t.Errorf("setupState.state = %q, want %q (%s)",
+					body.SetupState.State, tc.wantState, tc.because)
+			}
+			if body.SetupState.State == SetupStateAwaitingOwnerAcknowledgment {
+				t.Error("answered awaiting_owner_acknowledgment to the very call that satisfied " +
+					"it — the row in hand is pre-stamp, and the acknowledgment must be applied " +
+					"to it before deriving anything")
+			}
+			if body.SetupState.State == SetupStateConfiguring {
+				t.Error("answered `configuring` with no fresh row — nothing was pushed on this " +
+					"path, so a progress claim is fabricated")
+			}
+			if got := comp.calls.Load(); got != 0 {
+				t.Errorf("completer calls = %d, want 0 — the push paths gate on a row, and the "+
+					"row is exactly what we just failed to read", got)
+			}
+			if body.VehicleID != "veh-1" {
+				t.Errorf("vehicleId = %q, want veh-1", body.VehicleID)
+			}
+		})
+	}
+}

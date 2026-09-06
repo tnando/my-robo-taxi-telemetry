@@ -237,14 +237,28 @@ func (h *OwnerApprovalHandler) completeSetup(
 	if recorded || row.DriverAccess.PendingAcknowledgment() {
 		fresh, err := h.vehicles.GetByID(ctx, row.ID)
 		if err != nil {
-			// The acknowledgment is committed; we simply cannot see its effect.
-			// Reporting a 500 would invite a retry that is safe but pointless,
-			// and reporting the stale state would be a lie about the gate. The
-			// truthful minimum is the state we can still derive honestly.
-			h.logger.Error("acknowledge-owner-approval: recorded, but the vehicle could not be re-read",
+			// THE COMMENT ABOVE THIS BRANCH USED TO SAY THE RIGHT THING AND THE
+			// CODE DID THE OPPOSITE (MYR-599 review finding H). The
+			// acknowledgment IS COMMITTED — it survived, it is durable, the
+			// audit row is written — and we simply cannot see its effect. A 500
+			// tells the client the request failed when it succeeded, and invites
+			// a retry which, being idempotent, will record nothing and can
+			// perfectly well fail here again. It also strands the ONE piece of
+			// copy this feature exists for: a client that reads a 500 keeps
+			// showing the acknowledgment sheet for a car whose consent is
+			// already on record.
+			//
+			// So: 200, with the best state that can still be derived honestly.
+			// Deliberately WITHOUT running the completer, which would push at a
+			// car we can no longer read — the push paths gate on a row, and the
+			// row is what we just failed to get.
+			h.logger.Error("acknowledge-owner-approval: recorded, but the vehicle could not be re-read (answering from the pre-push derivation)",
 				slog.String("vehicle_id", row.ID),
 				slog.String("error", err.Error()))
-			h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
+			h.writeJSON(w, http.StatusOK, setupCompletionResponse{
+				VehicleID:  row.ID,
+				SetupState: h.stateWithoutFreshRow(row),
+			})
 			return
 		}
 		row = fresh
@@ -261,6 +275,45 @@ func (h *OwnerApprovalHandler) completeSetup(
 	}
 
 	h.writeJSON(w, http.StatusOK, setupCompletionResponse{VehicleID: row.ID, SetupState: state})
+}
+
+// stateWithoutFreshRow derives the honest answer for a request whose
+// acknowledgment committed but whose vehicle could not be re-read.
+//
+// IT WORKS FROM THE ROW IN HAND WITH THE ACKNOWLEDGMENT APPLIED. That row was
+// fetched BEFORE the stamp, so its gate still reads shut; clearing it is not a
+// guess but the one thing this request definitely changed, and leaving it would
+// answer `awaiting_owner_acknowledgment` to the very call that satisfied it.
+// Everything else — the schedule row, the status, the freshness — is exactly as
+// truthful as it was a few milliseconds ago.
+//
+// `configuring` IS NOT AN ALLOWED ANSWER HERE, and that is the constraint that
+// shapes the fallback. Every push-shaped state is a claim about a push, and no
+// push has run — the completer is deliberately not invoked on this path. The
+// ordinary derivation can only produce one if the PRE-EXISTING schedule already
+// carried the evidence for it, in which case it is a claim about a push that
+// really did happen earlier, which is fine.
+//
+// When the derivation makes no claim at all — the common case, because a car
+// seeded `awaiting_owner_ack` yields exactly that once the gate is open — the
+// answer is `owner_access_required`. That is not a fabrication: this branch is
+// reachable only for a car carrying a driver-access row, and Tesla's config POST
+// is owner-only, so a refusal is what the push we could not run would have met.
+// It is also the answer §7.29 gives on its ordinary successful path, so a client
+// sees the same card whether or not the re-read happened to work.
+func (h *OwnerApprovalHandler) stateWithoutFreshRow(row VehicleSnapshotRow) SetupState {
+	now := h.now()
+	acknowledged := row.DriverAccess
+	if acknowledged.Present && acknowledged.AcknowledgedAt.IsZero() {
+		acknowledged.AcknowledgedAt = now
+	}
+	if st := deriveSetupState(now, row.Status, row.LastUpdated, row.SetupSchedule, acknowledged); st != nil {
+		return *st
+	}
+	if isStreamingNow(row.Status, row.LastUpdated, now) {
+		return *setupStateAt(SetupStateStreaming, row.LastUpdated, now)
+	}
+	return *setupStateAt(SetupStateOwnerAccessRequired, now, now)
 }
 
 // decodeVersion reads and validates the body.
