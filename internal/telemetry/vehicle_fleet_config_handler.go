@@ -92,6 +92,26 @@ func (h *VehicleFleetConfigHandler) handle(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// MYR-599: the consent gate, and it guards the PUSH only. A driver whose
+	// acknowledgment is still outstanding may perfectly well READ the config
+	// status of the car they linked — the GET makes no change to anybody's
+	// property and answering it is how the client learns there is no config —
+	// so the gate sits inside the `push` branch rather than above this line.
+	//
+	// 409, matching the reconnect endpoint's refusal for the same reason: the
+	// caller is not forbidden and nothing failed; the request does not apply to
+	// this vehicle yet, and §7.24 is the specific thing that changes that.
+	if push && row.DriverAccess.PendingAcknowledgment() {
+		h.logger.Info("vehicle fleet config: push refused, driver-access car awaiting the owner-approval acknowledgment",
+			slog.String("event", "fleet_config_awaiting_owner_ack"),
+			slog.String("vehicle_id", vehicleID),
+			slog.String("user_id", userID),
+		)
+		h.core.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
+			"confirm the owner approved adding this car before it can be configured")
+		return
+	}
+
 	teslaTok, ok := h.core.resolveTeslaToken(ctx, w, userID)
 	if !ok {
 		return

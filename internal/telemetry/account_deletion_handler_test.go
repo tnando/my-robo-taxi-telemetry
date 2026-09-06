@@ -198,6 +198,12 @@ type fakeAccountData struct {
 	tombstones        *fakeTombstoneTable
 	tombstonesErr     error
 
+	// MYR-599 step 8f — the driver-access rows. Counter-only, like every
+	// sibling but 8e: there is no shared table to model here because the
+	// teardown removes these rows inside the vehicle's own transaction.
+	driverAccessDeleted int
+	driverAccessErr     error
+
 	membershipsDeleted int
 	membershipsErr     error
 
@@ -334,6 +340,20 @@ func (f *fakeAccountData) DeleteRemovedVehicleTombstones(_ context.Context, id s
 	}
 	n := f.tombstonesDeleted
 	f.tombstonesDeleted = 0 // idempotent: a re-run deletes nothing
+	return n, nil
+}
+
+// MYR-599 step 8f. Shaped exactly like its 8e neighbour above — noted, scoped,
+// and idempotent on a re-run — so the sequence test's ordering and
+// re-runnability assertions cover it without a special case.
+func (f *fakeAccountData) DeleteVehicleDriverAccess(_ context.Context, id string) (int, error) {
+	f.note("delete_vehicle_driver_access")
+	f.seenIDs = append(f.seenIDs, id)
+	if f.driverAccessErr != nil {
+		return 0, f.driverAccessErr
+	}
+	n := f.driverAccessDeleted
+	f.driverAccessDeleted = 0 // idempotent: a re-run deletes nothing
 	return n, nil
 }
 
@@ -545,6 +565,12 @@ func TestAccountDeletion_OwnerWithSharesRunsEveryStepInOrder(t *testing.T) {
 		// a table the teardown then refills. See
 		// TestAccountDeletion_RemovedVehicleTombstonesGoAfterTheTeardown.
 		"delete_removed_vehicle_tombstones",
+		// MYR-599 step 8f. Sits directly after 8e because the two are the only
+		// POSITION-CONSTRAINED members of the family — both delete rows the
+		// per-vehicle teardown (step 3) also touches, so both must run after
+		// it. Keeping them adjacent is what stops a later insertion drifting
+		// one of them above step 3.
+		"delete_vehicle_driver_access",
 		"revoke_tokens",
 		"delete_identity",
 	}
@@ -1029,7 +1055,7 @@ func TestAccountDeletion_ConvergedScopeRunsEveryStepOverEveryID(t *testing.T) {
 
 	// Every SQL step saw both ids. Counting per step rather than checking the
 	// set as a whole is what catches one straggler still keyed on the subject.
-	const sqlSteps = 11 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tombstones, tokens
+	const sqlSteps = 12 // drives, shares, labels, memberships, devices, places, name confirmation, activity, keepalive, tombstones, driver access, tokens
 	if len(data.seenIDs) != sqlSteps*2 {
 		t.Fatalf("steps ran on %d ids, want %d (every step over both)", len(data.seenIDs), sqlSteps*2)
 	}

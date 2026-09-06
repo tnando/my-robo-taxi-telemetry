@@ -25,7 +25,11 @@ type FleetConfigHandler struct {
 	refresher TeslaTokenRefresher // nil disables auto-refresh
 	updater   TeslaTokenUpdater   // nil disables DB updates after refresh
 	rotator   TeslaTokenRotator   // nil disables serialization of a refresh
-	fleet     *FleetAPIClient
+	// driverAccess is the MYR-599 consent gate for the VIN-keyed push route.
+	// Nil means unwired — see WithDriverAccessGate for why that is a dev/test
+	// configuration rather than a supported production one.
+	driverAccess DriverAccessGate
+	fleet        *FleetAPIClient
 	endpoint  EndpointConfig
 	logger    *slog.Logger
 }
@@ -126,6 +130,10 @@ func (h *FleetConfigHandler) handlePush(w http.ResponseWriter, r *http.Request) 
 // already-authorized VIN. Shared by the VIN-keyed path (handlePush) and the
 // vehicleId-keyed path (VehicleFleetConfigHandler).
 func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWriter, vin string, teslaTok TeslaToken) {
+	if !h.driverAccessAllows(ctx, w, vin) {
+		return
+	}
+
 	var ca *string
 	if h.endpoint.CA != "" {
 		ca = &h.endpoint.CA
@@ -175,6 +183,47 @@ func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWrit
 		Status: "configured",
 		VIN:    redactVIN(vin),
 	})
+}
+
+// driverAccessAllows is the MYR-599 consent gate in front of every push through
+// this handler. Returns false having already written the response.
+//
+// FAIL CLOSED ON THE LOOKUP ERROR, which is the opposite of how most
+// best-effort reads in this package behave and is the whole point: every other
+// "we could not tell" here costs a quieter card, while this one would spend
+// somebody else's consent. A 503 says truthfully that the server could not
+// establish whether it may act, and it is retriable.
+//
+// A NIL GATE PROCEEDS, and that asymmetry is deliberate rather than an
+// oversight: it is the same guard shape the rest of this package uses for a
+// dependency that does not exist in a proxy-less dev process. It is logged at
+// WARN on every push so the configuration cannot be silently wrong in
+// production, and the route a real client can reach (the vehicleId-keyed
+// sibling) gates unconditionally on its own row regardless of this field.
+func (h *FleetConfigHandler) driverAccessAllows(ctx context.Context, w http.ResponseWriter, vin string) bool {
+	if h.driverAccess == nil {
+		h.logger.Warn("fleet config: no driver-access gate wired; pushing without the MYR-599 acknowledgment check",
+			slog.String("vin", redactVIN(vin)))
+		return true
+	}
+	pending, err := h.driverAccess.PendingDriverAcknowledgmentByVIN(ctx, vin)
+	if err != nil {
+		h.logger.Error("fleet config: could not read the driver-access gate; refusing the push",
+			slog.String("vin", redactVIN(vin)),
+			slog.String("error", err.Error()))
+		h.writeError(w, http.StatusServiceUnavailable, wserrors.ErrCodeServiceUnavailable,
+			"could not verify this vehicle's approval status — try again")
+		return false
+	}
+	if pending {
+		h.logger.Info("fleet config: push refused, driver-access car awaiting the owner-approval acknowledgment",
+			slog.String("event", "fleet_config_awaiting_owner_ack"),
+			slog.String("vin", redactVIN(vin)))
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
+			"confirm the owner approved adding this car before it can be configured")
+		return false
+	}
+	return true
 }
 
 // verifyOwnership checks that userID owns the vehicle identified by vin.

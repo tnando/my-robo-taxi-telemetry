@@ -19,8 +19,12 @@ func TestDeriveSetupState(t *testing.T) {
 		status      string
 		lastUpdated time.Time
 		sched       VehicleSetupSchedule
-		wantState   string // "" == no claim (nil)
-		wantSince   time.Time
+		// driver is the MYR-599 go_vehicle_driver_access row. The zero value is
+		// owner access, which is every case written before v0.39.0 and is why
+		// the whole existing table needed no edit.
+		driver    VehicleDriverAccess
+		wantState string // "" == no claim (nil)
+		wantSince time.Time
 	}{
 		{
 			name:        "no schedule row makes no claim",
@@ -240,11 +244,125 @@ func TestDeriveSetupState(t *testing.T) {
 			},
 			wantState: "",
 		},
+
+		// --- MYR-599: the driver-access consent gate ------------------------
+		//
+		// Each case below pins one leg of the PRECEDENCE RULE contracts v0.39.0
+		// states: `awaiting_owner_acknowledgment` sorts before every other
+		// member. They are written as the lie each would tell if the arm were
+		// moved down even one position.
+		{
+			// The lie: "no schedule row, so nothing to say" — a car whose
+			// best-effort seed write failed would go SILENT about the one thing
+			// its linker must do. This is why the arm is evaluated before the
+			// `!s.Present` short-circuit and not merely first in the switch.
+			name:        "unacknowledged driver car with NO schedule row still reports the gate",
+			status:      "offline",
+			lastUpdated: ago(time.Hour),
+			sched:       VehicleSetupSchedule{},
+			driver:      VehicleDriverAccess{Present: true, CreatedAt: ago(10 * time.Minute)},
+			wantState:   SetupStateAwaitingOwnerAcknowledgment,
+			wantSince:   ago(10 * time.Minute),
+		},
+		{
+			// The lie: "pair your virtual key". A driver who ALREADY paired
+			// (Tesla makes them do it in the car, with a keycard) would be sent
+			// back to do it again, and the acknowledgment sheet — the only
+			// thing that actually unblocks the car — would never appear.
+			name:        "the gate outranks awaiting_virtual_key",
+			status:      "offline",
+			lastUpdated: ago(time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeAwaitingKey,
+				LastAttemptAt: ago(time.Hour),
+			},
+			driver:    VehicleDriverAccess{Present: true, CreatedAt: ago(time.Hour)},
+			wantState: SetupStateAwaitingOwnerAcknowledgment,
+			wantSince: ago(time.Hour),
+		},
+		{
+			// The lie: "connecting…". Nothing has been pushed at this car and
+			// nothing will be, so a progress narration would run forever.
+			name:        "the gate outranks configuring",
+			status:      "offline",
+			lastUpdated: ago(time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeAwaitingKey,
+				LastAttemptAt: ago(time.Hour), SignedCommandAt: ago(time.Minute),
+			},
+			driver:    VehicleDriverAccess{Present: true, CreatedAt: ago(2 * time.Hour)},
+			wantState: SetupStateAwaitingOwnerAcknowledgment,
+			wantSince: ago(2 * time.Hour),
+		},
+		{
+			// The lie: "reconnect your Tesla account". The token is fine; the
+			// missing thing is somebody else's permission, and reconnecting
+			// would not produce it.
+			name:        "the gate outranks token_failed",
+			status:      "offline",
+			lastUpdated: ago(6 * time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeTokenFailed,
+				LastAttemptAt: ago(time.Hour),
+			},
+			driver:    VehicleDriverAccess{Present: true, CreatedAt: ago(3 * time.Hour)},
+			wantState: SetupStateAwaitingOwnerAcknowledgment,
+			wantSince: ago(3 * time.Hour),
+		},
+		{
+			// THE ASYMMETRY, and it is the case most likely to be broken by a
+			// later edit: an ACKNOWLEDGED driver car is, to the setup
+			// machinery, an ordinary car. The gate is transient; what stays
+			// different is `teslaAccessType`, which is not a setup fact and is
+			// derived elsewhere.
+			name:        "an ACKNOWLEDGED driver car falls through to the ordinary derivation",
+			status:      "offline",
+			lastUpdated: ago(time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeAwaitingKey,
+				LastAttemptAt: ago(time.Hour),
+			},
+			driver: VehicleDriverAccess{
+				Present:        true,
+				CreatedAt:      ago(3 * time.Hour),
+				AcknowledgedAt: ago(2 * time.Hour),
+			},
+			wantState: SetupStateAwaitingVirtualKey,
+			wantSince: ago(time.Hour),
+		},
+		{
+			// Tesla's owner-only refusal of the config push (see
+			// fleet_config_owner_access.go). It reports token_failed on the
+			// wire — the only honest member the v0.39.0 enum offers — rather
+			// than the `configuring` a transient push_failed would decay into.
+			name:        "an owner-access refusal reports token_failed, never configuring",
+			status:      "offline",
+			lastUpdated: ago(6 * time.Hour),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeOwnerAccess,
+				LastAttemptAt: ago(time.Hour), SignedCommandAt: ago(time.Minute),
+			},
+			wantState: SetupStateTokenFailed,
+			wantSince: ago(time.Hour),
+		},
+		{
+			// ...and it is gated on streaming exactly as token_failed is: a car
+			// happily reporting its position needs no setup card, whatever
+			// Tesla thinks of our authorization to reconfigure it.
+			name:        "an owner-access refusal makes no claim about a streaming car",
+			status:      "parked",
+			lastUpdated: ago(time.Minute),
+			sched: VehicleSetupSchedule{
+				Present: true, LastOutcome: setupOutcomeOwnerAccess,
+				LastAttemptAt: ago(time.Hour),
+			},
+			wantState: "",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := deriveSetupState(now, tt.status, tt.lastUpdated, tt.sched)
+			got := deriveSetupState(now, tt.status, tt.lastUpdated, tt.sched, tt.driver)
 
 			if tt.wantState == "" {
 				if got != nil {
@@ -274,7 +392,7 @@ func TestDeriveSetupStateNeverEmitsANonsenseSince(t *testing.T) {
 	t.Run("zero timestamp", func(t *testing.T) {
 		got := deriveSetupState(now, "offline", now, VehicleSetupSchedule{
 			Present: true, LastOutcome: setupOutcomeAwaitingKey,
-		})
+		}, VehicleDriverAccess{})
 		if got == nil || got.Since != wantNow {
 			t.Fatalf("got %+v, want since %q", got, wantNow)
 		}
@@ -284,7 +402,7 @@ func TestDeriveSetupStateNeverEmitsANonsenseSince(t *testing.T) {
 		got := deriveSetupState(now, "offline", now, VehicleSetupSchedule{
 			Present: true, LastOutcome: setupOutcomeAwaitingKey,
 			LastAttemptAt: now.Add(90 * time.Second),
-		})
+		}, VehicleDriverAccess{})
 		if got == nil || got.Since != wantNow {
 			t.Fatalf("got %+v, want since %q", got, wantNow)
 		}

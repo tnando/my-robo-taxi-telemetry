@@ -38,7 +38,11 @@
 
 package store
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+)
 
 // VehicleDriverAccess is one vehicle's go_vehicle_driver_access row, or the
 // absence of one. RAW STORAGE: both wire values derived from it — the
@@ -121,6 +125,45 @@ func (d *driverAccessScan) value() VehicleDriverAccess {
 		CreatedAt:      *d.createdAt,
 		AcknowledgedAt: derefTime(d.acknowledgedAt),
 	}
+}
+
+// queryPendingDriverAcknowledgmentByVIN answers, for one VIN, the question every
+// config-push path asks: is this car still waiting on its driver's
+// acknowledgment?
+//
+// KEYED BY VIN because its one caller is the VIN-keyed fleet-config push route,
+// which never resolves a cuid. An EXISTS rather than a row read: the caller
+// wants the gate, not the row, and the partial index
+// idx_go_vehicle_driver_access_pending covers exactly this predicate.
+//
+// A car with no "Vehicle" row, or with no driver-access row, yields false —
+// owner access, the ordinary case. That is the RIGHT default here and the only
+// place in this file where a false is not merely safe but correct: the caller
+// has already established that this VIN belongs to this user.
+const queryPendingDriverAcknowledgmentByVIN = `
+SELECT EXISTS (
+    SELECT 1
+    FROM go_vehicle_driver_access dva
+    JOIN "Vehicle" v ON v."id" = dva.vehicle_id
+    WHERE v."vin" = $1
+      AND dva.acknowledged_at IS NULL
+)`
+
+// PendingDriverAcknowledgmentByVIN reports whether the car with this VIN is a
+// driver-linked car whose owner-approval acknowledgment has not been recorded
+// (MYR-599).
+//
+// THE CALLER MUST FAIL CLOSED ON THE ERROR. This is a consent gate protecting
+// somebody who is not our user, so "we could not tell" must never be spent as
+// "go ahead" — unlike almost every other best-effort read in this package, whose
+// worst case is a quieter card. The signature returns the error rather than
+// folding it into the bool precisely so a caller cannot ignore it by accident.
+func (r *VehicleRepo) PendingDriverAcknowledgmentByVIN(ctx context.Context, vin string) (bool, error) {
+	var pending bool
+	if err := r.pool.QueryRow(ctx, queryPendingDriverAcknowledgmentByVIN, vin).Scan(&pending); err != nil {
+		return false, fmt.Errorf("VehicleRepo.PendingDriverAcknowledgmentByVIN(%s): %w", redactVIN(vin), err)
+	}
+	return pending, nil
 }
 
 // unacknowledgedDriverAccessGate is the SQL half of the same question

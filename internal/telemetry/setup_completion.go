@@ -141,6 +141,30 @@ func (s *SetupCompleter) Complete(ctx context.Context, row VehicleSnapshotRow) (
 	vin := redactVIN(row.VIN)
 	now := s.now()
 
+	// (0) THE CONSENT GATE (MYR-599), and it is step ZERO rather than a branch
+	// further down for the same reason the derivation evaluates its arm first:
+	// this endpoint's every remaining step ACTS ON A CAR — a wake, a
+	// Tesla-side status read, a signed config push at a real vehicle — and none
+	// of them may happen for a car whose owner has not been said to approve it.
+	//
+	// It sits BEFORE the streaming short-circuit deliberately. An unacknowledged
+	// driver car should not be streaming (nothing configured it), but if one
+	// somehow is — a config left over from a prior owner-access epoch, an
+	// operator push — reporting `streaming` here would tell the client the setup
+	// story is finished and retire the acknowledgment sheet, which is the ONE
+	// piece of copy this feature exists to show.
+	//
+	// It returns a STATE and not an error: nothing failed, and the client has a
+	// card to render and an action to offer. `since` is when the driver row was
+	// recorded, exactly as on the read surfaces, so the card cannot say a
+	// different age than the list it was opened from.
+	if row.DriverAccess.PendingAcknowledgment() {
+		s.logger.Info("complete-setup: driver-access car awaiting the owner-approval acknowledgment; nothing pushed",
+			slog.String("event", "setup_complete_awaiting_owner_ack"),
+			slog.String("vehicle_id", row.ID), slog.String("vin", vin))
+		return *setupStateAt(SetupStateAwaitingOwnerAcknowledgment, row.DriverAccess.CreatedAt, now), nil
+	}
+
 	// (1) Nothing to complete. Free, and the reason a repeat call after success
 	// costs no Tesla traffic at all.
 	if isStreamingNow(row.Status, row.LastUpdated, now) {
