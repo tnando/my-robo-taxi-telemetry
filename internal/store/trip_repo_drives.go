@@ -145,3 +145,67 @@ func (r *TripRepo) TripDrivesForUser(
 	}
 	return DriveListPage{Items: out, HasMore: hasMore}, nil
 }
+
+// VehicleDrivesInTripWindows is §7.2 AS SEEN BY A TRIP PARTICIPANT: the
+// vehicle's drives narrowed to the union of the windows that admit this caller.
+//
+// THE WINDOWS ARE RESOLVED HERE, from the caller's identity, never accepted
+// from the caller. A signature that took a window would let somebody on trip A
+// read trip B's drives by supplying B's dates.
+//
+// An empty window set returns an EMPTY PAGE rather than the whole history, and
+// that is structural rather than checked: the statement unnests two empty
+// arrays, so the EXISTS is false for every drive. The handler refuses before
+// reaching here; this is the second gate that survives a refactor of the first.
+func (r *TripRepo) VehicleDrivesInTripWindows(
+	ctx context.Context, userID, vehicleID string, cursor DriveListCursor, limit int,
+) (DriveListPage, error) {
+	const op = "trip.vehicle_drives"
+	start := time.Now()
+	defer func() { r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds()) }()
+
+	windows, err := r.TripDriveWindows(ctx, userID, vehicleID)
+	if err != nil {
+		return DriveListPage{}, err
+	}
+	froms := make([]time.Time, 0, len(windows))
+	tos := make([]time.Time, 0, len(windows))
+	for _, w := range windows {
+		froms = append(froms, w.From)
+		tos = append(tos, w.To)
+	}
+
+	probe := limit + 1
+	var rows pgx.Rows
+	if cursor.StartTime == "" || cursor.ID == "" {
+		rows, err = r.pool.Query(ctx, queryVehicleDrivesInTripWindows, vehicleID, froms, tos, probe)
+	} else {
+		rows, err = r.pool.Query(ctx, queryVehicleDrivesInTripWindowsCursor,
+			vehicleID, froms, tos, cursor.StartTime, cursor.ID, probe)
+	}
+	if err != nil {
+		r.metrics.IncQueryError(op)
+		return DriveListPage{}, fmt.Errorf("TripRepo.VehicleDrivesInTripWindows(vehicle=%s): %w", vehicleID, err)
+	}
+	defer rows.Close()
+
+	out := make([]DriveSummaryRow, 0, probe)
+	for rows.Next() {
+		d, scanErr := scanDriveSummary(rows, r.encryptor, r.logger, r.metrics)
+		if scanErr != nil {
+			r.metrics.IncQueryError(op)
+			return DriveListPage{}, fmt.Errorf("TripRepo.VehicleDrivesInTripWindows(vehicle=%s): %w", vehicleID, scanErr)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError(op)
+		return DriveListPage{}, fmt.Errorf("TripRepo.VehicleDrivesInTripWindows(vehicle=%s): rows: %w", vehicleID, err)
+	}
+
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	return DriveListPage{Items: out, HasMore: hasMore}, nil
+}

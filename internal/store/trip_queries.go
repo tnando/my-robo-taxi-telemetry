@@ -289,6 +289,8 @@ LIMIT 1`
 //
 // P1 CAPABILITY. The value is never logged beyond an 8-character prefix, never
 // echoed into a response, never placed in an error message.
+//
+//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
 const queryUpsertTripActivityToken = `
 INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token, sandbox)
 VALUES ($1, $2, $3, $4)
@@ -299,6 +301,8 @@ SET push_to_start_token = EXCLUDED.push_to_start_token,
 
 // queryDeleteTripActivityToken is the DELETE half. Idempotent: no row is the
 // same answer as one row removed, and the endpoint answers 204 either way.
+//
+//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
 const queryDeleteTripActivityToken = `
 DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
 
@@ -316,6 +320,8 @@ DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
 //
 // The live-share join still applies: a person whose grant was revoked loses the
 // drives with everything else.
+//
+//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
 const queryTripWindowsForUserVehicle = `
 SELECT t.starts_at, LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))
 FROM go_trip_participants p
@@ -360,6 +366,50 @@ WHERE "vehicleId" = $1
   AND "startTime"::timestamptz <= $3
   AND ("startTime", "id") < ($4, $5)
 ORDER BY "startTime" DESC, "id" DESC
+LIMIT $6`
+
+// queryVehicleDrivesInTripWindows is the §7.2 list AS SEEN BY A TRIP
+// PARTICIPANT: the vehicle's drives, narrowed to the union of the windows that
+// admit this caller.
+//
+// THE WINDOWS ARRIVE AS TWO PARALLEL ARRAYS and are unnested into a derived
+// table, rather than being assembled into an OR-chain of literals in Go. Two
+// reasons, and the second is the binding one: the statement stays a `const`
+// with a fixed parameter count, so it cannot be built wrong for a caller with
+// three windows; and there is no string concatenation anywhere near an
+// access-control predicate.
+//
+// A CALLER WITH NO WINDOWS MATCHES NOTHING, which is the correct denial and is
+// structural rather than checked: unnest over two empty arrays yields no rows,
+// so the EXISTS is false for every drive. The handler still refuses before
+// reaching here, but a gate that also fails safe one layer down is a gate that
+// survives a refactor of the layer above.
+//
+// The cast on "startTime" is there for the reason queryTripDrivesWindow states.
+const queryVehicleDrivesInTripWindows = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive" d
+WHERE d."vehicleId" = $1
+  AND EXISTS (
+	SELECT 1 FROM unnest($2::timestamptz[], $3::timestamptz[]) AS w(win_from, win_to)
+	WHERE d."startTime"::timestamptz >= w.win_from
+	  AND d."startTime"::timestamptz <= w.win_to
+  )
+ORDER BY d."startTime" DESC, d."id" DESC
+LIMIT $4`
+
+// queryVehicleDrivesInTripWindowsCursor is the resume page. Cursor comparison
+// stays TEXT, byte-identical to §7.2's own, so the owner's list and the
+// participant's narrowed list page the same way.
+const queryVehicleDrivesInTripWindowsCursor = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive" d
+WHERE d."vehicleId" = $1
+  AND EXISTS (
+	SELECT 1 FROM unnest($2::timestamptz[], $3::timestamptz[]) AS w(win_from, win_to)
+	WHERE d."startTime"::timestamptz >= w.win_from
+	  AND d."startTime"::timestamptz <= w.win_to
+  )
+  AND (d."startTime", d."id") < ($4, $5)
+ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $6`
 
 // queryActiveTripIDForUserVehicle answers VehicleSummary.activeTripId: the id
@@ -423,4 +473,6 @@ const queryDeleteTripParticipationsBy = `DELETE FROM go_trip_participants WHERE 
 // cascade above, and deleting them twice is harmless — the second statement
 // finds nothing, which is exactly the idempotency every other deletion step
 // has.
+//
+//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
 const queryDeleteTripActivityTokensBy = `DELETE FROM go_trip_activity_tokens WHERE user_id = $1`

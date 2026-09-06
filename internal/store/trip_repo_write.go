@@ -42,26 +42,14 @@ func (r *TripRepo) Update(ctx context.Context, tripID, ownerUserID string, in Up
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	current, err := r.scanTripRow(tx.QueryRow(ctx, queryTripByIDForUser, ownerUserID, tripID))
+	current, err := r.loadOwnedTripForPatch(ctx, tx, tripID, ownerUserID)
 	if err != nil {
-		if errors.Is(err, ErrTripNotFound) {
-			return TripView{}, ErrTripNotFound
+		if !errors.Is(err, ErrTripNotFound) && !errors.Is(err, ErrTripEnded) {
+			r.metrics.IncQueryError(op)
 		}
-		r.metrics.IncQueryError(op)
-		return TripView{}, fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
-	}
-	// The role check is belt AND braces: the handler resolved ownership through
-	// ResolveVehicleAccess, this row says who owns the TRIP, and the statements
-	// below carry the predicate a third time. A car that changed hands is
-	// exactly the case where the three could disagree, and the trip's own owner
-	// column is the right authority for the trip.
-	if current.Role != tripRoleOwner || current.OwnerUserID != ownerUserID {
-		return TripView{}, ErrTripNotFound
+		return TripView{}, err
 	}
 	now := time.Now()
-	if current.StatusAt(now) == TripStatusEnded {
-		return TripView{}, ErrTripEnded
-	}
 
 	if err := lockVehicleTrips(ctx, tx, current.VehicleID); err != nil {
 		r.metrics.IncQueryError(op)
@@ -89,26 +77,11 @@ func (r *TripRepo) Update(ctx context.Context, tripID, ownerUserID string, in Up
 		return TripView{}, fmt.Errorf("TripRepo.Update(%s): write: %w", tripID, err)
 	}
 
-	// ADDITIONS BEFORE REMOVALS is not arbitrary: an id in both lists ends up
-	// REMOVED, which is the safer resolution of a contradictory request. The
-	// contract does not define the case, so the server picks the answer that
-	// grants less.
-	added, err := resolveShareParticipants(ctx, tx, current.VehicleID, in.AddParticipantIDs)
-	if err != nil {
-		if errors.Is(err, ErrTripParticipantNotShared) {
-			return TripView{}, err
+	if err := applyRosterPatch(ctx, tx, tripID, current.VehicleID, in); err != nil {
+		if !errors.Is(err, ErrTripParticipantNotShared) {
+			r.metrics.IncQueryError(op)
 		}
-		r.metrics.IncQueryError(op)
-		return TripView{}, fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
-	}
-	if err := addTripParticipants(ctx, tx, tripID, added); err != nil {
-		r.metrics.IncQueryError(op)
-		return TripView{}, fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
-	}
-
-	if err := removeParticipantsByShare(ctx, tx, tripID, in.RemoveParticipantIDs); err != nil {
-		r.metrics.IncQueryError(op)
-		return TripView{}, fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
+		return TripView{}, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -116,6 +89,61 @@ func (r *TripRepo) Update(ctx context.Context, tripID, ownerUserID string, in Up
 		return TripView{}, fmt.Errorf("TripRepo.Update(%s): commit: %w", tripID, err)
 	}
 	return r.GetForUser(ctx, tripID, ownerUserID)
+}
+
+// loadOwnedTripForPatch reads the row PATCH is about and applies the two gates
+// that must hold before anything is written.
+//
+// THE OWNERSHIP CHECK IS BELT AND BRACES: the handler already resolved
+// ownership through the vehicle, this row says who owns the TRIP, and the
+// UPDATE statements carry `owner_user_id = $n` a third time. A car that changed
+// hands is exactly the case where the three could disagree, and for a trip the
+// trip's own owner column is the right authority.
+//
+// A NON-OWNER GETS ErrTripNotFound, not a denial — the 404-not-403 rule this
+// whole surface follows, so PATCH is not an oracle for trip ids either.
+func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tripID, ownerUserID string) (TripView, error) {
+	current, err := r.scanTripRow(tx.QueryRow(ctx, queryTripByIDForUser, ownerUserID, tripID))
+	if err != nil {
+		if errors.Is(err, ErrTripNotFound) {
+			return TripView{}, ErrTripNotFound
+		}
+		return TripView{}, fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
+	}
+	if current.Role != tripRoleOwner || current.OwnerUserID != ownerUserID {
+		return TripView{}, ErrTripNotFound
+	}
+	if current.StatusAt(time.Now()) == TripStatusEnded {
+		return TripView{}, ErrTripEnded
+	}
+	return current, nil
+}
+
+// applyRosterPatch adds and removes participants inside the patch transaction.
+//
+// ADDITIONS BEFORE REMOVALS is not arbitrary: an id in both lists ends up
+// REMOVED, which is the safer resolution of a contradictory request. The
+// contract does not define that case, so the server picks the answer that
+// grants less.
+//
+// Split out of Update purely for the cognitive-complexity budget, but the seam
+// is a real one: this is the whole of "who is on the trip", and Update is the
+// whole of "what the trip is".
+func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID string, in UpdateTripInput) error {
+	added, err := resolveShareParticipants(ctx, tx, vehicleID, in.AddParticipantIDs)
+	if err != nil {
+		if errors.Is(err, ErrTripParticipantNotShared) {
+			return err
+		}
+		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
+	}
+	if err := addTripParticipants(ctx, tx, tripID, added); err != nil {
+		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
+	}
+	if err := removeParticipantsByShare(ctx, tx, tripID, in.RemoveParticipantIDs); err != nil {
+		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
+	}
+	return nil
 }
 
 // tripRoleOwner is the value tripRoleExpr emits for an owner. Named rather than

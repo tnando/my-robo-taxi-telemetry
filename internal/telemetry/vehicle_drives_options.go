@@ -43,3 +43,21 @@ func WithDrivesMaskAudit(emitter mask.AuditEmitter, metrics mask.AuditMetrics, e
 		h.auditEndpoint = endpoint
 	}
 }
+
+// WithDrivesTripAdmitter opens §7.2 to a TRIP PARTICIPANT (MYR-602), limited
+// to the drives inside a window they were part of.
+//
+// It is the seam MYR-369's note above said should not exist for SHARES, and
+// the distinction is the point: a share is a standing grant with no bound, and
+// re-opening the surface to one would hand a viewer the car's whole history
+// forever. A trip is a bounded set of instants the owner named, and what this
+// option admits is exactly that set — enforced in the statement that applies
+// the LIMIT, not by a filter over an owner's page.
+//
+// Inert unless the composition root passes it; the handler stays owner-only
+// without it.
+func WithDrivesTripAdmitter(trips TripDriveAdmitter) VehicleDrivesOption {
+	return func(h *VehicleDrivesHandler) {
+		h.trips = trips
+	}
+}

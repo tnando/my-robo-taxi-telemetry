@@ -19,8 +19,14 @@ import (
 // breadcrumb array — the store's GetByID resolves the routePointsEnc
 // shadow before the handler ever sees it.
 type DriveRouteData struct {
-	DriveID     string
-	VehicleID   string
+	DriveID   string
+	VehicleID string
+	// StartTime is the drive's RFC 3339 start instant. Carried on this shape
+	// since MYR-602 purely as an INPUT TO THE ACCESS CHECK — a trip
+	// participant is admitted only to drives that began inside one of their
+	// windows, and this endpoint's own response has never carried it. Not on
+	// the wire; see driveRouteResponse.
+	StartTime   string
 	RoutePoints json.RawMessage
 }
 
@@ -49,6 +55,11 @@ type driveRouteResponse struct {
 // role-based DriveRoute mask, and returns the polyline per rest-api.md
 // §7.4 / §5.2.4. Mirrors VehicleDrivesHandler's auth/ownership/mask flow.
 type DriveRouteHandler struct {
+	// trips is the MYR-602 window gate. OPTIONAL and nil by default, which
+	// leaves this endpoint owner-only exactly as MYR-369 left it — the
+	// fail-closed direction for a deployment that has not wired trips.
+	trips TripDriveAdmitter
+
 	auth     tokenValidator
 	vehicles VehicleSnapshotReader // owner check via GetByID(vehicleId)
 	drives   DriveRouteFetcher
@@ -123,7 +134,7 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, userID) {
+	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
 		return
 	}
 
@@ -136,7 +147,7 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // returns false.
 // A drive that points at a missing vehicle is a data-integrity fault
 // (500), distinct from an ownership mismatch (403, vehicle_not_owned).
-func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, driveID, vehicleID, userID string) bool {
+func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.ResponseWriter, driveID, vehicleID, startTime, userID string) bool {
 	row, err := h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
@@ -174,8 +185,31 @@ func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.Response
 	// one-argument change rather than a re-derivation.
 	if _, err := vehicleAccessForOwnerOnly(ctx, userID, row.UserID); err != nil {
 		if errors.Is(err, errNoVehicleAccess) {
-			denyVehicleAccess(w, h.logger, "drive route", vehicleID, userID)
-			return false
+			// MYR-602 ADDS EXACTLY ONE WAY PAST THAT DENIAL, and it is not a
+			// share: a trip window this caller was a participant of, covering
+			// the instant THIS drive began.
+			//
+			// THE TWO REFUSALS ARE DIFFERENT ANSWERS TO DIFFERENT QUESTIONS.
+			// A caller with no trip window at all is asking "may I read this
+			// car's history", and the answer stays 403 — the pre-MYR-602
+			// behaviour, unchanged. A caller who IS a participant and asked
+			// for a drive outside their window gets 404: the window is the
+			// entire extent of what they were told about this car, and a 403
+			// would confirm it made a journey on a day they were not part of.
+			admission := resolveTripDriveAdmission(ctx, h.trips, h.logger, "drive route", userID, vehicleID)
+			if !admission.participant() {
+				denyVehicleAccess(w, h.logger, "drive route", vehicleID, userID)
+				return false
+			}
+			startedAt, parsed := parseDriveStartTime(startTime)
+			if !parsed || !admission.covers(startedAt) {
+				// An unparseable startTime is admitted to NOBODY through a
+				// trip: the window test cannot be evaluated, and the safe
+				// answer for an unevaluable access check is denial.
+				denyDriveOutsideTripWindow(w, h.logger, "drive route", driveID, userID)
+				return false
+			}
+			return true
 		}
 		h.logger.Error("drive route: access resolution failed",
 			slog.String("vehicle_id", vehicleID),

@@ -139,3 +139,17 @@ func For(resource ResourceType, role auth.Role) ResourceMask {
 	}
 	return mask
 }
+
+// Allows reports whether a field survives this mask.
+//
+// The exported form of the internal predicate, added by MYR-602 for the ONE
+// caller that must consult a mask WITHOUT running a projection: the catalog's
+// trip merge stamps `activeTripId` onto rows the earlier merge legs have
+// already projected, so it has no unprojected map to pass through Apply.
+//
+// STAMPING PAST A MASK IS EXACTLY THE PATTERN THIS PACKAGE EXISTS TO PREVENT,
+// so the stamp asks first. Consulting the mask keeps the allow-list the single
+// authority over that field: remove `activeTripId` from a role's list and the
+// stamp stops, rather than continuing to write a key the table no longer
+// permits.
+func (m ResourceMask) Allows(field string) bool { return m.allows(field) }

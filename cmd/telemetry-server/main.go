@@ -767,6 +767,7 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		// The same authenticator also owns the user-existence cache the
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,
+		storeMetrics:       storeMetrics,
 		pool:               db.Pool(),
 		encryptor:          encryptor,
 		auditEmitter:       auditEmitter,

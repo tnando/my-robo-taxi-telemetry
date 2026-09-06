@@ -832,6 +832,33 @@ var vehicleSummaryOwnerFields = []string{
 	// NOT on any WebSocket delta for this resource — a suspended vehicle emits
 	// no frames at all, which is the whole point.
 	"telemetrySuspendedAt",
+
+	// MYR-602 — the id of the trip whose window is OPEN on this car right now
+	// FOR THIS CALLER, or absent when there is none.
+	//
+	// ON EVERY ROLE, and that is the point rather than a convenience. It is how
+	// a NON-OWNER client knows it may watch the car: MYR-602's rule is that a
+	// non-owner sees live location only during an active ride or an active
+	// trip, and the wire `role` enum stays the closed two-value one, so the
+	// server's resolution to `trip_participant` is invisible on the wire and
+	// this field is the only thing that reports it. Withholding it from the
+	// party it exists for would leave a client with the location group in hand
+	// and no way to know why.
+	//
+	// P0. An opaque cuid naming a relationship the caller is already party to
+	// — the same classification as `role` and `sharePermission`, and the same
+	// as `hasActiveRide`, which reports the equivalent fact for the other
+	// window-scoped role. It names no place, no person and no time.
+	//
+	// THE VALUE IS ALREADY CALLER-SCOPED before it reaches this list: the
+	// statement that resolves it requires the caller to be the owner or a live
+	// participant with a live share, so there is no trip id here that the
+	// caller does not already have access to.
+	//
+	// ABSENT rather than null when there is no open window. The contract marks
+	// it optional, and absence is what a pre-v0.41.0 server produces too — so a
+	// client that must handle absence anyway handles both.
+	"activeTripId",
 }
 
 // vehicleSummaryViewerFields is the owner list PLUS `sharePermission`, with

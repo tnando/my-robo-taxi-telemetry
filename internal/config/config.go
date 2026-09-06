@@ -45,6 +45,13 @@ type Config struct {
 	// telemetryInactivitySuspensionEnabled is the MYR-592 owner-inactivity
 	// telemetry-suspension kill-switch.
 	telemetryInactivitySuspensionEnabled bool
+
+	// tripsEnabled is the MYR-602 trips kill-switch (TRIPS_ENABLED). It gates
+	// the §7.30 endpoints, the trip sweeper and the leg detector together —
+	// a feature that can be switched off has to be switched off WHOLE, because
+	// leaving the reads alive would show an owner a live trip card whose every
+	// button returns an error.
+	tripsEnabled bool
 }
 
 // MonitoringConfig holds observability probe settings.
@@ -390,6 +397,22 @@ func (c *Config) ArrivalFlashEnabled() bool { return c.arrivalFlashEnabled }
 // owner presses reconnect (§7.28), because the suspension lives at Tesla and no
 // flag in this process reaches it. Defaults to true; set
 // TELEMETRY_INACTIVITY_SUSPENSION_ENABLED=false to disable without a deploy.
+// TripsEnabled reports whether the MYR-602 trips feature is on
+// (TRIPS_ENABLED, default true).
+//
+// FALSE MAKES THE §7.30 ENDPOINTS 503, not 404: the routes exist and will work
+// again, and a 404 would tell a client to stop asking — a decision some clients
+// cache. Existing trips are not deleted and their windows are not closed; the
+// switch stops the feature being USED, and turning it back on resumes it.
+//
+// ⚠ IT DOES NOT REVOKE LIVE ACCESS. The access legs in internal/auth read the
+// trip tables directly and are deliberately NOT gated: a kill switch that
+// silently dropped a participant mid-drive would be a data-availability
+// incident dressed as a safety control. To end access, end the trips.
+func (c *Config) TripsEnabled() bool {
+	return c.tripsEnabled
+}
+
 func (c *Config) TelemetryInactivitySuspensionEnabled() bool {
 	return c.telemetryInactivitySuspensionEnabled
 }

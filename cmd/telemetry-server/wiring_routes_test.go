@@ -149,6 +149,16 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		// /api/vehicles/ path served by the RIDE-request handler, which is
 		// exactly the wiring mistake this test class exists for.
 		{"booked windows (MYR-385, §7.22)", "/api/vehicles/clxyz1234567890abcdef/booked-windows"},
+		// MYR-602 trips (§7.30). ALWAYS MOUNTED, kill switch or not: this
+		// config is the zero value, so TRIPS_ENABLED reads false and these
+		// answer 503 — which is the point of passing the switch into the
+		// handler rather than gating the registration. An unmounted route is
+		// a 404, and a 404 tells a client the feature does not exist; a 503
+		// says "not right now", which is the true thing and is what this
+		// assertion (anything but 404) pins.
+		{"trips list (MYR-602, §7.30)", "/api/trips"},
+		{"trip detail (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567"},
+		{"trip drives (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/drives"},
 	}
 
 	for _, rt := range routes {
@@ -186,6 +196,13 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"share invite create (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
 		{"share invite resend (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd/resend"},
 		{"share invite redeem (MYR-184, §7.5)", "/api/invites/redeem"},
+		// MYR-602 trips (§7.30). The create route lives under
+		// /api/vehicles/{vehicleId}/ and is served by the TRIP handler, which
+		// is exactly the cross-surface wiring mistake this test class exists
+		// for — the same shape as the MYR-385 booked-windows entry above.
+		{"trip create (MYR-602, §7.30)", "/api/vehicles/clxyz1234567890abcdef/trips"},
+		{"trip end (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/end"},
+		{"trip activity start token (MYR-602, §7.30)", "/api/trips/ctrp0123456789abcdef01234567/activity-start-token"},
 	}
 	for _, rt := range postRoutes {
 		t.Run(rt.name, func(t *testing.T) {

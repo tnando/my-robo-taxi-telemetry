@@ -49,6 +49,16 @@ func NewTripRepo(pool *pgxpool.Pool, metrics Metrics, encryptor cryptox.Encrypto
 	if logger == nil {
 		logger = slog.Default()
 	}
+	// NIL METRICS ARE TOLERATED, unlike a nil encryptor. Metrics are
+	// observability and their absence costs a dashboard; an absent encryptor
+	// would cost the confidentiality of P1 user content, which is why that one
+	// panics and this one substitutes. The substitution matters because every
+	// method here records a timing on a deferred call — a nil interface would
+	// panic on the way OUT of a successful query, turning a missing dashboard
+	// into a 500.
+	if metrics == nil {
+		metrics = NoopMetrics{}
+	}
 	return &TripRepo{pool: pool, metrics: metrics, encryptor: encryptor, logger: logger}
 }
 
