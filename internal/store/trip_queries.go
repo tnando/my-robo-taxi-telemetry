@@ -1,0 +1,426 @@
+package store
+
+// Every SQL statement the MYR-602 trips repository issues, in one file so the
+// authorization-relevant statement set can be read at once — the same
+// convention internal/auth/queries.go and vehicle_share_queries.go follow, and
+// for the same reason: several of these WHERE clauses ARE the access control.
+//
+// THREE INVARIANTS HOLD ACROSS THE FILE.
+//
+//  1. OWNER-SCOPED MUTATIONS CARRY `owner_user_id = $n` IN THE STATEMENT. The
+//     handler's ownership check produces the good error message; this predicate
+//     is what actually prevents one person mutating another's trip, on the same
+//     row it writes, so there is no check-then-write window.
+//
+//  2. THE WINDOW PREDICATE IS SPELLED ONE WAY EVERYWHERE:
+//     `starts_at <= NOW() AND NOW() < COALESCE(ended_at, ends_at)` — half-open,
+//     COALESCE for the early end. It matches store.Trip.StatusAt and
+//     internal/auth/queries.go's fourth UNION leg CHARACTER FOR CHARACTER. A
+//     surface that called a trip active while the access query called it over
+//     would render a live card over a socket that had already dropped the car.
+//
+//  3. THE SHARE JOIN IS NOT DECORATION. Wherever a participant's ACCESS is at
+//     stake the statement re-joins go_vehicle_shares on (vehicle, user) and
+//     re-tests `status = 'accepted' AND suspended_at IS NULL`. That is what
+//     makes "trip access can never outlive the share" structural rather than a
+//     cleanup job — see the inventory of this predicate's copies in
+//     vehicle_share_access_queries.go. Statements that serve only DISPLAY (the
+//     roster) join the share by id instead, because a name should not vanish
+//     from a historical roster the moment a grant is revoked.
+
+// tripColumns is the full go_trips projection. Ordered as the struct is, so
+// scanTrip reads straight down.
+const tripColumns = `
+	id, vehicle_id, owner_user_id, name_enc, starts_at, ends_at, ended_at,
+	started_notified_at, ended_notified_at, created_at, updated_at`
+
+// queryInsertTrip creates the window. `created_at` / `updated_at` are left to
+// their column defaults and returned, the convention every go_ table follows,
+// so the row's clock is the DATABASE's and one response cannot report two
+// instants for the same write.
+const queryInsertTrip = `
+INSERT INTO go_trips (id, vehicle_id, owner_user_id, name_enc, starts_at, ends_at)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING created_at, updated_at`
+
+// queryTripOverlaps is the 409 probe: does another LIVE window on the same
+// vehicle intersect the proposed one?
+//
+// THE INTERSECTION TEST is the standard half-open one — two intervals overlap
+// iff each starts before the other ends — written against the EFFECTIVE end so
+// a trip the owner already ended early stops blocking at the instant they
+// ended it rather than at its original ends_at.
+//
+// `NOW() < COALESCE(ended_at, ends_at)` IS THE LOAD-BEARING THIRD PREDICATE and
+// it is what makes backfill work. A trip may start in the past — that is the
+// stated product requirement, it is how the legs already driven join the trip —
+// so a new window will routinely cover instants that OLD, FINISHED windows also
+// covered. Only trips that are still scheduled or active can conflict; an ended
+// one is history and history does not reserve the calendar.
+//
+// $4 excludes a trip from its own probe, so PATCH can extend a window without
+// colliding with itself. Passed as the empty string on create, which matches no
+// id.
+const queryTripOverlaps = `
+SELECT EXISTS (
+	SELECT 1 FROM go_trips
+	WHERE vehicle_id = $1
+	  AND id <> $4
+	  AND NOW() < COALESCE(ended_at, ends_at)
+	  AND starts_at < $3
+	  AND $2 < COALESCE(ended_at, ends_at)
+)`
+
+// queryAcceptedShareParticipants resolves the requested share ids to the people
+// behind them, KEEPING ONLY the ones that are a live accepted grant on THIS
+// vehicle.
+//
+// The filtering happens here rather than in Go, and the caller compares COUNTS
+// rather than inspecting which id fell out, because the create endpoint must
+// answer one thing for "no such share", "a share on a different car", "a share
+// that was never accepted" and "a suspended share". A loop that reported the
+// first failing id would be an oracle for other people's share ids.
+const queryAcceptedShareParticipants = `
+SELECT id, accepted_by_user_id
+FROM go_vehicle_shares
+WHERE vehicle_id = $1
+  AND id = ANY($2::text[])
+  AND status = 'accepted' AND suspended_at IS NULL
+  AND accepted_by_user_id IS NOT NULL AND accepted_by_user_id <> ''`
+
+// queryUpsertTripParticipant adds a person, or REVIVES a membership they had
+// left. `left_at = NULL` in the DO UPDATE is the revival; `added_at` is
+// deliberately NOT refreshed, because it answers "when did this person first
+// join this trip" and a re-add should not erase that.
+const queryUpsertTripParticipant = `
+INSERT INTO go_trip_participants (trip_id, user_id, share_id)
+VALUES ($1, $2, $3)
+ON CONFLICT (trip_id, user_id) DO UPDATE
+SET left_at = NULL, share_id = EXCLUDED.share_id`
+
+// queryLeaveTrip is BOTH the participant's own "leave" and the owner's
+// "remove", because they write the same row the same way and the difference is
+// only who was allowed to ask. Idempotent by the `left_at IS NULL` guard: a
+// second call updates zero rows and the handler still answers 204.
+const queryLeaveTrip = `
+UPDATE go_trip_participants
+SET left_at = NOW()
+WHERE trip_id = $1 AND user_id = $2 AND left_at IS NULL`
+
+// queryLeaveTripByShare is the REVOKED-SHARE CASCADE (see TripRepo.
+// RemoveParticipantsForShare). Keyed on (vehicle, user) rather than on the
+// share id, so a grant that was revoked and re-issued under a new id still
+// removes the person from the trips they joined under the old one.
+//
+// Scoped to trips that have not ENDED: rewriting the roster of a finished trip
+// would rewrite history for no benefit — the window is closed, the access is
+// already gone, and the roster is the only record of who was on it.
+const queryLeaveTripByShare = `
+UPDATE go_trip_participants p
+SET left_at = NOW()
+FROM go_trips t
+WHERE t.id = p.trip_id
+  AND t.vehicle_id = $1
+  AND p.user_id = $2
+  AND p.left_at IS NULL
+  AND NOW() < COALESCE(t.ended_at, t.ends_at)`
+
+// tripRoleExpr resolves the caller's relationship to a trip in the SAME
+// statement that reads it, so there is no read-then-authorize window and no
+// second round trip.
+//
+// `owner` beats `participant` — an owner who somehow also holds a participant
+// row is an owner. NULL means neither, and every read path turns NULL into
+// ErrTripNotFound rather than a denial: a trip the caller is not on must be
+// indistinguishable from a trip that does not exist, or the endpoint is an
+// oracle for trip ids.
+//
+// A participant who LEFT resolves NULL. Leaving is meant to end the
+// relationship, not to leave a read-only souvenir.
+const tripRoleExpr = `
+	CASE
+		WHEN t.owner_user_id = $1 THEN 'owner'
+		WHEN EXISTS (
+			SELECT 1 FROM go_trip_participants p
+			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
+		) THEN 'participant'
+	END AS trip_role`
+
+// queryTripByIDForUser reads one trip together with the caller's role.
+const queryTripByIDForUser = `
+SELECT ` + tripColumns + `,` + tripRoleExpr + `
+FROM go_trips t
+WHERE t.id = $2`
+
+// queryTripsForUser is GET /api/trips: every trip the caller owns or is a live
+// participant of, newest first, optionally filtered by derived status.
+//
+// THE STATUS FILTER IS COMPUTED IN SQL rather than read back and filtered in Go,
+// because `limit` has to mean "N trips of the requested status" — filtering
+// after the LIMIT would return a short page (or an empty one) while more
+// matching trips sat behind it. The three arms restate the window predicate a
+// third time; they agree with StatusAt by inspection and by
+// TestTripStatusFilterAgreesWithStatusAt.
+//
+// $2 = ” means "no filter", which is why the enum values can be compared
+// directly without a nullable parameter.
+//
+// ORDER BY created_at DESC, id DESC — the same total order every other list in
+// this codebase uses, so ties are stable across pages.
+const queryTripsForUser = `
+SELECT ` + tripColumns + `,` + tripRoleExpr + `
+FROM go_trips t
+WHERE (
+		t.owner_user_id = $1
+		OR EXISTS (
+			SELECT 1 FROM go_trip_participants p
+			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
+		)
+	)
+  AND (
+		$2 = ''
+		OR ($2 = 'scheduled' AND NOW() < t.starts_at)
+		OR ($2 = 'active' AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at))
+		OR ($2 = 'ended' AND NOW() >= COALESCE(t.ended_at, t.ends_at))
+	)
+ORDER BY t.created_at DESC, t.id DESC
+LIMIT $3`
+
+// queryUpdateTripWindow rewrites the mutable fields. Both are passed on every
+// call with the CURRENT value standing in for "unchanged", so PATCH has one
+// statement rather than a dynamically assembled one — the shape MYR-369's
+// share patch settled on for the same reason.
+//
+// `updated_at = NOW()` unconditionally, including on a no-op patch: the column
+// answers "when did somebody last touch this row", and a writer that skipped it
+// for an unchanged value would make the answer depend on what changed.
+const queryUpdateTripWindow = `
+UPDATE go_trips
+SET name_enc = $3, ends_at = $4, updated_at = NOW()
+WHERE id = $1 AND owner_user_id = $2
+RETURNING ` + tripColumns
+
+// queryEndTrip is the owner's early end. IDEMPOTENT BY `ended_at IS NULL`: a
+// second call updates zero rows, the caller re-reads, and the endpoint answers
+// 200 with the already-ended trip. Re-stamping would move the end forward on
+// every retry, which for an ACCESS boundary means a double-tap silently
+// extending somebody's live location by however long the two taps were apart.
+const queryEndTrip = `
+UPDATE go_trips
+SET ended_at = NOW(), updated_at = NOW()
+WHERE id = $1 AND owner_user_id = $2 AND ended_at IS NULL`
+
+// queryTripRoster is the participant list for one trip, for DISPLAY.
+//
+// It joins the share BY ID, not by (vehicle, user) with the live-grant
+// predicates, and that is the one deliberate departure from invariant 3 at the
+// top of this file. This statement decides no access — the access query in
+// internal/auth does, on every resolution — it decides what a name says. A
+// roster that dropped a person the instant their grant was suspended would make
+// the trip card silently disagree with itself mid-window.
+//
+// The NAME follows the roster rule (MYR-581/583): the accepting account's
+// CONFIRMED first name if there is one, else the owner's own label for the
+// grant. `acceptedByNameExpr` carries the confirmation gate and the three-rung
+// ladder; ownerFirstNameToken reduces it to a first token in Go.
+const queryTripRoster = `
+SELECT p.share_id, p.user_id, s.label, ` + acceptedByNameExpr + `
+FROM go_trip_participants p
+JOIN go_vehicle_shares s ON s.id = p.share_id
+WHERE p.trip_id = $1 AND p.left_at IS NULL
+ORDER BY p.added_at, p.user_id`
+
+// queryTripOwnerFirstName is the confirmed-only name ladder keyed on
+// go_trips.owner_user_id.
+//
+// A SIBLING of ownerNameLadderExpr rather than a reuse of it, for the reason
+// profile_name_confirmation.go states about its own duplicate: the embedding
+// statements are `const`, so the key column cannot be a parameter. Keying it on
+// the TRIP's owner rather than on "Vehicle"."userId" is not pedantry — a car
+// can change hands, and the trip's card names the person whose trip it is.
+const queryTripOwnerFirstName = `
+SELECT CASE WHEN EXISTS (
+		SELECT 1 FROM go_profile_name_confirmations pnc WHERE pnc.user_id = t.owner_user_id
+	) THEN COALESCE(
+		NULLIF(TRIM((SELECT u."name" FROM "User" u WHERE u."id" = t.owner_user_id)), ''),
+		NULLIF(TRIM((SELECT a."name" FROM go_identity_apple a WHERE a.user_id = t.owner_user_id ORDER BY a.last_login_at DESC LIMIT 1)), ''),
+		NULLIF(TRIM((SELECT g."name" FROM go_users g WHERE g.id = t.owner_user_id)), '')
+	) END
+FROM go_trips t WHERE t.id = $1`
+
+// queryTripVehicle reads the catalog subset the trip card renders, so a
+// participant's card needs no second call. READ-ONLY against the Prisma-owned
+// relation, which CG-DL-9 permits.
+const queryTripVehicle = `
+SELECT v."id", v."name", v."model", v."year", v."color", v."vin", v."trimLabel", v."trim"
+FROM "Vehicle" v
+JOIN go_trips t ON t.vehicle_id = v."id"
+WHERE t.id = $1`
+
+// queryTripDriveCount counts the window's drives. See queryTripDrivesWindow for
+// why the TEXT column is cast.
+const queryTripDriveCount = `
+SELECT COUNT(*) FROM "Drive"
+WHERE "vehicleId" = $1
+  AND "startTime"::timestamptz >= $2
+  AND "startTime"::timestamptz <= $3`
+
+// queryTripOpenLeg reads the leg underway, if any, together with the vehicle's
+// CURRENT eta so the card's "arrives in N min" is read at REST-read time rather
+// than frozen at leg start.
+//
+// The leg table is written by the sibling lane's detector; this repository only
+// reads it. `etaMinutes` comes off the vehicle row because that is where live
+// navigation lands — the leg row records what the car SAID it was driving to,
+// not how far away it is now.
+const queryTripOpenLeg = `
+SELECT l.started_at, l.destination_name_enc, v."etaMinutes"
+FROM go_trip_legs l
+JOIN go_trips t ON t.id = l.trip_id
+JOIN "Vehicle" v ON v."id" = t.vehicle_id
+WHERE l.trip_id = $1 AND l.ended_at IS NULL
+ORDER BY l.started_at DESC
+LIMIT 1`
+
+// queryUpsertTripActivityToken stores one party's ActivityKit PUSH-TO-START
+// token. UPSERT because ActivityKit rotates the value: a re-registration
+// REPLACES it rather than accumulating rows that would each try to start their
+// own Activity.
+//
+// P1 CAPABILITY. The value is never logged beyond an 8-character prefix, never
+// echoed into a response, never placed in an error message.
+const queryUpsertTripActivityToken = `
+INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token, sandbox)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (trip_id, user_id) DO UPDATE
+SET push_to_start_token = EXCLUDED.push_to_start_token,
+    sandbox = EXCLUDED.sandbox,
+    updated_at = NOW()`
+
+// queryDeleteTripActivityToken is the DELETE half. Idempotent: no row is the
+// same answer as one row removed, and the endpoint answers 204 either way.
+const queryDeleteTripActivityToken = `
+DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
+
+// queryTripWindowsForUserVehicle returns every window on ONE vehicle that
+// admits the caller to that vehicle's DRIVES — the §7.2/§7.3/§7.4 gate.
+//
+// ACTIVE **OR ENDED**, which is wider than the live-access predicate and
+// deliberately so. Live location is a window-scoped grant that ends with the
+// window; the window's DRIVES are the record of a journey the person was part
+// of, and a road trip's drive list becoming unreadable the moment the trip ends
+// would delete the feature at the exact moment it becomes worth reading.
+// SCHEDULED trips are excluded — a window that has not opened contains no
+// drives, and admitting one would let an owner grant read access to the past by
+// scheduling a trip for next week.
+//
+// The live-share join still applies: a person whose grant was revoked loses the
+// drives with everything else.
+const queryTripWindowsForUserVehicle = `
+SELECT t.starts_at, LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))
+FROM go_trip_participants p
+JOIN go_trips t ON t.id = p.trip_id
+JOIN go_vehicle_shares s
+  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+ AND s.status = 'accepted' AND s.suspended_at IS NULL
+WHERE p.user_id = $1 AND t.vehicle_id = $2 AND p.left_at IS NULL
+  AND t.starts_at <= NOW()`
+
+// queryTripDrivesWindow is the §7.30.7 drive list: the window's drives, newest
+// first, with the §7.2 keyset cursor.
+//
+// THE CAST IS DELIBERATE. `Drive."startTime"` is a TEXT column holding RFC 3339
+// (a Prisma-owned shape this repo may not change), and text ordering only
+// matches chronological ordering while every row carries the same offset
+// spelling. §7.2's cursor comparison already relies on that and a wrong answer
+// there is a pagination glitch; here a wrong answer is an ACCESS decision — a
+// participant reading a drive from outside their window — so the bound is
+// compared as an instant, not as a string. The cast costs the index on
+// startTime for the FILTER; the `vehicleId` index still selects the rows and
+// the ordering index still orders them, and one vehicle's drive history is a
+// bounded set.
+//
+// The upper bound is INCLUSIVE where the access predicate's is exclusive: a
+// drive that began exactly at the closing instant is a drive of this trip, and
+// excluding it would lose it from the only list it belongs to.
+const queryTripDrivesWindow = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive"
+WHERE "vehicleId" = $1
+  AND "startTime"::timestamptz >= $2
+  AND "startTime"::timestamptz <= $3
+ORDER BY "startTime" DESC, "id" DESC
+LIMIT $4`
+
+// queryTripDrivesWindowCursor is the resume page. The cursor comparison stays
+// TEXT, byte-identical to §7.2's, so the two lists page the same way.
+const queryTripDrivesWindowCursor = `SELECT ` + driveSummarySelectColumns + `
+FROM "Drive"
+WHERE "vehicleId" = $1
+  AND "startTime"::timestamptz >= $2
+  AND "startTime"::timestamptz <= $3
+  AND ("startTime", "id") < ($4, $5)
+ORDER BY "startTime" DESC, "id" DESC
+LIMIT $6`
+
+// queryActiveTripIDForUserVehicle answers VehicleSummary.activeTripId: the id
+// of the open window on this car that this caller is party to, as OWNER or as
+// live participant.
+//
+// The owner arm has no share join — an owner holds no grant — and the
+// participant arm carries the full live-share predicate, so the field can never
+// name a trip whose access the caller does not actually have.
+const queryActiveTripIDForUserVehicle = `
+SELECT t.id FROM go_trips t
+WHERE t.vehicle_id = $2
+  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+  AND (
+		t.owner_user_id = $1
+		OR EXISTS (
+			SELECT 1 FROM go_trip_participants p
+			JOIN go_vehicle_shares s
+			  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+			 AND s.status = 'accepted' AND s.suspended_at IS NULL
+			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
+		)
+	)
+ORDER BY t.starts_at DESC
+LIMIT 1`
+
+// queryActiveTripVehiclesForUser is the CATALOG's third merge leg: the vehicles
+// of the caller's open windows, as catalog rows, with the trip id attached.
+//
+// PARTICIPANT ROWS ONLY. An owner's cars are already the first leg of that
+// response and re-emitting them here would produce a duplicate the dedupe would
+// discard anyway; the owner's own activeTripId is resolved per row instead.
+const queryActiveTripVehicleIDsForUser = `
+SELECT DISTINCT t.vehicle_id, t.id
+FROM go_trip_participants p
+JOIN go_trips t ON t.id = p.trip_id
+JOIN go_vehicle_shares s
+  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+ AND s.status = 'accepted' AND s.suspended_at IS NULL
+WHERE p.user_id = $1 AND p.left_at IS NULL
+  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)`
+
+// ── ACCOUNT DELETION (step 8g) ──────────────────────────────────────────────
+//
+// Two statements, because a person stands in two relations to trips and the
+// deletions are not the same shape. Ordering between them does not matter; both
+// run inside the deletion sequence.
+
+// queryDeleteTripsOwnedBy removes the windows this person CREATED. The three
+// child tables cascade off go_trips.id (migration 0047 declares the FKs), so
+// participants, push-to-start tokens and legs go with them — which is why this
+// is one statement and not four.
+const queryDeleteTripsOwnedBy = `DELETE FROM go_trips WHERE owner_user_id = $1`
+
+// queryDeleteTripParticipationsBy removes this person from OTHER people's
+// trips. Their memberships are theirs to take with them; the trips are not.
+const queryDeleteTripParticipationsBy = `DELETE FROM go_trip_participants WHERE user_id = $1`
+
+// queryDeleteTripActivityTokensBy removes this person's push-to-start tokens on
+// other people's trips. The ones on their OWN trips already went with the
+// cascade above, and deleting them twice is harmless — the second statement
+// finds nothing, which is exactly the idempotency every other deletion step
+// has.
+const queryDeleteTripActivityTokensBy = `DELETE FROM go_trip_activity_tokens WHERE user_id = $1`

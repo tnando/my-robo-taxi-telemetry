@@ -128,6 +128,23 @@ type AccountDeletionCounts struct {
 	// reached every table that named the person, and this is the last go_ table
 	// that used to be exempt.
 	RemovedVehicleTombstonesDeleted int `json:"removedVehicleTombstonesDeleted"`
+	// TripsDeleted is the number of TRIPS THIS PERSON CREATED that were
+	// removed (MYR-602, §3.1 step 8g). The three child tables cascade off
+	// go_trips.id, so this one count stands for the participants, the
+	// push-to-start tokens and the legs that went with them. A count and never
+	// a trip NAME: the name is P1 user content sealed at rest, and the only
+	// thing that may cross the CG-DL-5 boundary is how many windows closed.
+	TripsDeleted int `json:"tripsDeleted"`
+	// TripParticipationsDeleted is the number of memberships this person held
+	// on OTHER people's trips (MYR-602, §3.1 step 8g). Separate from the count
+	// above because the two are different facts: one is windows this person
+	// opened, the other is windows they were invited into, and a deletion has
+	// to be shown to have reached both directions.
+	TripParticipationsDeleted int `json:"tripParticipationsDeleted"`
+	// TripActivityTokensDeleted is the number of ActivityKit push-to-start
+	// registrations removed (MYR-602, §3.1 step 8g). A COUNT and never a
+	// token: the value is a P1 capability, and the audit row is P0-only.
+	TripActivityTokensDeleted int `json:"tripActivityTokensDeleted"`
 	// HadPrismaUser records whether a sibling-schema "User" row existed —
 	// the dual-source identity fact, and the one thing that distinguishes an
 	// Apple-native account from a legacy web one in the audit trail.
@@ -280,6 +297,60 @@ func (a *AccountDeleter) DeleteVehicleDriverAccess(ctx context.Context, userID s
 // nothing later in the sequence reads these rows.
 func (a *AccountDeleter) DeleteRideMemberships(ctx context.Context, userID string) (int, error) {
 	return a.execCount(ctx, "DeleteRideMemberships", queryDeleteRideMembershipsForUser, userID)
+}
+
+// DeleteTripsOwned removes the TRIPS THIS PERSON CREATED (MYR-602, §3.1 step
+// 8g). Returns the number of go_trips rows deleted (0..n). Idempotent.
+//
+// ONE STATEMENT FOR FOUR TABLES. Migration 0047 declares real foreign keys from
+// go_trip_participants, go_trip_activity_tokens and go_trip_legs to
+// go_trips(id) ON DELETE CASCADE — the FKs are permitted because all four
+// relations are Go-owned (CG-DL-9 forbids naming a PRISMA table, not naming a
+// sibling) — so deleting the parent takes the roster, the push-to-start tokens
+// and the legs with it. A hand-rolled four-statement version would be four
+// chances to miss one, and the one it missed would be a dangling row in an
+// access gate.
+//
+// ORDERING: it must run after step 3, for the same reason steps 8e and 8f do —
+// the per-vehicle teardown deletes a car's trips in its own transaction, and
+// anything left here is what the teardown could not reach. It must run before
+// the identity delete, like every destructive step. Nothing later reads these
+// rows.
+//
+// WHAT SURVIVES, DELIBERATELY: the DRIVES that fell inside those windows. A
+// trip never owned a drive — the window merely selected it — so closing the
+// window changes nothing about the vehicle's own history, which the owner's
+// vehicle teardown deals with on its own terms.
+func (a *AccountDeleter) DeleteTripsOwned(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteTripsOwned", queryDeleteTripsOwnedBy, userID)
+}
+
+// DeleteTripParticipations removes this person from OTHER people's trips
+// (MYR-602, §3.1 step 8g). Returns the number of rows deleted. Idempotent.
+//
+// The memberships are theirs to take with them; the trips are not. Deleting the
+// row rather than stamping left_at is right HERE and only here: everywhere else
+// the tombstone answers "was this person ever on the trip", and after an
+// account deletion there is no person left for that question to be about.
+func (a *AccountDeleter) DeleteTripParticipations(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteTripParticipations", queryDeleteTripParticipationsBy, userID)
+}
+
+// DeleteTripActivityTokens removes this person's ActivityKit push-to-start
+// registrations (MYR-602, §3.1 step 8g). Returns the number of rows deleted.
+// Idempotent.
+//
+// The ones on their OWN trips already went with the cascade in DeleteTripsOwned;
+// this catches the ones on other people's trips. Running it after that cascade
+// finds fewer rows, never more, and finding none is exactly the idempotency
+// every other step in this sequence has.
+//
+// It is its own step rather than folded into the participation delete because a
+// token is a LIVE CAPABILITY on a phone, not a membership record: a person may
+// hold a push-to-start token for a trip they have already left, and a deletion
+// that only walked the roster would leave it behind.
+func (a *AccountDeleter) DeleteTripActivityTokens(ctx context.Context, userID string) (int, error) {
+	return a.execCount(ctx, "DeleteTripActivityTokens", queryDeleteTripActivityTokensBy, userID)
 }
 
 // RevokeRefreshTokens revokes every live refresh token in the user's name, so
