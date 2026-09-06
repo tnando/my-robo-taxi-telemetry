@@ -315,7 +315,7 @@ LIMIT 1`
 // P1 CAPABILITY. The value is never logged beyond an 8-character prefix, never
 // echoed into a response, never placed in an error message.
 //
-//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
+// #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryUpsertTripActivityToken = `
 INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token, sandbox)
 VALUES ($1, $2, $3, $4)
@@ -327,7 +327,7 @@ SET push_to_start_token = EXCLUDED.push_to_start_token,
 // queryDeleteTripActivityToken is the DELETE half. Idempotent: no row is the
 // same answer as one row removed, and the endpoint answers 204 either way.
 //
-//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
+// #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryDeleteTripActivityToken = `
 DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
 
@@ -346,7 +346,7 @@ DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
 // The live-share join still applies: a person whose grant was revoked loses the
 // drives with everything else.
 //
-//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
+// #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryTripWindowsForUserVehicle = `
 SELECT t.starts_at, LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))
 FROM go_trip_participants p
@@ -499,5 +499,5 @@ const queryDeleteTripParticipationsBy = `DELETE FROM go_trip_participants WHERE 
 // finds nothing, which is exactly the idempotency every other deletion step
 // has.
 //
-//nolint:gosec // G101: an SQL statement naming a token COLUMN, not a credential.
+// #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryDeleteTripActivityTokensBy = `DELETE FROM go_trip_activity_tokens WHERE user_id = $1`
