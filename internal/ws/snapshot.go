@@ -165,8 +165,10 @@ func (h *Hub) sendSnapshot(ctx context.Context, client *Client, vehicleID string
 func (h *Hub) enqueueSnapshotFrame(client *Client, vehicleID string, role auth.Role, fields map[string]any, timestamp string) {
 	projected, _ := mask.Apply(fields, mask.For(mask.ResourceVehicleState, role))
 
-	// MYR-602 — THE SENTINELS GO IN BEFORE THE SUPPRESSION CHECK HERE, which is
-	// the OPPOSITE order to BroadcastMasked, and the asymmetry is deliberate.
+	// MYR-602 — THE SENTINELS COUNT TOWARD SUBSTANTIVENESS HERE, which is the
+	// OPPOSITE of BroadcastMasked, and the asymmetry is deliberate. Apply has
+	// already substituted them (mask/sentinels.go); the difference between the
+	// two surfaces is only which predicate judges the result.
 	//
 	// A live broadcast is a delta on a stream: a viewer frame made of nothing
 	// but constant sentinels carries no information and its mere arrival would
@@ -181,9 +183,8 @@ func (h *Hub) enqueueSnapshotFrame(client *Client, vehicleID string, role auth.R
 	// prevent.
 	//
 	// A group that projects to nothing AND has no required-location field in it
-	// — a cabin-only or media-only group — is still suppressed, because
-	// ApplyLocationSentinels fills in only keys the input actually carried.
-	projected, _ = mask.ApplyLocationSentinels(fields, projected, role)
+	// — a cabin-only or media-only group — is still suppressed, because Apply
+	// substitutes only keys the input actually carried.
 	if !mask.IsSubstantive(projected) {
 		// Empty-payload suppression, mirroring BroadcastMasked: a role
 		// whose mask strips every field in this group must not see an

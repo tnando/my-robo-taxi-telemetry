@@ -104,3 +104,47 @@ func OwnerOnlyVehicleStateFields() []string {
 	copy(out, vehicleStateOwnerOnlyFields)
 	return out
 }
+
+// IsSubstantiveExcludingSentinels is IsSubstantive for the LIVE BROADCAST path,
+// where a sentinel must not be allowed to make a frame worth sending.
+//
+// WHY THE TWO SURFACES NEED DIFFERENT PREDICATES (MYR-602). Apply substitutes
+// the schema-required location fields in place (sentinels.go), so a viewer's
+// projection of a GPS-only delta is not empty — it is {speed:0, latitude:0,
+// longitude:0}, three constants. On the connect-time SNAPSHOT that is exactly
+// right and IsSubstantive is the predicate to use: the snapshot is the client's
+// one delivery of the whole known state, it is triggered by the subscriber
+// rather than by the car, and suppressing it would leave the assembled
+// VehicleState missing six required keys for the life of the connection.
+//
+// ON A LIVE DELTA IT IS EXACTLY WRONG. The values say nothing, but the frame's
+// ARRIVAL says the car is streaming right now — the same timing leak
+// IsSubstantive exists to close (MYR-435), rebuilt out of zeros. So the live
+// path judges substantiveness on what the mask let THROUGH, and the sentinels
+// ride the frames that were going out anyway.
+//
+// fieldsMasked is Apply's second return value. A key that is in it AND present
+// in the projection is a substitution by construction: Apply reports every
+// withheld field there, and the only withheld fields that leave a key behind
+// are the sentinels.
+func IsSubstantiveExcludingSentinels(projected map[string]any, fieldsMasked []string) bool {
+	if len(fieldsMasked) == 0 {
+		return IsSubstantive(projected)
+	}
+	substituted := make(map[string]struct{}, len(fieldsMasked))
+	for _, f := range fieldsMasked {
+		if _, present := projected[f]; present {
+			substituted[f] = struct{}{}
+		}
+	}
+	for field := range projected {
+		if _, isEnvelope := envelopeFields[field]; isEnvelope {
+			continue
+		}
+		if _, isSentinel := substituted[field]; isSentinel {
+			continue
+		}
+		return true
+	}
+	return false
+}

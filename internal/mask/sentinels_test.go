@@ -190,3 +190,84 @@ func TestSentinelSubstitutionIsIdempotent(t *testing.T) {
 		t.Fatalf("locationName = %v, want the empty-string sentinel", twice["locationName"])
 	}
 }
+
+// TestIsSubstantiveExcludingSentinels is the LIVE BROADCAST half of the
+// sentinel story, and the two predicates are tested together because the bug
+// they guard against is choosing the wrong one.
+//
+// Apply substitutes the required location fields in place, so a viewer's
+// projection of a GPS-only delta is three constants rather than an empty map.
+// On the connect-time snapshot that is the whole point — it is the client's one
+// delivery of the required keys. On a LIVE DELTA the same three constants say
+// nothing while the frame's ARRIVAL says the car is streaming right now, which
+// is the MYR-435 timing leak rebuilt out of zeros.
+func TestIsSubstantiveExcludingSentinels(t *testing.T) {
+	viewerMask := For(ResourceVehicleState, auth.RoleViewer)
+
+	tests := []struct {
+		name string
+		// input is the pre-mask payload, projected through the VIEWER mask so
+		// the test exercises the real substitution rather than a hand-built map.
+		input map[string]any
+		// wantLive is the live-broadcast answer (sentinels excluded); wantSnap
+		// is the connect-time snapshot answer (sentinels count).
+		wantLive bool
+		wantSnap bool
+	}{
+		{
+			name:     "location-only delta: the snapshot states it, the stream suppresses it",
+			input:    map[string]any{"latitude": 37.7, "longitude": -122.4, "speed": float64(65)},
+			wantLive: false,
+			wantSnap: true,
+		},
+		{
+			name:     "mixed delta: substantive either way, and the sentinels ride along",
+			input:    map[string]any{"latitude": 37.7, "chargeLevel": float64(82)},
+			wantLive: true,
+			wantSnap: true,
+		},
+		{
+			name: "freshness-only frame is suppressed on both surfaces (MYR-435), and " +
+				"the sentinel exclusion must not have quietly changed that",
+			input:    map[string]any{"lastUpdated": "2026-09-06T00:00:00Z", "interiorTemp": float64(21)},
+			wantLive: false,
+			wantSnap: false,
+		},
+		{
+			name:     "owner-only cabin group projects to nothing at all",
+			input:    map[string]any{"interiorTemp": float64(21)},
+			wantLive: false,
+			wantSnap: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projected, fieldsMasked := Apply(tt.input, viewerMask)
+
+			if got := IsSubstantiveExcludingSentinels(projected, fieldsMasked); got != tt.wantLive {
+				t.Errorf("IsSubstantiveExcludingSentinels = %v, want %v (projection %v, masked %v)",
+					got, tt.wantLive, projected, fieldsMasked)
+			}
+			if got := IsSubstantive(projected); got != tt.wantSnap {
+				t.Errorf("IsSubstantive = %v, want %v (projection %v)", got, tt.wantSnap, projected)
+			}
+		})
+	}
+}
+
+// TestIsSubstantiveExcludingSentinels_OwnerIsUnaffected pins the property that
+// keeps the new predicate from being a second, quieter mask table: for a role
+// that is withheld nothing, fieldsMasked is empty and the two predicates are
+// the same function.
+func TestIsSubstantiveExcludingSentinels_OwnerIsUnaffected(t *testing.T) {
+	input := map[string]any{"latitude": 37.7, "longitude": -122.4}
+	projected, fieldsMasked := Apply(input, For(ResourceVehicleState, auth.RoleOwner))
+
+	if len(fieldsMasked) != 0 {
+		t.Fatalf("the owner mask withheld %v; this test's premise is gone", fieldsMasked)
+	}
+	if !IsSubstantiveExcludingSentinels(projected, fieldsMasked) {
+		t.Error("an owner's real coordinates were read as sentinels and suppressed")
+	}
+}

@@ -177,21 +177,22 @@ func (h *Hub) buildRoleFrames(
 		// "removed at least one field").
 		h.maybeEmitAuditWS(vehicleID, role, frameSeq, fieldsMasked)
 
-		// MYR-602 — SUBSTANTIVENESS IS JUDGED BEFORE THE SENTINELS GO IN, and
-		// the order is the whole of the reasoning below. A viewer's sentinels
-		// are constants: a frame that projected to nothing but them carries no
-		// information at all, and emitting it would restore precisely the leak
-		// IsSubstantive exists to close — the FRAME TIMING. A GPS group flushed
-		// once a second would become a "this car is streaming right now" beacon
-		// made entirely of zeros.
+		// MYR-602 — SUBSTANTIVENESS IS JUDGED WITHOUT THE SENTINELS, and that
+		// exclusion is the whole of the reasoning below. Apply substitutes the
+		// schema-required location fields in place, so a viewer's projection of
+		// a GPS-only delta is not empty — it is three constants. A viewer's
+		// sentinels carry no information at all, and emitting a frame made of
+		// nothing else would restore precisely the leak IsSubstantive exists to
+		// close — the FRAME TIMING. A GPS group flushed once a second would
+		// become a "this car is streaming right now" beacon made of zeros.
 		//
 		// So a location-only frame stays SUPPRESSED for a viewer, and the
 		// sentinels ride the frames that were going out anyway. The viewer's
 		// required keys are therefore delivered by the connect-time snapshot
-		// (snapshot.go, which forces them precisely because it is the one frame
-		// whose job is to state the whole known state once) and refreshed on
-		// any mixed frame after it.
-		if !mask.IsSubstantive(projected) {
+		// (snapshot.go, which uses the PLAIN predicate precisely because it is
+		// the one frame whose job is to state the whole known state once) and
+		// refreshed on any mixed frame after it.
+		if !mask.IsSubstantiveExcludingSentinels(projected, fieldsMasked) {
 			// Empty-payload suppression per websocket-protocol.md §4.6.
 			//
 			// MYR-435 widened this from `len(projected) == 0`. The old check
@@ -206,7 +207,6 @@ func (h *Hub) buildRoleFrames(
 			frames[role] = nil
 			continue
 		}
-		projected, _ = mask.ApplyLocationSentinels(payload, projected, role)
 		frame, err := marshalVehicleUpdate(vehicleID, projected, timestamp)
 		if err != nil {
 			// Drop this role only; do not poison the broadcast.
