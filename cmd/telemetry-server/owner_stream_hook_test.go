@@ -30,15 +30,23 @@ type fakeUpserter struct {
 	seededVINs     []string
 	seededOutcomes []string
 	seedErr        error
-	// MYR-599 driver-access writes. Recorded as parallel slices in the same
-	// shape as the seed above, so a test can assert BOTH that a driver car got
-	// its row and that an owner re-link cleared a stale one — the two halves of
-	// the consent gate, which fail in opposite directions.
-	driverVINs  []string
-	driverTypes []string
-	driverErr   error
-	clearedVINs []string
-	clearErr    error
+}
+
+// driverAccessFor returns the MYR-599 access fields the hook passed for vin.
+//
+// Read off the recorded OwnedVehicleInput rather than off a separate spy,
+// because that IS the point of the design under test: the consent gate travels
+// WITH the provisioning write, in one transaction, so there is no second call
+// for a fake to intercept and no way for the two to disagree.
+func (f *fakeUpserter) driverAccessFor(t *testing.T, vin string) (accessType string, isOwner bool) {
+	t.Helper()
+	for _, in := range f.inputs {
+		if in.VIN == vin {
+			return in.TeslaAccessType, in.IsOwnerAccess
+		}
+	}
+	t.Fatalf("no upsert recorded for vin %s (inputs %+v)", vin, f.inputs)
+	return "", false
 }
 
 func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error) {
@@ -57,17 +65,6 @@ func (f *fakeUpserter) SeedFleetConfigSchedule(_ context.Context, vin, outcome s
 	f.seededVINs = append(f.seededVINs, vin)
 	f.seededOutcomes = append(f.seededOutcomes, outcome)
 	return f.seedErr
-}
-
-func (f *fakeUpserter) RecordDriverAccess(_ context.Context, vin, _, accessType string, _ time.Time) error {
-	f.driverVINs = append(f.driverVINs, vin)
-	f.driverTypes = append(f.driverTypes, accessType)
-	return f.driverErr
-}
-
-func (f *fakeUpserter) ClearDriverAccess(_ context.Context, vin, _ string) error {
-	f.clearedVINs = append(f.clearedVINs, vin)
-	return f.clearErr
 }
 
 type fakePusher struct {
@@ -343,13 +340,16 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 		if len(pusher.vins) != 1 || pusher.vins[0] != "5YJ3E1EA7KF000002" {
 			t.Errorf("pushed vins = %v, want only the OWNED VIN — a driver's car must not be pushed", pusher.vins)
 		}
-		// The driver-access row is written, carrying Tesla's token verbatim,
-		// because that row IS the gate every other push path consults.
-		if len(upsert.driverVINs) != 1 || upsert.driverVINs[0] != validVIN {
-			t.Fatalf("driver-access rows = %v, want [%s]", upsert.driverVINs, validVIN)
+		// The consent gate travels WITH the provisioning write, carrying Tesla's
+		// token verbatim — that row is what every other push path consults, and
+		// the whole point of it being on this input is that a car cannot exist
+		// without it.
+		accessType, isOwner := upsert.driverAccessFor(t, validVIN)
+		if accessType != "DRIVER" {
+			t.Errorf("stored access type = %q, want Tesla's own %q", accessType, "DRIVER")
 		}
-		if upsert.driverTypes[0] != "DRIVER" {
-			t.Errorf("stored access type = %q, want Tesla's own %q", upsert.driverTypes[0], "DRIVER")
+		if isOwner {
+			t.Error("IsOwnerAccess = true for a DRIVER listing — the gate would never be written")
 		}
 		// And the schedule says WHY the car is sitting there, rather than
 		// leaving a no-claim row that later reads as unexplained silence.
@@ -380,34 +380,42 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 		hook.AfterLink(ctx, "cuser1", "token")
 
-		if len(upsert.clearedVINs) != 1 || upsert.clearedVINs[0] != validVIN {
-			t.Fatalf("cleared vins = %v, want [%s]", upsert.clearedVINs, validVIN)
+		accessType, isOwner := upsert.driverAccessFor(t, validVIN)
+		if !isOwner {
+			t.Fatal("IsOwnerAccess = false for an OWNER listing — the stale row would survive")
 		}
-		if len(upsert.driverVINs) != 0 {
-			t.Errorf("driver-access rows = %v, want none for an OWNER listing", upsert.driverVINs)
+		if accessType != "OWNER" {
+			t.Errorf("access type = %q, want %q", accessType, "OWNER")
 		}
 		if len(pusher.vins) != 1 {
 			t.Errorf("pushed vins = %v, want the owned car pushed as usual", pusher.vins)
 		}
 	})
 
-	// A driver-access row that could not be written leaves the car provisioned
-	// with the gate OPEN — the one failure in this hook with a consequence
-	// outside our own user. It must still not fail the link (the hook's standing
-	// contract) and must still not push.
-	t.Run("a failed driver-access write never fails the link and never pushes", func(t *testing.T) {
+	// THE CAR AND ITS GATE FAIL TOGETHER. This case replaced one that asserted
+	// the weaker, older behaviour — "a failed driver-access write still leaves
+	// the car provisioned" — which was exactly the hole worth closing: a car
+	// provisioned WITHOUT its gate is indistinguishable from an owner's, and the
+	// reconciler configures it on the next pass at a vehicle nobody approved.
+	//
+	// The gate is now written inside UpsertOwnedVehicle's transaction, so there
+	// is no longer a failure mode that produces one without the other. A failed
+	// provision provisions nothing, pushes nothing, and does not fail the link —
+	// the next one retries both halves.
+	t.Run("a failed provision writes no gate, pushes nothing, and does not fail the link", func(t *testing.T) {
 		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{driverVehicle("1", validVIN, "Theirs")}}
-		upsert := &fakeUpserter{driverErr: errors.New("insert failed")}
+		upsert := &fakeUpserter{err: errors.New("transaction failed")}
 		pusher := &fakePusher{}
 		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
 
 		hook.AfterLink(ctx, "cuser1", "token")
 
 		if len(pusher.vins) != 0 {
-			t.Errorf("pushed vins = %v, want none — a driver's car is never pushed at link time", pusher.vins)
+			t.Errorf("pushed vins = %v, want none", pusher.vins)
 		}
-		if len(upsert.inputs) != 1 {
-			t.Errorf("upsert inputs = %+v, want the car still provisioned", upsert.inputs)
+		// No schedule seed either: there is no car for it to describe.
+		if len(upsert.seededVINs) != 0 {
+			t.Errorf("seeded vins = %v, want none for a car that was never provisioned", upsert.seededVINs)
 		}
 	})
 
@@ -480,8 +488,8 @@ func TestOwnerStreamHook_ReaddVehicle(t *testing.T) {
 		if len(pusher.vins) != 0 {
 			t.Errorf("pushed vins = %v, want none — consent gates the push, not the row", pusher.vins)
 		}
-		if len(upsert.driverVINs) != 1 || upsert.driverVINs[0] != validVIN {
-			t.Errorf("driver-access rows = %v, want [%s]", upsert.driverVINs, validVIN)
+		if accessType, isOwner := upsert.driverAccessFor(t, validVIN); isOwner || accessType != "DRIVER" {
+			t.Errorf("access = (%q, owner=%v), want (DRIVER, owner=false)", accessType, isOwner)
 		}
 		if len(upsert.seededOutcomes) != 1 || upsert.seededOutcomes[0] != store.SetupOutcomeAwaitingOwnerAck {
 			t.Errorf("seeded outcomes = %v, want [%s]", upsert.seededOutcomes, store.SetupOutcomeAwaitingOwnerAck)

@@ -75,19 +75,16 @@ type vehicleUpserter interface {
 	// to do instead of waiting up to 45 minutes for the reconciler to discover
 	// the same fact, and so the in-band self-heal signals have a row to land on.
 	SeedFleetConfigSchedule(ctx context.Context, vin, outcome string, now time.Time) error
-	// RecordDriverAccess files the go_vehicle_driver_access row for a car this
-	// account DRIVES rather than owns, carrying Tesla's access_type verbatim
-	// (MYR-599). On the same interface as the two writes above for the reason
-	// MYR-491 put the schedule seed here: they are one actor doing one job —
-	// provisioning a car that cannot stream yet, and recording WHY — and a
-	// deployment that provisioned driver cars without writing the row would
-	// provision them with the consent gate WIDE OPEN.
-	RecordDriverAccess(ctx context.Context, vin, userID, accessType string, now time.Time) error
-	// ClearDriverAccess removes that row when Tesla now reports this account as
-	// the car's OWNER — the access-UPGRADE case. See the store method for why
-	// the reverse is not observed here.
-	ClearDriverAccess(ctx context.Context, vin, userID string) error
 }
+
+// NOTE ON WHAT IS DELIBERATELY *NOT* ON THIS INTERFACE (MYR-599). The
+// driver-access row — the consent gate — is written by UpsertOwnedVehicle
+// itself, from the access type carried on OwnedVehicleInput, inside the same
+// transaction as the "Vehicle" row. It was briefly a separate best-effort call
+// here, and that was wrong for the one write in this hook whose failure reaches
+// a THIRD PARTY: a car provisioned without its gate is indistinguishable from
+// an owner's, and the reconciler configures it on the next pass. Keeping it off
+// this interface is what stops it drifting back into being skippable.
 
 // fleetConfigPusher pushes the fleet-telemetry config for one VIN so the car
 // starts streaming. The real implementation calls the tesla-http-proxy; it is
@@ -204,6 +201,13 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 		TeslaVehicleID: v.ID.String(),
 		VIN:            vin,
 		Name:           v.DisplayName,
+		// MYR-599: the access type travels WITH the provisioning write, so the
+		// consent gate is created in the same transaction as the car it gates.
+		// It used to be a second, best-effort round trip — which meant a failed
+		// gate write left the car provisioned and indistinguishable from an
+		// owner's, for the reconciler to configure unattended.
+		TeslaAccessType: v.AccessType,
+		IsOwnerAccess:   v.IsOwner(),
 	})
 	if err != nil {
 		h.logger.Warn("owner stream setup: vehicle upsert failed (skipping vehicle)",
@@ -239,13 +243,10 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 		h.provisionDriverAccess(ctx, userID, v)
 		return true
 	}
-	// An OWNER listing for a car that carries a driver row is the access
-	// UPGRADE, and the row must go: left standing it would keep the wire saying
-	// `teslaAccessType: "driver"` about a car this person owns outright and, if
-	// it were never acknowledged, would hold the push gate shut on a car nobody
-	// needs permission for. Ordered before the push for exactly that reason —
-	// the gate must be open by the time anything tries to walk through it.
-	h.clearDriverAccess(ctx, userID, vin)
+	// NOTE the access-UPGRADE case is already handled: UpsertOwnedVehicle
+	// deleted any stale driver row in the same transaction that reconciled this
+	// car, because IsOwnerAccess was true. That ordering is not a convention to
+	// remember here — it is a property of the one statement above.
 
 	h.logger.Info("owner_vehicle_owned",
 		slog.String("event", "owner_vehicle_owned"),

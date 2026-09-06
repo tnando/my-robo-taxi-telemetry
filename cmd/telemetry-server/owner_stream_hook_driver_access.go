@@ -1,8 +1,7 @@
 package main
 
-// The DRIVER-ACCESS half of ownerStreamHook (MYR-599): provisioning a car the
-// linking account drives but does not own, and un-provisioning that fact when
-// Tesla later calls the same account the owner.
+// The DRIVER-ACCESS half of ownerStreamHook (MYR-599): what happens after a car
+// the linking account DRIVES but does not own has been provisioned.
 //
 // Split from owner_stream_hook.go for the CLAUDE.md 300-line file cap; the hook
 // and this file are one component.
@@ -45,7 +44,6 @@ package main
 import (
 	"context"
 	"log/slog"
-	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
 	"github.com/myrobotaxi/telemetry/internal/telemetry"
@@ -55,45 +53,38 @@ import (
 // "Vehicle" row already exists, so this records WHAT KIND of car it is and
 // leaves it inert.
 //
-// THE ORDER OF THE TWO WRITES IS NORMATIVE AND IT IS NOT THE OBVIOUS ONE.
-// The driver-access row goes first, the schedule seed second, because the two
-// carry different weights:
+// EVERYTHING IT DOES IS BEST-EFFORT, AND THAT IS ONLY SAFE BECAUSE THE GATE IS
+// NOT DONE HERE. The two writes carry very different weights:
 //
 //   - The DRIVER-ACCESS ROW is the gate. Every push path in the server refuses a
-//     car that has one with a NULL acknowledged_at. If it is missing, the car is
-//     indistinguishable from an owner's and the reconciler will push at it on
-//     its next pass — silently, unattended, at a car whose owner never agreed to
-//     anything. This write failing is the one failure in this hook with a
-//     consequence outside our own user.
-//   - The SCHEDULE SEED is explanation. If it is missing the card is quieter
-//     than it should be, and the reconciler fills it in later.
+//     car that has one with a NULL acknowledged_at, so a car MISSING it is
+//     indistinguishable from an owner's and the reconciler configures it on its
+//     next pass — unattended, at a car whose owner never agreed to anything. Its
+//     failure is the only one in this hook that reaches a third party, which is
+//     exactly why it is NOT a step here: UpsertOwnedVehicle writes it in the
+//     same transaction as the "Vehicle" row, so the car and its gate exist
+//     together or not at all.
+//   - The SCHEDULE SEED, below, is explanation. If it is missing the card is
+//     quieter than it should be and the reconciler fills it in later, which is
+//     a fair thing to log and move past.
 //
-// So the row is attempted first and its failure is logged at ERROR while the
-// seed's is a WARN, and NEITHER fails the link — which is the hook's standing
-// contract and is also why the setup-state derivation reads the DRIVER ROW
-// rather than the schedule label: the authoritative fact must not be the one
-// carried by the best-effort write that is allowed to be absent.
+// It is also why the setup-state derivation reads the DRIVER ROW rather than the
+// schedule label: the authoritative fact must not be the one carried by the
+// write that is allowed to be absent.
 func (h *ownerStreamHook) provisionDriverAccess(ctx context.Context, userID string, v telemetry.FleetVehicle) {
 	vin := v.VIN
 
-	// Tesla's access_type VERBATIM, including the EMPTY string older Fleet
-	// responses have shipped. FleetVehicle.IsOwner already treats empty as
-	// non-owner — fail closed, an unknown access level must never be promoted to
-	// ownership — and storing '' rather than inventing "DRIVER" keeps the column
-	// able to answer the only question it exists for: what did Tesla actually
-	// say?
-	if err := h.upsert.RecordDriverAccess(ctx, vin, userID, v.AccessType, time.Now()); err != nil {
-		// ERROR, not WARN, and the log line says what is now true rather than
-		// what failed: without the row this car is provisioned WITH THE CONSENT
-		// GATE OPEN, and the next reconciler pass will configure it. That is the
-		// one outcome in this hook that reaches a third party.
-		h.logger.Error("owner stream setup: driver-access row could not be written — this car is provisioned with NO acknowledgment gate and the reconciler may configure it",
-			slog.String("event", "owner_vehicle_driver_access_write_failed"),
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-			slog.String("access_type", v.AccessType),
-			slog.String("error", err.Error()))
-	}
+	// THE GATE IS ALREADY WRITTEN by the time this runs. UpsertOwnedVehicle
+	// recorded the driver-access row in the SAME transaction as the "Vehicle"
+	// row, from the access type carried on OwnedVehicleInput — Tesla's
+	// access_type VERBATIM, including the EMPTY string older Fleet responses
+	// have shipped, which FleetVehicle.IsOwner already treats as non-owner (fail
+	// closed) and which is stored as '' rather than invented so the column can
+	// still answer the only question it exists for: what did Tesla actually say?
+	//
+	// That atomicity is the point. This function is best-effort — everything it
+	// does now is explanation — precisely BECAUSE the one thing that must not be
+	// best-effort already happened, indivisibly, upstream.
 
 	// Seeded INSTEAD OF a push, which makes this the one schedule label in the
 	// system that describes a push that never happened. It is what lets the
@@ -110,32 +101,4 @@ func (h *ownerStreamHook) provisionDriverAccess(ctx context.Context, userID stri
 		slog.String("user_id", userID),
 		slog.String("vin", redactVIN(vin)),
 		slog.String("access_type", v.AccessType))
-}
-
-// clearDriverAccess drops a stale driver-access row when Tesla now reports this
-// account as the car's OWNER.
-//
-// THE ACCESS-UPGRADE CASE, and it is a real one: a title transfer, or an owner
-// who had been reaching their own car through a second account. The row is
-// evidence about a claim that is no longer true, and leaving it would keep the
-// wire saying `teslaAccessType: "driver"` about a car this person owns outright
-// — and, if it was never acknowledged, would hold the push gate shut on a car
-// that needs nobody's permission.
-//
-// IT DOES NOT RUN THE OTHER WAY, and the gap is deliberate rather than
-// overlooked: Tesla DOWNGRADING an owner to a driver is not observed here,
-// because nothing re-lists an already-provisioned owner's cars for that purpose.
-// A car that changes hands at Tesla keeps streaming to its old linker until they
-// re-link or remove it. Recorded in the PR; out of scope for MYR-599.
-//
-// Best-effort, like every step in this hook: a failure is logged and the link
-// still succeeds. The cost of a miss is the stale-row state described above,
-// which the next OWNER re-link clears.
-func (h *ownerStreamHook) clearDriverAccess(ctx context.Context, userID, vin string) {
-	if err := h.upsert.ClearDriverAccess(ctx, vin, userID); err != nil {
-		h.logger.Warn("owner stream setup: stale driver-access row could not be cleared (car may read as driver-access until the next owner re-link)",
-			slog.String("user_id", userID),
-			slog.String("vin", redactVIN(vin)),
-			slog.String("error", err.Error()))
-	}
 }
