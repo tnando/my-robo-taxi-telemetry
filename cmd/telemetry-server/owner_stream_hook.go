@@ -75,6 +75,18 @@ type vehicleUpserter interface {
 	// to do instead of waiting up to 45 minutes for the reconciler to discover
 	// the same fact, and so the in-band self-heal signals have a row to land on.
 	SeedFleetConfigSchedule(ctx context.Context, vin, outcome string, now time.Time) error
+	// RecordDriverAccess files the go_vehicle_driver_access row for a car this
+	// account DRIVES rather than owns, carrying Tesla's access_type verbatim
+	// (MYR-599). On the same interface as the two writes above for the reason
+	// MYR-491 put the schedule seed here: they are one actor doing one job —
+	// provisioning a car that cannot stream yet, and recording WHY — and a
+	// deployment that provisioned driver cars without writing the row would
+	// provision them with the consent gate WIDE OPEN.
+	RecordDriverAccess(ctx context.Context, vin, userID, accessType string, now time.Time) error
+	// ClearDriverAccess removes that row when Tesla now reports this account as
+	// the car's OWNER — the access-UPGRADE case. See the store method for why
+	// the reverse is not observed here.
+	ClearDriverAccess(ctx context.Context, vin, userID string) error
 }
 
 // fleetConfigPusher pushes the fleet-telemetry config for one VIN so the car
@@ -121,16 +133,13 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 	}
 
 	for _, v := range vehicles {
-		// Ownership filter (MYR-257 finding 3): never provision a car the caller
-		// only shares (shared-driver access). Skip + audit non-owner vehicles.
-		if !v.IsOwner() {
-			h.logger.Info("owner_vehicle_skipped",
-				slog.String("event", "owner_vehicle_skipped"),
-				slog.String("user_id", userID),
-				slog.String("reason", "not_owner"),
-				slog.String("vin", redactVIN(v.VIN)))
-			continue
-		}
+		// MYR-599 REPLACED THE OWNERSHIP FILTER WITH CONSENT. MYR-257 finding 3
+		// skipped every non-OWNER vehicle here, silently by design — and the
+		// silence was the bug: a tester who linked a car he DRIVES completed
+		// OAuth, paired his virtual key, and never saw a row appear or a word
+		// about why. Both access types are provisioned now; what separates them
+		// is that nothing is pushed at a driver's car until they acknowledge
+		// the owner approved it. provisionVehicle owns that branch.
 		h.provisionVehicle(ctx, userID, accessToken, v)
 	}
 }
@@ -139,10 +148,19 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 // (MYR-262): after VehicleReaddHandler clears the caller's tombstone, this
 // provisions ONLY the single owned car matching teslaVehicleID, reusing the same
 // per-vehicle path (provisionVehicle) the passive AfterLink sync uses. It is
-// owner-filtered (an OWNER-access match is required) so a caller can never
-// re-add a car they do not own even with a guessed id, and best-effort (returns
-// false, never resurrecting anything, on any list/ownership/miss condition).
-// Returns whether the car was provisioned.
+// best-effort (returns false, never resurrecting anything, on any list/miss
+// condition). Returns whether the car was provisioned.
+//
+// THE ACCESS CHECK IS NO LONGER A REFUSAL (MYR-599), and the guarantee that
+// used to rest on it now rests where it belongs. The old rule — "an OWNER-access
+// match is required, so a caller can never attach a car they do not own even
+// with a guessed id" — was doing two jobs at once: keeping other people's cars
+// off this account, and keeping DRIVER cars off it. The first job is done
+// entirely by the FLEET LISTING, which is scoped to this caller's own Tesla
+// token: a guessed teslaVehicleID that is not in their fleet still falls through
+// to the miss below. The second job is the one the client reversed. So a driver
+// may deliberately re-add a car they drive, and it lands in the same
+// unacknowledged, un-pushed state a first link would produce.
 func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken, teslaVehicleID string) bool {
 	vehicles, err := h.lister.ListVehicles(ctx, accessToken)
 	if err != nil {
@@ -154,15 +172,6 @@ func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken,
 		if v.ID.String() != teslaVehicleID {
 			continue
 		}
-		if !v.IsOwner() {
-			// The caller only shares this car — never attach someone else's car.
-			h.logger.Info("owner_vehicle_skipped",
-				slog.String("event", "owner_vehicle_skipped"),
-				slog.String("user_id", userID),
-				slog.String("reason", "not_owner"),
-				slog.String("vin", redactVIN(v.VIN)))
-			return false
-		}
 		return h.provisionVehicle(ctx, userID, accessToken, v)
 	}
 	h.logger.Warn("owner re-add: target not in caller fleet (tombstone cleared, nothing to provision)",
@@ -171,12 +180,23 @@ func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken,
 	return false
 }
 
-// provisionVehicle seeds one OWNER-access vehicle's "Vehicle" row and, when a
-// proxy is configured, best-effort pushes its fleet-telemetry config. It is the
-// shared per-vehicle body of both the passive AfterLink sync and the deliberate
-// ReaddVehicle path — the tombstone gate lives inside UpsertOwnedVehicle, so a
-// still-tombstoned car is skipped here (returns false) regardless of caller.
-// Returns whether the car was provisioned (owned/reconciled).
+// provisionVehicle seeds one vehicle's "Vehicle" row and then takes ONE OF TWO
+// EXITS, decided by what Tesla says the linking account is to this car.
+//
+//   - OWNER access: best-effort push of the fleet-telemetry config, exactly as
+//     before, plus the removal of any stale driver-access row (the upgrade
+//     case).
+//   - DRIVER access (MYR-599): the driver-access row is written, the schedule is
+//     seeded `awaiting_owner_ack`, and NOTHING IS PUSHED. The car is provisioned
+//     — it appears, it can be named, the virtual key the person may already have
+//     paired is not wasted — but it is inert until §7.24 records that the owner
+//     approved adding it.
+//
+// It is the shared per-vehicle body of both the passive AfterLink sync and the
+// deliberate ReaddVehicle path — the tombstone gate lives inside
+// UpsertOwnedVehicle, so a still-tombstoned car is skipped here (returns false)
+// regardless of caller and regardless of access type. Returns whether the car
+// was provisioned.
 func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessToken string, v telemetry.FleetVehicle) bool {
 	vin := v.VIN
 	outcome, err := h.upsert.UpsertOwnedVehicle(ctx, store.OwnedVehicleInput{
@@ -211,6 +231,22 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 			slog.String("vin", redactVIN(vin)))
 		return false
 	}
+	// MYR-599: the fork. Taken BEFORE the `owner_vehicle_owned` line below,
+	// because that line's whole meaning is "this account owns this car" and
+	// emitting it for a driver's car would make the one audit trail that can
+	// answer "how did this car get here?" say the wrong thing.
+	if !v.IsOwner() {
+		h.provisionDriverAccess(ctx, userID, v)
+		return true
+	}
+	// An OWNER listing for a car that carries a driver row is the access
+	// UPGRADE, and the row must go: left standing it would keep the wire saying
+	// `teslaAccessType: "driver"` about a car this person owns outright and, if
+	// it were never acknowledged, would hold the push gate shut on a car nobody
+	// needs permission for. Ordered before the push for exactly that reason —
+	// the gate must be open by the time anything tries to walk through it.
+	h.clearDriverAccess(ctx, userID, vin)
+
 	h.logger.Info("owner_vehicle_owned",
 		slog.String("event", "owner_vehicle_owned"),
 		slog.String("user_id", userID),

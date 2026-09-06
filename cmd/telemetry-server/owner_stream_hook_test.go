@@ -30,6 +30,15 @@ type fakeUpserter struct {
 	seededVINs     []string
 	seededOutcomes []string
 	seedErr        error
+	// MYR-599 driver-access writes. Recorded as parallel slices in the same
+	// shape as the seed above, so a test can assert BOTH that a driver car got
+	// its row and that an owner re-link cleared a stale one — the two halves of
+	// the consent gate, which fail in opposite directions.
+	driverVINs  []string
+	driverTypes []string
+	driverErr   error
+	clearedVINs []string
+	clearErr    error
 }
 
 func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehicleInput) (store.VehicleUpsertOutcome, error) {
@@ -48,6 +57,17 @@ func (f *fakeUpserter) SeedFleetConfigSchedule(_ context.Context, vin, outcome s
 	f.seededVINs = append(f.seededVINs, vin)
 	f.seededOutcomes = append(f.seededOutcomes, outcome)
 	return f.seedErr
+}
+
+func (f *fakeUpserter) RecordDriverAccess(_ context.Context, vin, _, accessType string, _ time.Time) error {
+	f.driverVINs = append(f.driverVINs, vin)
+	f.driverTypes = append(f.driverTypes, accessType)
+	return f.driverErr
+}
+
+func (f *fakeUpserter) ClearDriverAccess(_ context.Context, vin, _ string) error {
+	f.clearedVINs = append(f.clearedVINs, vin)
+	return f.clearErr
 }
 
 type fakePusher struct {
@@ -295,9 +315,18 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 		}
 	})
 
-	t.Run("shared-driver vehicle is NOT provisioned or pushed (ownership filter)", func(t *testing.T) {
+	// MYR-599 REPLACED THE OWNERSHIP FILTER WITH CONSENT, and this test replaced
+	// the one that pinned it ("shared-driver vehicle is NOT provisioned or
+	// pushed"). The old rule dropped the car silently: OAuth completed, the
+	// virtual key was paired, and the person never saw a row or a reason.
+	//
+	// The property that MUST survive the change is the one in the second half of
+	// each assertion: the driver's car is PROVISIONED but NOT PUSHED. If that
+	// ever inverts, this server configures a stranger's vehicle on the strength
+	// of nobody's permission.
+	t.Run("driver-access vehicle IS provisioned but nothing is pushed at it", func(t *testing.T) {
 		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
-			driverVehicle("1", validVIN, "Someone else's car"),
+			driverVehicle("1", validVIN, "A car I drive"),
 			ownedVehicle("2", "5YJ3E1EA7KF000002", "Mine"),
 		}}
 		upsert := &fakeUpserter{}
@@ -306,12 +335,79 @@ func TestOwnerStreamHook_AfterLink(t *testing.T) {
 
 		hook.AfterLink(ctx, "cuser1", "token")
 
-		// Only the OWNER vehicle is provisioned + pushed; the DRIVER one is dropped.
-		if len(upsert.inputs) != 1 || upsert.inputs[0].TeslaVehicleID != "2" {
-			t.Fatalf("upsert inputs = %+v, want only the owned vehicle (id 2)", upsert.inputs)
+		// BOTH cars get a "Vehicle" row now — that is the whole point.
+		if len(upsert.inputs) != 2 {
+			t.Fatalf("upsert inputs = %+v, want both vehicles provisioned", upsert.inputs)
 		}
+		// ...but ONLY the owned one is configured at Tesla.
 		if len(pusher.vins) != 1 || pusher.vins[0] != "5YJ3E1EA7KF000002" {
-			t.Errorf("pushed vins = %v, want only the owned VIN", pusher.vins)
+			t.Errorf("pushed vins = %v, want only the OWNED VIN — a driver's car must not be pushed", pusher.vins)
+		}
+		// The driver-access row is written, carrying Tesla's token verbatim,
+		// because that row IS the gate every other push path consults.
+		if len(upsert.driverVINs) != 1 || upsert.driverVINs[0] != validVIN {
+			t.Fatalf("driver-access rows = %v, want [%s]", upsert.driverVINs, validVIN)
+		}
+		if upsert.driverTypes[0] != "DRIVER" {
+			t.Errorf("stored access type = %q, want Tesla's own %q", upsert.driverTypes[0], "DRIVER")
+		}
+		// And the schedule says WHY the car is sitting there, rather than
+		// leaving a no-claim row that later reads as unexplained silence.
+		if len(upsert.seededOutcomes) != 2 {
+			t.Fatalf("seeded outcomes = %v, want one per provisioned car", upsert.seededOutcomes)
+		}
+		if upsert.seededOutcomes[0] != store.SetupOutcomeAwaitingOwnerAck {
+			t.Errorf("driver car seeded %q, want %q",
+				upsert.seededOutcomes[0], store.SetupOutcomeAwaitingOwnerAck)
+		}
+		// The owner's car must NOT be given the driver label, and must not have
+		// a driver row filed against it.
+		if upsert.seededOutcomes[1] == store.SetupOutcomeAwaitingOwnerAck {
+			t.Errorf("owned car seeded %q, want the ordinary push outcome", upsert.seededOutcomes[1])
+		}
+	})
+
+	// THE ACCESS-UPGRADE CASE. Tesla re-labelling a driver as the owner (a title
+	// transfer, or an owner reaching their own car through a second account)
+	// must retire the stale row — otherwise the wire keeps calling a car
+	// "driver" that this person owns outright, and an unacknowledged row would
+	// hold the push gate shut on a car needing nobody's permission.
+	t.Run("an OWNER listing clears any stale driver-access row before pushing", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("1", validVIN, "Mine now")}}
+		upsert := &fakeUpserter{}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(upsert.clearedVINs) != 1 || upsert.clearedVINs[0] != validVIN {
+			t.Fatalf("cleared vins = %v, want [%s]", upsert.clearedVINs, validVIN)
+		}
+		if len(upsert.driverVINs) != 0 {
+			t.Errorf("driver-access rows = %v, want none for an OWNER listing", upsert.driverVINs)
+		}
+		if len(pusher.vins) != 1 {
+			t.Errorf("pushed vins = %v, want the owned car pushed as usual", pusher.vins)
+		}
+	})
+
+	// A driver-access row that could not be written leaves the car provisioned
+	// with the gate OPEN — the one failure in this hook with a consequence
+	// outside our own user. It must still not fail the link (the hook's standing
+	// contract) and must still not push.
+	t.Run("a failed driver-access write never fails the link and never pushes", func(t *testing.T) {
+		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{driverVehicle("1", validVIN, "Theirs")}}
+		upsert := &fakeUpserter{driverErr: errors.New("insert failed")}
+		pusher := &fakePusher{}
+		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
+
+		hook.AfterLink(ctx, "cuser1", "token")
+
+		if len(pusher.vins) != 0 {
+			t.Errorf("pushed vins = %v, want none — a driver's car is never pushed at link time", pusher.vins)
+		}
+		if len(upsert.inputs) != 1 {
+			t.Errorf("upsert inputs = %+v, want the car still provisioned", upsert.inputs)
 		}
 	})
 
@@ -358,19 +454,37 @@ func TestOwnerStreamHook_ReaddVehicle(t *testing.T) {
 		}
 	})
 
-	t.Run("shared-driver match is never attached (owner filter)", func(t *testing.T) {
+	// MYR-599: the deliberate re-add of a car the caller DRIVES now succeeds,
+	// where it used to be refused outright. It lands in exactly the state a
+	// first link produces — provisioned, driver row filed, nothing pushed —
+	// which is what makes "re-add" mean the same thing for both access types.
+	//
+	// The protection the old refusal was thought to provide is NOT lost, and the
+	// case below proves where it actually lives: the FLEET LISTING is scoped to
+	// the caller's own Tesla token, so an id that is not in their fleet still
+	// falls through to the miss regardless of access type.
+	t.Run("driver-access match is re-added, un-pushed, with its row filed", func(t *testing.T) {
 		lister := &fakeLister{vehicles: []telemetry.FleetVehicle{
-			driverVehicle("333", validVIN, "SharedCar"),
+			driverVehicle("333", validVIN, "A car I drive"),
 		}}
 		upsert := &fakeUpserter{}
 		pusher := &fakePusher{}
 		hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: testLogger()}
 
-		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "333"); got {
-			t.Errorf("ReaddVehicle = true, want false (caller only shares this car)")
+		if got := hook.ReaddVehicle(ctx, "cuser1", "token", "333"); !got {
+			t.Fatalf("ReaddVehicle = false, want true (a driver may deliberately re-add a car they drive)")
 		}
-		if len(upsert.inputs) != 0 {
-			t.Errorf("upsert inputs = %+v, want none (shared driver must not provision)", upsert.inputs)
+		if len(upsert.inputs) != 1 || upsert.inputs[0].TeslaVehicleID != "333" {
+			t.Fatalf("upsert inputs = %+v, want the target provisioned", upsert.inputs)
+		}
+		if len(pusher.vins) != 0 {
+			t.Errorf("pushed vins = %v, want none — consent gates the push, not the row", pusher.vins)
+		}
+		if len(upsert.driverVINs) != 1 || upsert.driverVINs[0] != validVIN {
+			t.Errorf("driver-access rows = %v, want [%s]", upsert.driverVINs, validVIN)
+		}
+		if len(upsert.seededOutcomes) != 1 || upsert.seededOutcomes[0] != store.SetupOutcomeAwaitingOwnerAck {
+			t.Errorf("seeded outcomes = %v, want [%s]", upsert.seededOutcomes, store.SetupOutcomeAwaitingOwnerAck)
 		}
 	})
 
