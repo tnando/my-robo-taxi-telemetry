@@ -162,6 +162,20 @@ type VehicleSnapshotRow struct {
 	// DERIVED from it by deriveSetupState together with Status and LastUpdated,
 	// and is never emitted raw — the same discipline as the ServiceETC pair.
 	SetupSchedule VehicleSetupSchedule
+
+	// DriverAccess is this car's go_vehicle_driver_access row (MYR-599), a
+	// THIRD side table on this read. RAW STORAGE behind `teslaAccessType` and
+	// the `awaiting_owner_acknowledgment` setup state.
+	//
+	// IT IS ALSO THE READ EVERY CONFIG-PUSH GATE USES. complete-setup, the
+	// reconnect endpoint and both fleet-config push routes already call GetByID
+	// to establish ownership, so taking the gate off the SAME row means access
+	// and pushability come from one statement and cannot disagree — the
+	// discipline MYR-581's OwnerNamed established, applied to consent. Like
+	// OwnerNamed, it is POPULATED ONLY BY GetByID and its zero value points the
+	// UNSAFE way for the gate (no row reads as "push away"), so a Vehicle from
+	// GetByVIN or the wide ListByUser must never be gated on.
+	DriverAccess VehicleDriverAccess
 }
 
 // VehicleSnapshotReader returns the snapshot row for a Prisma cuid.
@@ -369,6 +383,30 @@ type vehicleSnapshotResponse struct {
 	// frames — and a car in any of these states is by definition not sending
 	// frames to attach it to.
 	SetupState *SetupState `json:"setupState"`
+	// TeslaAccessType is HOW THE PERSON WHO LINKED THIS CAR RELATES TO IT ON
+	// TESLA'S SIDE — `"owner"` or `"driver"` (MYR-599, contracts v0.39.0).
+	//
+	// WHY IT IS ON THE WIRE AT ALL, given `setupState` already reports the
+	// acknowledgment gate: the gate CLEARS. A driver who acknowledges gets a car
+	// that streams and behaves exactly like an owner's, and the client still has
+	// to say "you drive this car" on the picker row and in Settings — and still
+	// has to know, on a later app launch, that this is a car whose owner could
+	// revoke access at Tesla at any moment. `setupState` is about what is left
+	// to finish; this is about what the car IS.
+	//
+	// OPTIONAL ON THE CONTRACT, ALWAYS EMITTED HERE, with NO omitempty: an
+	// ABSENT value reads as `"owner"` (a server predating v0.39.0), so omitting
+	// the string "owner" would be technically correct and would make the two
+	// cases indistinguishable to anything reading the wire. Both roles: a viewer
+	// meeting a car their friend drives rather than owns is the party most
+	// helped by knowing it.
+	//
+	// REST-READ-TIME ONLY. A `vehicle_update` WS frame NEVER carries it, the
+	// same delivery rule `setupState` follows and for a stronger reason: it is
+	// not telemetry, no Tesla field feeds it, and it changes only when somebody
+	// re-links a car. See internal/mask — the vehicle_update allow-lists do not
+	// contain it, so there is nothing for VehicleStateMerger to fold.
+	TeslaAccessType string `json:"teslaAccessType"`
 }
 
 // toMaskMap returns the response as a wire-name-keyed map suitable for
@@ -497,6 +535,11 @@ func addSnapshotMediaFields(m map[string]any, r vehicleSnapshotResponse) {
 	// a typed (*SetupState)(nil) stored in an `any` is NOT equal to nil, and
 	// downstream mask/JSON handling treats the two differently.
 	m["setupState"] = setupStateWire(r.SetupState)
+	// MYR-599: a plain string, always keyed. Unlike its neighbour above there
+	// is no nil to normalise — the derivation returns one of two members and
+	// never an absence, so "owner" is a value here rather than a default the
+	// mask layer has to reason about.
+	m["teslaAccessType"] = r.TeslaAccessType
 }
 
 // setupStateWire normalises the optional setup state for the mask map. A nil
@@ -596,6 +639,9 @@ func buildSnapshotResponse(row VehicleSnapshotRow, now time.Time) vehicleSnapsho
 		RideShareEnabled: row.RideShareEnabled,
 		// MYR-491: derived here, so the streaming gate and the expiry window
 		// are applied exactly once per surface (vehicle_setup_state.go).
-		SetupState: deriveSetupState(now, row.Status, row.LastUpdated, row.SetupSchedule),
+		SetupState: deriveSetupState(now, row.Status, row.LastUpdated, row.SetupSchedule, row.DriverAccess),
+		// MYR-599: the SAME one-line rule the catalog applies over the same
+		// row, so the two surfaces cannot name one car two different ways.
+		TeslaAccessType: teslaAccessTypeWire(row.DriverAccess),
 	}
 }

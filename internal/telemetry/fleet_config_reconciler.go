@@ -52,6 +52,38 @@ const (
 	outcomePushFailed   = "push_failed"
 	outcomeTokenFailed  = "token_failed"
 	outcomeSyncedQuiet  = "synced_not_streaming"
+	// outcomeOwnerAccessRequired — Tesla answered the config push with
+	// `404 … not_found` for a VIN THIS ACCOUNT CAN SEE, which is Tesla's way of
+	// saying the caller's authorization may not configure this car.
+	//
+	// It is split out of push_failed because push_failed is a TRANSIENT label —
+	// the derivation lets it decay into `configuring` while a pairing epoch is
+	// live, and the reconciler keeps retrying it on a backoff. Neither is
+	// honest here. This is a STANDING refusal: retrying changes nothing, and a
+	// card that said "connecting…" for a car Tesla will not configure is the
+	// slow lie MYR-491's honesty bar was written against.
+	//
+	// The MYR-599 case that surfaced it: Tesla staff confirmed on
+	// teslamotors/fleet-telemetry#126 and #116 (March 2024) that
+	// `fleet_telemetry_config` POST is OWNER-only and that a DRIVER-access
+	// token gets exactly this 404 — while `GET /api/1/vehicles` still lists the
+	// VIN, so visibility is not evidence of capability. Tesla said DRIVER
+	// support was coming and never announced it. But the label is deliberately
+	// NOT spelled "driver_access_denied": the same 404 is what an account whose
+	// grant was revoked at Tesla gets, and both mean the same actionable thing.
+	outcomeOwnerAccessRequired = "owner_access_required"
+	// outcomeAwaitingOwnerAck — this car was linked by a DRIVER and nothing has
+	// been pushed at it, because the driver has not yet acknowledged that the
+	// owner approved adding it (MYR-599). Seeded at link time INSTEAD OF a
+	// push; never written by an attempt, because no attempt is made.
+	//
+	// It is wire-invisible on its own: deriveSetupState answers
+	// `awaiting_owner_acknowledgment` from the DRIVER ROW, which is the
+	// authoritative source and the thing the acknowledge endpoint clears. This
+	// label exists so the schedule row can say WHY it is sitting there — and so
+	// the MYR-592 suspension sweeper's `fleetConfigAbsentOutcomes` list can
+	// exclude a car that never had a config to remove.
+	outcomeAwaitingOwnerAck = "awaiting_owner_ack"
 )
 
 // FleetConfigCandidate is one vehicle that may be missing its telemetry

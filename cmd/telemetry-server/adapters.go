@@ -241,6 +241,9 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 			Longitude: v.Longitude,
 			// MYR-491: raw schedule; the handler derives the wire state.
 			SetupSchedule: setupScheduleRow(v.SetupSchedule),
+			// MYR-599: raw driver-access row; the handler derives BOTH
+			// `teslaAccessType` and the awaiting-acknowledgment setup state.
+			DriverAccess: driverAccessRow(v.DriverAccess),
 		})
 	}
 	return out, nil
@@ -255,6 +258,25 @@ func (a *vehicleListerAdapter) ListByUser(ctx context.Context, userID string) ([
 // setup state on the list than on the detail sheet for the same car. The two
 // structs are deliberately separate types (internal/telemetry must not import
 // internal/store), so nothing but this function keeps them in step.
+// driverAccessRow maps the store's driver-access row onto the telemetry
+// package's copy of the same shape (MYR-599).
+//
+// ONE place, for the same reason setupScheduleRow is one place: four adapters —
+// the owner catalog, the shared catalog, the group-ride member catalog and the
+// snapshot — feed the same two derivations, and a field silently dropped in one
+// of them would show a car as owner-access on the list and driver-access on the
+// detail sheet, or (worse) would open a config-push gate that the other surface
+// still reports as shut. The two structs are deliberately separate types
+// (internal/telemetry must not import internal/store), so nothing but this
+// function keeps them in step.
+func driverAccessRow(d store.VehicleDriverAccess) telemetry.VehicleDriverAccess {
+	return telemetry.VehicleDriverAccess{
+		Present:        d.Present,
+		CreatedAt:      d.CreatedAt,
+		AcknowledgedAt: d.AcknowledgedAt,
+	}
+}
+
 func setupScheduleRow(s store.SetupSchedule) telemetry.VehicleSetupSchedule {
 	return telemetry.VehicleSetupSchedule{
 		Present:         s.Present,

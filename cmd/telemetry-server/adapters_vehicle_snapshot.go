@@ -141,5 +141,11 @@ func snapshotRowFromVehicle(v store.Vehicle) telemetry.VehicleSnapshotRow {
 		// join on this read. Mapped through the same helper the two catalog
 		// adapters use so all three surfaces feed the derivation identically.
 		SetupSchedule: setupScheduleRow(v.SetupSchedule),
+
+		// MYR-599 driver-access row — raw, from the third side-table join on
+		// this read. Mapped through the same helper the three catalog adapters
+		// use. This is the field every config-push gate reads, so a drop here
+		// would not merely mis-render a row: it would open the gate.
+		DriverAccess: driverAccessRow(v.DriverAccess),
 	}
 }
