@@ -1529,6 +1529,30 @@ components:
             list/snapshot read or from the PUT's own echo.
           example: false
           x-classification: P0
+        teslaAccessType:
+          type: string
+          enum:
+            - owner
+            - driver
+          description: |
+            What TESLA thinks of the account that linked this car
+            (MYR-599, contracts v0.39.0), from `access_type` on the Fleet
+            API vehicle listing. IT IS NOT THE SIBLING `role`: `role`
+            says whether the CALLER owns the platform's Vehicle record,
+            and `role: "owner"` beside `teslaAccessType: "driver"` is
+            precisely the row this field exists for — the caller linked
+            the car and may unlink it, and Tesla still says somebody else
+            owns it. FAIL CLOSED: every non-OWNER answer folds to
+            "driver", an EMPTY one included, because an unknown access
+            level must never be promoted to ownership. ALWAYS EMITTED,
+            never omitted — an absent field already reads as "owner" (a
+            pre-v0.39.0 server provisioned owner-access cars only), so
+            omitting the string would make an old server
+            indistinguishable from a driver car. Visible to BOTH roles
+            (P0, log-safe). No WebSocket delta — a `vehicle_update` NEVER
+            carries it; it refreshes on the next list/snapshot read.
+          example: driver
+          x-classification: P0
         setupState:
           type: object
           nullable: true
@@ -1564,11 +1588,35 @@ components:
             state:
               type: string
               enum:
+                - awaiting_owner_acknowledgment
+                - owner_access_required
                 - awaiting_virtual_key
                 - configuring
                 - token_failed
               description: |
-                Which setup condition holds. `awaiting_virtual_key` —
+                Which setup condition holds; the enum is written in
+                PRECEDENCE order. `awaiting_owner_acknowledgment`
+                (MYR-599, contracts v0.39.0) — this car was linked by
+                somebody Tesla reports as a DRIVER of it rather than its
+                owner, and the platform will not configure telemetry
+                until that person acknowledges the owner approved adding
+                it; THE LINKER MUST ACT (POST
+                /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval,
+                rest-api.md §7.29). It sorts FIRST because nothing has
+                been pushed at such a car, so the push-shaped members
+                below cannot truthfully apply, and because consent
+                precedes pairing evidence. `owner_access_required`
+                (MYR-599, contracts v0.40.0) — Tesla REFUSED to create
+                the car's fleet-telemetry config, because the linking
+                account holds DRIVER access and the Fleet API lets only
+                the vehicle's OWNER account create one. COPY MUST NOT SAY
+                "reconnect Tesla" (that is `token_failed`'s action and
+                sends a person round a loop that cannot end): the car's
+                Tesla owner must add it under their own account and share
+                it with the driver. Emitted only on positive evidence —
+                an acknowledged driver-access row plus the observed 404 —
+                never from a bare 404, which a revoked grant also
+                returns. `awaiting_virtual_key` —
                 Tesla refused the telemetry config because the owner's
                 virtual key is not enrolled; THE OWNER MUST ACT (pair the
                 key in the Tesla app), and every signed command will be

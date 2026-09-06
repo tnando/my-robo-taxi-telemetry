@@ -425,6 +425,34 @@ reassigns ownership across users:
   driver row (the access-upgrade case); the reverse — Tesla downgrading an owner
   to a driver — is **not observed**, and revoking driver-linked cars when Tesla
   removes driver access is **out of scope for MYR-599**.
+- **THE OWNER WINS A CAR A DRIVER PROVISIONED FIRST, and this bullet exists
+  because the consent gate above created the problem it solves.** A driver's
+  passive `AfterLink` now writes a `"Vehicle"` row, and that row claims the
+  **UNIQUE `"Vehicle"."teslaVehicleId"`**. When the car's real owner linked
+  afterwards their upsert failed the cross-user predicate, `VehicleSkippedCrossUser`
+  was returned, and **their own car simply never appeared** — with nothing in the
+  system able to fix it, because the losing party is the person who actually owns
+  the vehicle. So an **OWNER-access link onto a driver-provisioned row TRANSFERS
+  the row**, inside the same provisioning transaction that would otherwise have
+  refused it: `"userId"` moves, the previous linker's driver-access row, fleet-config
+  schedule and attempt history are deleted, and every share and invite they had
+  issued against the car is revoked. The outcome is `VehicleOwnedByTransfer` and
+  the hook logs `vehicle_driver_link_superseded_by_owner` at INFO — nothing
+  failed, this is the designed resolution, but a car changed hands and the former
+  driver was not told, so it is deliberately greppable.
+  **THE MOVE IS ONE-WAY.** A DRIVER link onto an OWNER's row still skips exactly
+  as it always did: owner wins in both directions, and there is no signal a driver
+  can send that takes a car away from its owner. **AN OWNER-VERSUS-OWNER
+  collision also still skips** — two accounts each claiming ownership of one
+  `teslaVehicleId` is not something this rule can adjudicate, and guessing would
+  be worse than refusing.
+  **The audit row is filed under the FORMER DRIVER**, action
+  `vehicle.driver_link_superseded_by_owner`, metadata `{"ownerUserId": …}` and
+  nothing else: audit rows in this package name the person whose data the action
+  was about, and the data that changed is theirs — a car left their list and their
+  shares were revoked. The arriving owner's id rides in the metadata so the two
+  ends of the move are joinable from either side. Two opaque cuids, no VIN (P1),
+  no token, no share list.
 - Every outcome (`new_user`, `adopted_by_email`, `adopted_by_account`,
   identity-converged, vehicle owned/skipped) emits a P0-only audit line (opaque
   cuids + opaque outcome; never email/name/tokens).
