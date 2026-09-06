@@ -56,6 +56,7 @@ func TestVehicleFleetConfigHandler(t *testing.T) {
 				newTestFleetClient(stubFleetServer(t, tt.fleetStatus, tt.fleetBody).URL),
 				EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
 				discardLogger(),
+				WithDriverAccessGate(&stubDriverAccessGate{}),
 			)
 			handler := NewVehicleFleetConfigHandler(core, tt.reader, discardLogger())
 
@@ -82,6 +83,7 @@ func TestVehicleFleetConfigHandler_MissingAuth(t *testing.T) {
 		newTestFleetClient(stubFleetServer(t, http.StatusOK, `{"response":{"synced":true}}`).URL),
 		EndpointConfig{Hostname: "telemetry.example.com", Port: 443},
 		discardLogger(),
+		WithDriverAccessGate(&stubDriverAccessGate{}),
 	)
 	handler := NewVehicleFleetConfigHandler(
 		core,

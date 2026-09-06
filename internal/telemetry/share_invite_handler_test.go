@@ -1124,3 +1124,75 @@ func TestServeLeaveIsInformationFree(t *testing.T) {
 		t.Fatalf("status = %d, want the idempotent 204", rec2.Code)
 	}
 }
+
+// MYR-599 REVIEW FINDING I: SHARING IS DISPOSAL, LISTING IS NOT.
+//
+// Minting an invite hands a third party standing access to a vehicle whose
+// Tesla owner is not yet on record as agreeing the car belongs here at all —
+// so it waits for the acknowledgment. LISTING the invites on the same car
+// changes nothing, and is how a client renders the screen it would be refusing
+// from; a driver whose acknowledgment is outstanding has no invites to list
+// anyway, so refusing the read would only make the screen wrong.
+//
+// The split is the same one the fleet-config surface makes between its push and
+// its status GET, and it is asserted here in one test so a later refactor that
+// moves the gate up into authOwner fails loudly rather than quietly widening it.
+func TestShareInviteHandler_RefusesCreateForUnacknowledgedDriverCar(t *testing.T) {
+	newMux := func(t *testing.T, access VehicleDriverAccess, store ShareInviteStore) *http.ServeMux {
+		t.Helper()
+		row := fixtureSnapshotRow(shareOwnerUser)
+		row.DriverAccess = access
+		h := NewShareInviteHandler(
+			&stubTokenValidator{userID: shareOwnerUser},
+			&stubVehicleSnapshotReader{row: row},
+			store,
+			nil,
+			testShareLinkSigner(t),
+			discardLogger(),
+		)
+		mux := http.NewServeMux()
+		mux.HandleFunc("POST /api/vehicles/{vehicleId}/invites", h.ServeCreate)
+		mux.HandleFunc("GET /api/vehicles/{vehicleId}/invites", h.ServeList)
+		return mux
+	}
+	invitePath := "/api/vehicles/" + shareFixtureVeh + "/invites"
+	unacknowledged := VehicleDriverAccess{Present: true}
+
+	t.Run("create is refused with a 409", func(t *testing.T) {
+		store := &fakeShareInviteStore{created: pendingInviteRow()}
+		rec := doShareRequest(t, newMux(t, unacknowledged, store), http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live_history"}`)
+
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("status = %d, want 409 — nothing failed and the caller is not forbidden; "+
+				"§7.29 is the specific thing that changes the answer (body %s)",
+				rec.Code, rec.Body.String())
+		}
+		if store.createCalled {
+			t.Error("an invite row was written for a car whose owner has not been recorded as " +
+				"agreeing it belongs here")
+		}
+	})
+
+	t.Run("an acknowledged driver car may still share", func(t *testing.T) {
+		store := &fakeShareInviteStore{created: pendingInviteRow()}
+		acked := VehicleDriverAccess{Present: true, AcknowledgedAt: time.Now().Add(-time.Hour)}
+		rec := doShareRequest(t, newMux(t, acked, store), http.MethodPost, invitePath,
+			`{"label":"Mira Chen","permission":"live_history"}`)
+
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want 201 — the gate is the acknowledgment, not the access "+
+				"type (body %s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("listing is deliberately NOT gated", func(t *testing.T) {
+		store := &fakeShareInviteStore{}
+		rec := doShareRequest(t, newMux(t, unacknowledged, store), http.MethodGet, invitePath, "")
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — reading changes nothing and is how the client "+
+				"renders the screen it is refusing from (body %s)", rec.Code, rec.Body.String())
+		}
+	})
+}

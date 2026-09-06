@@ -118,7 +118,11 @@ func (h *VehicleFleetConfigHandler) handle(w http.ResponseWriter, r *http.Reques
 	}
 
 	if push {
-		h.core.pushForVIN(ctx, w, row.VIN, teslaTok)
+		// pushGatedVIN, not pushForVIN: the consent gate was settled above from
+		// the joined row this handler already holds. Going through pushForVIN
+		// would spend a second query re-deriving it, from a read taken at a
+		// different instant than the one the refusal above used.
+		h.core.pushGatedVIN(ctx, w, row.VIN, teslaTok)
 		return
 	}
 	h.core.writeStatusForVIN(ctx, w, row.VIN, teslaTok)

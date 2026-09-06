@@ -114,6 +114,10 @@ func (h *VehicleCommandHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	if !h.driverAccessAllows(w, row, vehicleID, userID) {
+		return
+	}
+
 	if !h.cooldown.allow(vehicleID) {
 		w.Header().Set("Retry-After", "2")
 		h.writeError(w, http.StatusTooManyRequests, wserrors.ErrCodeRateLimited, "command cooldown: too many commands for this vehicle")
@@ -170,6 +174,46 @@ func (h *VehicleCommandHandler) authorizeVehicle(ctx context.Context, w http.Res
 		return VehicleSnapshotRow{}, false
 	}
 	return row, true
+}
+
+// driverAccessAllows is the MYR-599 consent gate (review finding I). Returns
+// false having already written the response.
+//
+// WHY A COMMAND SURFACE NEEDS ONE AT ALL, since the person holds a paired
+// virtual key and can unlock the car with Tesla's own app: what this gate
+// protects is not the driver's ability to operate a car they legitimately
+// drive, it is THE PLATFORM ACTING ON SOMEBODY ELSE'S PROPERTY on their behalf.
+// Before §7.29 records the acknowledgment, MyRoboTaxi has no evidence at all
+// that the car's owner agreed to their vehicle being added here, and issuing
+// signed commands through our credentials and our audit trail on that basis is
+// exactly the assumption the acknowledgment exists to replace. The driver has
+// lost nothing: the Tesla app still works, and one tap on the acknowledgment
+// sheet opens this door.
+//
+// It also closes a mechanical hole. A signed command Tesla applies feeds
+// `handlePairingSignal`, which resets the schedule and hands the car to the
+// reconciler — the exact producer the earlier review had to gate at its
+// consumer. Refusing here means the signal is never raised for a car whose
+// consent is outstanding, so the two defences are independent rather than
+// stacked on one check.
+//
+// 409, matching the reconnect and fleet-config refusals: nothing failed, the
+// caller is not forbidden, and there is a specific thing they can do about it.
+func (h *VehicleCommandHandler) driverAccessAllows(
+	w http.ResponseWriter, row VehicleSnapshotRow, vehicleID, userID string,
+) bool {
+	if !row.DriverAccess.PendingAcknowledgment() {
+		return true
+	}
+	h.logger.Info("vehicle command: refused, driver-access car awaiting the owner-approval acknowledgment",
+		slog.String("event", "command_awaiting_owner_ack"),
+		slog.String("vehicle_id", vehicleID),
+		slog.String("user_id", userID),
+		slog.String("vin", redactVIN(row.VIN)),
+	)
+	h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
+		"confirm the owner approved adding this car before commands can be sent to it")
+	return false
 }
 
 // decodeParams reads the optional JSON parameter body. An empty body yields

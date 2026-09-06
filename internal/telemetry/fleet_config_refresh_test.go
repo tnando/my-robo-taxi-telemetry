@@ -194,7 +194,7 @@ func TestFleetConfigHandler_TokenAutoRefresh(t *testing.T) {
 					CA:       "ca-cert",
 				},
 				discardLogger(),
-				opts...,
+				append(opts, WithDriverAccessGate(&stubDriverAccessGate{}))...,
 			)
 
 			mux := http.NewServeMux()

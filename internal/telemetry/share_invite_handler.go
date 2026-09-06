@@ -142,8 +142,11 @@ func (h *ShareInviteHandler) linkCtx(ctx context.Context, ownerUserID string) in
 // the PATH vehicle's row — the sibling rows are not returned, and the code on
 // the returned row is the one to hand out for all of them.
 func (h *ShareInviteHandler) ServeCreate(w http.ResponseWriter, r *http.Request) {
-	vehicleID, userID, ok := h.authOwner(w, r, "share invite create")
+	vehicle, vehicleID, userID, ok := h.authOwner(w, r, "share invite create")
 	if !ok {
+		return
+	}
+	if !h.driverAccessAllows(w, vehicle, vehicleID, userID) {
 		return
 	}
 
@@ -201,7 +204,7 @@ func (h *ShareInviteHandler) writeCreateError(w http.ResponseWriter, vehicleID, 
 // Returns pending invites and accepted grants, newest first. Revoked rows are
 // never serialized. `code` is present only on pending rows.
 func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
-	vehicleID, userID, ok := h.authOwner(w, r, "share invite list")
+	_, vehicleID, userID, ok := h.authOwner(w, r, "share invite list")
 	if !ok {
 		return
 	}
@@ -232,17 +235,22 @@ func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 // the rest of the per-vehicle surface. There is no viewer branch: a viewer's
 // vehicle read succeeds, so they reach the ownership check and are refused
 // exactly as an unrelated caller is.
-func (h *ShareInviteHandler) authOwner(w http.ResponseWriter, r *http.Request, surface string) (vehicleID, userID string, ok bool) {
+// It returns the ROW as well as the ids, because the MYR-599 consent gate is a
+// fact about that row and re-fetching it in the caller would mean two reads at
+// two instants answering one question.
+func (h *ShareInviteHandler) authOwner(
+	w http.ResponseWriter, r *http.Request, surface string,
+) (row VehicleSnapshotRow, vehicleID, userID string, ok bool) {
 	vehicleID = r.PathValue("vehicleId")
 	if vehicleID == "" {
 		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "missing vehicleId")
-		return "", "", false
+		return VehicleSnapshotRow{}, "", "", false
 	}
 
 	token := extractBearerToken(r)
 	if token == "" {
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
-		return "", "", false
+		return VehicleSnapshotRow{}, "", "", false
 	}
 
 	ctx := r.Context()
@@ -250,21 +258,21 @@ func (h *ShareInviteHandler) authOwner(w http.ResponseWriter, r *http.Request, s
 	if err != nil {
 		h.logger.Warn(surface+": invalid token", slog.String("error", err.Error()))
 		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
-		return "", "", false
+		return VehicleSnapshotRow{}, "", "", false
 	}
 
-	row, err := h.vehicles.GetByID(ctx, vehicleID)
+	row, err = h.vehicles.GetByID(ctx, vehicleID)
 	if err != nil {
 		if errors.Is(err, sdk.ErrNotFound) {
 			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return "", "", false
+			return VehicleSnapshotRow{}, "", "", false
 		}
 		h.logger.Error(surface+": vehicle lookup failed",
 			slog.String("vehicle_id", vehicleID),
 			slog.String("error", err.Error()),
 		)
 		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return "", "", false
+		return VehicleSnapshotRow{}, "", "", false
 	}
 	if row.UserID != userID {
 		h.logger.Warn(surface+": not the owner",
@@ -272,9 +280,40 @@ func (h *ShareInviteHandler) authOwner(w http.ResponseWriter, r *http.Request, s
 			slog.String("user_id", userID),
 		)
 		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
-		return "", "", false
+		return VehicleSnapshotRow{}, "", "", false
 	}
-	return vehicleID, userID, true
+	return row, vehicleID, userID, true
+}
+
+// driverAccessAllows is the MYR-599 consent gate (review finding I). Returns
+// false having already written the response.
+//
+// IT GUARDS THE CREATE ONLY, and the split is the same one the fleet-config
+// surface makes. Sharing a car is an act of DISPOSAL over somebody else's
+// property — it hands a third party standing access to a vehicle whose owner
+// has not yet been recorded as agreeing the car belongs here at all — while
+// LISTING the invites on it changes nothing and is how a client renders the
+// screen it is refusing from. A driver whose acknowledgment is outstanding has
+// no invites to list anyway; refusing the read would only make the screen
+// wrong.
+//
+// 409, matching the reconnect, fleet-config and command refusals: nothing
+// failed, the caller is not forbidden, and §7.29 is the specific thing that
+// changes the answer.
+func (h *ShareInviteHandler) driverAccessAllows(
+	w http.ResponseWriter, row VehicleSnapshotRow, vehicleID, userID string,
+) bool {
+	if !row.DriverAccess.PendingAcknowledgment() {
+		return true
+	}
+	h.logger.Info("share invite create: refused, driver-access car awaiting the owner-approval acknowledgment",
+		slog.String("event", "share_invite_awaiting_owner_ack"),
+		slog.String("vehicle_id", vehicleID),
+		slog.String("user_id", userID),
+	)
+	h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
+		"confirm the owner approved adding this car before you can share it")
+	return false
 }
 
 // writeJSON marshals v as JSON with the given status code.

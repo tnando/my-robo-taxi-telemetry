@@ -127,13 +127,33 @@ func (h *FleetConfigHandler) handlePush(w http.ResponseWriter, r *http.Request) 
 }
 
 // pushForVIN builds and sends the telemetry config for an already-resolved,
-// already-authorized VIN. Shared by the VIN-keyed path (handlePush) and the
-// vehicleId-keyed path (VehicleFleetConfigHandler).
+// already-authorized VIN whose consent gate has NOT yet been settled. It settles
+// it — with its own VIN-keyed lookup — and then pushes.
+//
+// The VIN-keyed route (handlePush) is its only caller. The vehicleId-keyed
+// sibling calls pushGatedVIN instead, because it already holds the answer.
 func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWriter, vin string, teslaTok TeslaToken) {
 	if !h.driverAccessAllows(ctx, w, vin) {
 		return
 	}
+	h.pushGatedVIN(ctx, w, vin, teslaTok)
+}
 
+// pushGatedVIN is the push itself, for a caller that has ALREADY settled the
+// MYR-599 consent gate.
+//
+// SPLIT OUT SO THE ANSWER IS NOT FETCHED TWICE (review finding K). The
+// vehicleId-keyed route resolves its vehicle through GetByID, whose row carries
+// the joined driver-access columns, and refuses on them before it ever gets
+// here; routing it through pushForVIN made it spend a second query to re-derive
+// a fact it was already holding — and, worse, made the two gates answer from
+// two reads taken at different instants, so a disagreement between them was
+// possible and would have been silent.
+//
+// The name is the contract: a caller reaching this function is ASSERTING the
+// gate is settled. There is exactly one such caller, and its refusal sits
+// immediately above its call.
+func (h *FleetConfigHandler) pushGatedVIN(ctx context.Context, w http.ResponseWriter, vin string, teslaTok TeslaToken) {
 	var ca *string
 	if h.endpoint.CA != "" {
 		ca = &h.endpoint.CA
@@ -186,7 +206,8 @@ func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWrit
 }
 
 // driverAccessAllows is the MYR-599 consent gate in front of every push through
-// this handler. Returns false having already written the response.
+// this handler's VIN-keyed route. Returns false having already written the
+// response.
 //
 // FAIL CLOSED ON THE LOOKUP ERROR, which is the opposite of how most
 // best-effort reads in this package behave and is the whole point: every other
@@ -194,17 +215,23 @@ func (h *FleetConfigHandler) pushForVIN(ctx context.Context, w http.ResponseWrit
 // somebody else's consent. A 503 says truthfully that the server could not
 // establish whether it may act, and it is retriable.
 //
-// A NIL GATE PROCEEDS, and that asymmetry is deliberate rather than an
-// oversight: it is the same guard shape the rest of this package uses for a
-// dependency that does not exist in a proxy-less dev process. It is logged at
-// WARN on every push so the configuration cannot be silently wrong in
-// production, and the route a real client can reach (the vehicleId-keyed
-// sibling) gates unconditionally on its own row regardless of this field.
+// A NIL GATE ALSO REFUSES (MYR-599 review finding I). It used to proceed with a
+// WARN, on the reasoning that an absent dependency is a dev/test configuration
+// and the route a real client reaches gates on its own row anyway. Both halves
+// of that were true and the conclusion was still wrong: "the gate is optional"
+// is a sentence about a CONSENT check, and the failure it permits is not a
+// quieter card but a config pushed at a third party's car. An unwired gate is a
+// deployment defect, and the honest response to one is the same 503 an
+// unreadable gate earns — refuse, loudly, and make the misconfiguration
+// impossible to run past in production instead of merely greppable.
 func (h *FleetConfigHandler) driverAccessAllows(ctx context.Context, w http.ResponseWriter, vin string) bool {
 	if h.driverAccess == nil {
-		h.logger.Warn("fleet config: no driver-access gate wired; pushing without the MYR-599 acknowledgment check",
+		h.logger.Error("fleet config: NO DRIVER-ACCESS GATE WIRED; refusing every push through the VIN-keyed route",
+			slog.String("event", "fleet_config_driver_gate_unwired"),
 			slog.String("vin", redactVIN(vin)))
-		return true
+		h.writeError(w, http.StatusServiceUnavailable, wserrors.ErrCodeServiceUnavailable,
+			"could not verify this vehicle's approval status — try again")
+		return false
 	}
 	pending, err := h.driverAccess.PendingDriverAcknowledgmentByVIN(ctx, vin)
 	if err != nil {
