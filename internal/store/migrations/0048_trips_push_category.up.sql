@@ -1,0 +1,64 @@
+-- 0048_trips_push_category.up.sql
+--
+-- MYR-602: the SIXTH notification category, `trips`.
+--
+-- ── WHAT THIS ADDS, AND WHAT IT DELIBERATELY DOES NOT ───────────────────────
+--
+-- One column: go_push_prefs.trips. That is the whole migration, and the
+-- smallness is worth stating because MYR-602's brief said 0048 would also widen
+-- go_live_activities with the `trip_leg_id` anchor and its exactly-one-anchor
+-- CHECK. Migration 0047 already did that (see its "go_live_activities gains a
+-- SECOND ANCHOR" section), so repeating it here would either fail or — worse,
+-- with IF NOT EXISTS spellings — succeed silently while asserting nothing. The
+-- anchor's schema, its partial unique index and its constraint all live in 0047
+-- and are unchanged by this file.
+--
+-- ── WHY A COLUMN AND NOT A ROW ──────────────────────────────────────────────
+--
+-- go_push_prefs is COLUMNAR by decision (migration 0022): one row per person,
+-- one BOOLEAN per category, upserted by a single statement whose omitted
+-- parameters COALESCE to the person's current value. A key/value shape would
+-- have made a new category free, and it would also have made "which categories
+-- exist" a runtime question with no schema answer — which is exactly the
+-- property that let the pre-MYR-349 Settings switches lie for a year. Adding
+-- the sixth switch is therefore an ALTER, and the statement, the repository
+-- struct, the wire shape and this file all have to move together. That is the
+-- cost, and it is the one being bought.
+--
+-- ── DEFAULT TRUE, LIKE ITS FIVE SIBLINGS ────────────────────────────────────
+--
+-- Every existing row gets `trips = TRUE` on the backfill, and a person with no
+-- row at all resolves to DefaultPushPrefs, which is also all-on. The two paths
+-- agree by construction rather than by care: a trip participant who has never
+-- opened Settings hears about the trip they were added to.
+--
+-- NOT NULL is safe on a populated table here because the DEFAULT is supplied in
+-- the same statement — Postgres 11+ stores the default in the catalogue and
+-- does not rewrite the heap, so this is a metadata-only change on a table with
+-- one row per account.
+--
+-- ── WHAT THE CATEGORY COVERS (rest-api.md §7.19.0) ──────────────────────────
+--
+--   trip_added        somebody put you on a trip
+--   trip_started      a trip's window opened
+--   trip_ended        a trip's window closed (or its owner ended it early)
+--   trip_leg_started  the car set off for a named place during the window
+--   trip_leg_arrived  the car reached that place
+--
+-- ALL FIVE ARE INFORMATIONAL (`transactional: false`, §7.19.4). Switching this
+-- category off is a real silence the platform honours: nothing here is the
+-- platform acting on the recipient's own account, nobody is stranded by missing
+-- one, and the trip itself is fully legible in the app without any of them.
+--
+-- ONE CATEGORY, NOT FIVE, for the reason §7.19.0 gives about `rideLifecycle`:
+-- a switch the server can store and would never honour differently is the
+-- class of lie MYR-349 exists to remove. No send site in internal/trips
+-- distinguishes the five, and the client renders one row.
+--
+-- ── CLASSIFICATION ──────────────────────────────────────────────────────────
+--
+-- P0. A boolean about delivery, beside five identical ones, keyed by an opaque
+-- cuid. It is logged in full alongside its siblings.
+
+ALTER TABLE go_push_prefs
+    ADD COLUMN IF NOT EXISTS trips BOOLEAN NOT NULL DEFAULT TRUE;

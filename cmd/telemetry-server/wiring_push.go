@@ -177,6 +177,7 @@ func (a *pushPrefsAdapter) UpdatePrefs(ctx context.Context, userID string, updat
 		DriveCompleted:   update.DriveCompleted,
 		ChargingComplete: update.ChargingComplete,
 		ViewerJoined:     update.ViewerJoined,
+		Trips:            update.Trips,
 	})
 	if err != nil {
 		return push.Prefs{}, fmt.Errorf("push: write prefs: %w", err)
@@ -185,8 +186,8 @@ func (a *pushPrefsAdapter) UpdatePrefs(ctx context.Context, userID string, updat
 }
 
 // pushPrefsFromRow converts the store row to the notifier's own shape. Written
-// out field by field rather than by a shared struct so that adding a sixth
-// category fails to compile here — the one place where a new column MUST be
+// out field by field rather than by a shared struct so that adding a SEVENTH
+// category fails to compile here (the sixth, MYR-602's `trips`, is below) — the one place where a new column MUST be
 // taught to the gate — instead of silently defaulting to false.
 func pushPrefsFromRow(row store.PushPrefs) push.Prefs {
 	return push.Prefs{
@@ -195,6 +196,7 @@ func pushPrefsFromRow(row store.PushPrefs) push.Prefs {
 		DriveCompleted:   row.DriveCompleted,
 		ChargingComplete: row.ChargingComplete,
 		ViewerJoined:     row.ViewerJoined,
+		Trips:            row.Trips,
 	}
 }
 

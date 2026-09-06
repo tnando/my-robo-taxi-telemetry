@@ -116,6 +116,8 @@ func TestPrefs_AllowsIsExhaustive(t *testing.T) {
 				only.ChargingComplete = true
 			case CategoryViewerJoined:
 				only.ViewerJoined = true
+			case CategoryTrips:
+				only.Trips = true
 			default:
 				t.Fatalf("category %q has no field mapping in this test — a new category "+
 					"was added without teaching the gate about it", c)
