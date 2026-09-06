@@ -40,7 +40,7 @@ import (
 type TripActivityStore interface {
 	// PushToStartTokensForTrip lists the trip's push-to-start registrations —
 	// participants and the owner. An empty result is ordinary.
-	PushToStartTokensForTrip(ctx context.Context, tripID string) ([]PushToStartToken, error)
+	PushToStartTokensForTrip(ctx context.Context, tripID string) ([]ActivityStartToken, error)
 	// DeleteRejectedPushToStartToken drops a push-to-start token APNs
 	// permanently rejected. NOT DeleteActivityToken: see the two tables'
 	// difference in internal/store/trip_activity_token_repo.go.
@@ -53,9 +53,9 @@ type TripActivityStore interface {
 	DeleteActivityToken(ctx context.Context, token string) error
 }
 
-// PushToStartToken is one registered push-to-start token, the consumer-site
+// ActivityStartToken is one registered push-to-start token, the consumer-site
 // view of a go_trip_activity_tokens row.
-type PushToStartToken struct {
+type ActivityStartToken struct {
 	UserID string
 	// Token is the raw ActivityKit push-to-start token. P1 CAPABILITY — never
 	// log in full, never echo.

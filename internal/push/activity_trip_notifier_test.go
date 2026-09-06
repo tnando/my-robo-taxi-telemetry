@@ -10,7 +10,7 @@ import (
 // fakeTripActivityStore is the in-memory TripActivityStore double.
 type fakeTripActivityStore struct {
 	mu          sync.Mutex
-	tokens      []PushToStartToken
+	tokens      []ActivityStartToken
 	activities  []Activity
 	endedLegs   []string
 	droppedPTS  []string
@@ -19,13 +19,13 @@ type fakeTripActivityStore struct {
 	activityErr error
 }
 
-func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ string) ([]PushToStartToken, error) {
+func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ string) ([]ActivityStartToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.tokensErr != nil {
 		return nil, f.tokensErr
 	}
-	return append([]PushToStartToken(nil), f.tokens...), nil
+	return append([]ActivityStartToken(nil), f.tokens...), nil
 }
 
 func (f *fakeTripActivityStore) DeleteRejectedPushToStartToken(_ context.Context, token string) error {
@@ -168,7 +168,7 @@ func TestStartLeg_GatesOnTheTripsSwitch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &fakeTripActivityStore{
-				tokens: []PushToStartToken{{UserID: "user-a", Token: "pts-a"}},
+				tokens: []ActivityStartToken{{UserID: "user-a", Token: "pts-a"}},
 			}
 			n, _ := newTripActivityNotifier(t, store, tt.prefs)
 			if got := n.StartLeg(context.Background(), tripLegFixture()); got != tt.wantStarted {
@@ -185,7 +185,7 @@ func TestStartLeg_GatesOnTheTripsSwitch(t *testing.T) {
 // token retried on every remaining leg.
 func TestStartLeg_RejectedTokenGoesFromTheRightTable(t *testing.T) {
 	store := &fakeTripActivityStore{
-		tokens: []PushToStartToken{{UserID: "user-a", Token: "pts-dead"}},
+		tokens: []ActivityStartToken{{UserID: "user-a", Token: "pts-dead"}},
 	}
 	n, sender := newTripActivityNotifier(t, store, DefaultPrefs())
 	sender.Err = ErrUnregistered
