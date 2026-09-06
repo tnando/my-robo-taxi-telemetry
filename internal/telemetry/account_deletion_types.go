@@ -96,9 +96,10 @@ type AccountDataDeleter interface {
 	// erasure obligation; see the store query for why it goes regardless.
 	DeleteTeslaTokenKeepalive(ctx context.Context, userID string) (int, error)
 	// DeleteRemovedVehicleTombstones drops the account's removed-vehicle
-	// tombstones (MYR-596, data-lifecycle.md §3.1 step 8e). It is the ONE
-	// position-constrained member of the 8-family: the per-vehicle teardown
-	// writes a tombstone per car, so this must run after it.
+	// tombstones (MYR-596, data-lifecycle.md §3.1 step 8e). It is one of only
+	// TWO position-constrained members of the 8-family — 8f below is the other
+	// — because the per-vehicle teardown writes a tombstone per car, so this
+	// must run after it.
 	DeleteRemovedVehicleTombstones(ctx context.Context, userID string) (int, error)
 	// DeleteVehicleDriverAccess drops the account's driver-access rows
 	// (MYR-599, data-lifecycle.md §3.1 step 8f). The SECOND

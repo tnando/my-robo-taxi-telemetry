@@ -190,6 +190,98 @@ issue adds a **server-side Go sync** so the web app is never in the path:
   written by the initial sync (no coordinates yet), so no half-pair `*Enc`
   invariant risk.
 
+### 4.1 Cars the linker DRIVES but does not OWN — the filter became a consent gate (MYR-599)
+
+**What this section replaced.** Finding 3 of this issue put an **ownership
+filter** at the top of the provisioning loop: every Fleet-API vehicle whose
+`access_type` was not `OWNER` produced an
+`owner_vehicle_skipped reason=not_owner` audit line and nothing else. The intent
+was sound — never act on somebody else's car — but the mechanism conflated two
+different protections:
+
+- *"Don't attach a car this person has no relationship with."* That is done by
+  the **fleet listing itself**, which is scoped to the caller's own Tesla token,
+  and by `UpsertOwnedVehicle`'s cross-user rule. **Neither consults
+  `access_type`**, so the filter was not what was providing this guarantee.
+- *"Don't ACT on a car this person does not own."* That one is real — and its
+  answer is **consent, not absence**.
+
+**The failure it produced.** On **2026-09-05** a tester ran "Add another Tesla"
+for a car he drives on somebody else's Tesla account. OAuth completed, the token
+was stored, he paired the virtual key in the Tesla app — and **no `"Vehicle"` row
+was ever created**, so the app had nothing to show him and nothing to explain.
+The filter was silent by design; the silence was the bug. The client's ruling
+(Thomas, 2026-09-05) is that a driver MAY add the car, behind a pop-up in which
+they acknowledge that the owner approved it.
+
+**The replacement, stated as the gap between two sentences: the car IS
+provisioned; nothing is pushed at it.** That gap is the whole feature — a
+driver-linked car exists, can be named, can be seen, and keeps the virtual key
+its linker may already have paired, while no fleet-telemetry config reaches it
+from **any** path until the acknowledgment is recorded. Concretely, for a vehicle
+whose Fleet listing reports a non-`OWNER` access level:
+
+1. **It is provisioned exactly like an owned car.** The same `UpsertOwnedVehicle`
+   with the same identity columns. **The tombstone rule and the cross-user rule
+   are unchanged**: a VIN the owner deliberately removed is still skipped
+   (`go_removed_vehicles`, MYR-261), and a `teslaVehicleId` already owned by a
+   different user is still never reassigned.
+2. **A `go_vehicle_driver_access` row is written** (migration **0046**;
+   `OwnerProvisioner.RecordDriverAccess`) carrying Tesla's `access_type`
+   **verbatim** — including the **empty string** older Fleet responses have
+   shipped, which is treated as *driver*. **Fail closed: an unknown access level
+   is never promoted to ownership**, and `''` is stored rather than an invented
+   `"DRIVER"` precisely so the column can still answer *what did Tesla actually
+   say?* months later.
+3. **The fleet-config schedule is seeded with the outcome `awaiting_owner_ack`**
+   and **no config is pushed**. This is the one schedule label in the system that
+   describes a push that never happened: it is what lets the row say why it is
+   sitting there, and what keeps the MYR-592 inactivity sweeper from
+   "disconnecting" a car that was never connected.
+4. **The log line is `owner_vehicle_driver_access`** (INFO, `user_id`, redacted
+   VIN, raw `access_type`), **in place of**
+   `owner_vehicle_skipped reason=not_owner`. Deliberately a different event name
+   rather than a new reason on the old one: **a car was provisioned**, and any
+   operator or query reading the old event as "nothing happened" would now be
+   wrong.
+
+**The two writes are ordered, and the order is normative rather than
+incidental.** The driver-access row goes **first**, the schedule seed second,
+because they carry different weights. The row is the **gate** — every push path
+refuses a car that has one with a NULL `acknowledged_at` — so if it is missing
+the car is indistinguishable from an owner's and the reconciler will configure it
+on its next pass, silently, unattended, at a car whose owner agreed to nothing.
+That is the only failure in this hook with a consequence outside our own user,
+which is why it logs at **ERROR** while the seed's failure logs at **WARN**, and
+why the setup-state derivation reads the **driver row** rather than the schedule
+label: the authoritative fact must not be the one carried by the best-effort
+write that is allowed to be absent. Neither failure fails the link — that is this
+hook's standing contract.
+
+**An OWNER re-link of a car that carries a driver row DELETES the row**
+(`ClearDriverAccess`), which is the **access-upgrade** case: a title transfer, or
+an owner who had been reaching their own car through a second account. The row is
+evidence about a claim that is no longer true, and leaving it would keep the wire
+saying `teslaAccessType: "driver"` about a car this person owns outright — and,
+if it was never acknowledged, would hold the push gate shut on a car that needs
+nobody's permission. **It does not run the other way, and that gap is recorded
+rather than papered over: Tesla DOWNGRADING an owner to a driver is not
+observed**, because nothing re-lists an already-provisioned owner's cars for that
+purpose, so a car that changes hands at Tesla keeps streaming to its old linker
+until they re-link or remove it. **Revoking driver-linked cars when Tesla removes
+driver access is likewise explicitly out of scope for MYR-599.**
+
+**What the row is, and what it is not: EVIDENCE, not permission.** The platform
+cannot verify with Tesla that an owner approved anything — no Fleet API surface
+exposes such a fact — so what is recorded is exactly what the platform actually
+knows: **this person, at this instant, was shown this version of this text and
+said yes**. That is what we would point to if an owner ever complained, and it is
+the whole reason `acknowledgment_version` exists rather than a bare boolean:
+copy changes, and an acknowledgment that cannot name what was acknowledged is
+worth nothing. Classification is P0 in full —
+[`../contracts/data-classification.md`](../contracts/data-classification.md)
+§1.24.
+
 ---
 
 ## 5. Fleet-telemetry config push (self-serve stream start)
@@ -203,6 +295,20 @@ So a newly paired VIN starts streaming without `ops fleet-config push`:
   approve the key in the Tesla app — cannot be automated). The push is safe to
   attempt pre-pairing (Tesla no-ops / errors for an unpaired VIN); it is retried
   when pairing completes.
+- **A DRIVER-LINKED CAR IS NEVER PUSHED AT UNTIL ITS ACKNOWLEDGMENT IS RECORDED**
+  (MYR-599, §4.1). The gate is the car's `go_vehicle_driver_access` row with a
+  NULL `acknowledged_at`, and it binds on **every** path, not just this one: the
+  link-time hook above, the fleet-config reconciler (which excludes such cars
+  from its candidate listing in SQL, via a partial-index-backed `NOT EXISTS`),
+  `POST …/complete-setup`, `POST …/reconnect`, and both fleet-config push routes.
+  **There is no path that pushes a config at a car whose owner nobody has claimed
+  to have asked.** The gate opens on
+  `POST /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval`
+  ([`../contracts/rest-api.md`](../contracts/rest-api.md) §7.29), which records
+  the acknowledgment and then performs the same best-effort push complete-setup
+  performs. One question, asked seven ways in the codebase and answered by one
+  predicate — `PendingAcknowledgment()` — so a gate spelled seven ways cannot
+  drift into being spelled six.
 
 ### SAFETY — never push against a real car in dev/test
 
@@ -233,6 +339,25 @@ So a newly paired VIN starts streaming without `ops fleet-config push`:
 - **Data-classification:** no new persisted column. `Settings.teslaLinked`
   (P0), `User.name`/`User.email` (P1) already classified; the writer honors their
   log-safety (never logs name/email/tokens).
+- **MYR-599 addendum (contracts v0.39.0), the one place this section's "no new
+  endpoint, no new persisted column" claim stops holding.** The consent gate of
+  §4.1 adds: **one new endpoint**,
+  `POST /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval`
+  ([`../contracts/rest-api.md`](../contracts/rest-api.md) §7.29 — the contracts
+  package cites it as §7.24, which is taken; see that section's numbering note
+  and DV-25); **one new Go-owned table**, `go_vehicle_driver_access` (migration
+  **0046**, P0 in full,
+  [`../contracts/data-classification.md`](../contracts/data-classification.md)
+  §1.24); **one new wire field**, `teslaAccessType` (`"owner"` \| `"driver"`,
+  OPTIONAL, absent reads as `"owner"`, both roles) on `VehicleSummary` (§7.0) and
+  `VehicleState` (§7.1); **one new `setupState` member**,
+  `awaiting_owner_acknowledgment`, which sorts before the other three because no
+  push has been attempted at such a car; **one new audit action**,
+  `vehicle.owner_approval_acknowledged`, metadata `{version}` only; and **one new
+  account-deletion step**, 8f, whose audit metadata carries the count
+  `vehicleDriverAccessRowsDeleted` and never the rows. Behaviour change on this
+  document's own §7.11 callback path: the link hook no longer filters on
+  `access_type`.
 
 ---
 
@@ -275,8 +400,31 @@ reassigns ownership across users:
 - **Vehicle already owned by another user:** `UpsertOwnedVehicle`'s
   `ON CONFLICT ("teslaVehicleId") DO UPDATE ... WHERE userId = EXCLUDED.userId`
   updates nothing (RowsAffected 0) → reported as `skipped_cross_user`, audited,
-  and never pushed a fleet config. Vehicles the caller only shares (Fleet
-  `access_type != "OWNER"`) are filtered out before any write.
+  and never pushed a fleet config. **This rule is untouched by MYR-599 and is the
+  one that actually enforces cross-user safety** — it does not consult
+  `access_type` and never did.
+- **Vehicle the caller only DRIVES (Fleet `access_type != "OWNER"`): PROVISIONED
+  BEHIND A CONSENT GATE, no longer filtered out** (MYR-599, contracts v0.39.0 —
+  see §4.1 for the full argument). This bullet read *"Vehicles the caller only
+  shares (Fleet `access_type != "OWNER"`) are filtered out before any write"*, and
+  that filter is gone: it was silent, it left a tester with no `"Vehicle"` row and
+  no explanation, and it was never what kept another person's car from being
+  attached (the token-scoped fleet listing and the cross-user rule above do
+  that). Such a car is now written like any other, plus a
+  `go_vehicle_driver_access` row (migration **0046**) holding Tesla's
+  `access_type` **verbatim** — an **empty** value counts as *driver*, failing
+  closed so an unknown access level is never promoted to ownership — and its
+  fleet-config schedule is seeded `awaiting_owner_ack` with **no config pushed**.
+  The audit / log line is `owner_vehicle_driver_access` (INFO, redacted VIN) in
+  place of `owner_vehicle_skipped reason=not_owner`. **Nothing reaches the car
+  from any path** — link hook, reconciler, complete-setup, reconnect or a
+  fleet-config re-push — until
+  `POST /api/tesla/vehicles/{vehicleId}/acknowledge-owner-approval`
+  ([`../contracts/rest-api.md`](../contracts/rest-api.md) §7.29) records that the
+  linker acknowledged the owner's approval. An **OWNER re-link deletes** a stale
+  driver row (the access-upgrade case); the reverse — Tesla downgrading an owner
+  to a driver — is **not observed**, and revoking driver-linked cars when Tesla
+  removes driver access is **out of scope for MYR-599**.
 - Every outcome (`new_user`, `adopted_by_email`, `adopted_by_account`,
   identity-converged, vehicle owned/skipped) emits a P0-only audit line (opaque
   cuids + opaque outcome; never email/name/tokens).
