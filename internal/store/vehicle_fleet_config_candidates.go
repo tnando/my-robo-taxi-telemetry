@@ -141,6 +141,10 @@ SELECT v."id", v."vin", v."userId", v."lastUpdated", v."status",
        COALESCE(fa.attempt_count, 0),
        COALESCE(fa.last_outcome, ''),
        fa.last_attempt_at, fa.signed_command_at, fa.forced_repush_at,
+       -- Always false here, by construction: the NOT EXISTS below has already
+       -- removed every row that could make it true. Projected anyway so this
+       -- producer states the fact rather than assuming it — see
+       -- pendingOwnerAckExprV for why the redundancy is the invariant.
        ` + pendingOwnerAckExprV + `
 FROM "Vehicle" v
 LEFT JOIN go_fleet_config_attempts fa ON fa.vehicle_id = v."id"

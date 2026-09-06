@@ -1,6 +1,14 @@
-// The WRITE half of MYR-599: recording that a car was linked by a driver,
-// removing that record when the same person turns out to own the car after all,
-// and stamping the acknowledgment that opens the config-push gate.
+// The ACKNOWLEDGMENT half of MYR-599: stamping the consent that opens the
+// config-push gate, and the audit row that is its evidence.
+//
+// FILING and CLEARING the gate row itself do NOT live here. They belong to the
+// provisioning transaction — owner_vehicle_driver_gate.go — because a car that
+// exists without its gate is indistinguishable from an owner's, so the two
+// writes must be indivisible. This file once carried VIN-keyed RecordDriverAccess
+// / ClearDriverAccess / GetDriverAccess siblings from the pre-transaction design;
+// they were deleted once nothing but their own tests called them, since a second
+// spelling of a consent write is a second thing a later change can pick by
+// mistake.
 //
 // Split from vehicle_driver_access.go for the CLAUDE.md 300-line file cap; the
 // read projection and these statements are one component.
@@ -10,132 +18,33 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
-
-// queryUpsertDriverAccessByVIN records (or refreshes) the driver-access row for
-// the vehicle owning vin, scoped to the linking user.
-//
-// KEYED BY VIN THROUGH A SELECT ON "Vehicle" rather than by vehicle id, for the
-// same reason SeedFleetConfigSchedule is: the caller is the link-time hook,
-// which holds Tesla's VIN and not our cuid, and resolving it in SQL keeps this
-// one statement instead of a lookup plus an insert that could race the
-// provisioning INSERT that just ran.
-//
-// THE `"userId" = $2` PREDICATE IS A GUARD, NOT A CONVENIENCE. UpsertOwnedVehicle
-// refuses to reassign a car that already belongs to somebody else (the
-// cross-user rule, MYR-257) and returns VehicleSkippedCrossUser — but this
-// statement runs after a SEPARATE round trip, so a car that changed hands in
-// between must not have a driver row filed against the wrong person. Matching on
-// both columns makes that outcome unreachable: the statement simply writes
-// nothing.
-//
-// ON CONFLICT UPDATES THE ACCESS TYPE AND NOTHING ELSE. A re-link must refresh
-// what Tesla currently says (a driver whose access level Tesla re-labelled),
-// but it must NOT re-shut a gate the person already opened: clobbering
-// acknowledged_at would make every incidental re-link demand a second
-// acknowledgment for a car that is already streaming, and clobbering created_at
-// would restate the `since` on a state nobody is in. Consent, once given, is not
-// withdrawn by a background sync.
-//
-// A READ of the Prisma-owned "Vehicle" feeding an INSERT into a Go-owned table.
-// CG-DL-9 constrains MIGRATIONS naming Prisma tables; this is a runtime
-// statement and adds no schema.
-const queryUpsertDriverAccessByVIN = `
-INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type, created_at)
-SELECT v."id", $2, $3, $4
-FROM "Vehicle" v
-WHERE v."vin" = $1 AND v."userId" = $2
-ON CONFLICT (vehicle_id) DO UPDATE
-SET tesla_access_type = EXCLUDED.tesla_access_type`
-
-// RecordDriverAccess files the driver-access row for vin against userID,
-// carrying Tesla's access_type verbatim.
-//
-// accessType IS STORED AS GIVEN, including the empty string. Older Fleet API
-// responses have shipped an absent access_type, and the caller treats absence as
-// NOT-OWNER (fail closed — an unknown access level must never be promoted to
-// ownership). Inventing a value here would erase the one thing this column is
-// for: answering, later, what Tesla actually said.
-//
-// Best-effort by contract, like every other step in the link-time hook: an
-// unknown VIN or a car that changed hands writes nothing and is success. The
-// caller logs a returned error and never fails the owner's Tesla link over it.
-//
-// IDEMPOTENT: a re-link refreshes the access type and leaves the acknowledgment
-// exactly as it was — see queryUpsertDriverAccessByVIN.
-func (p *OwnerProvisioner) RecordDriverAccess(
-	ctx context.Context, vin, userID, accessType string, now time.Time,
-) error {
-	if strings.TrimSpace(vin) == "" || strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("store.RecordDriverAccess: empty vin or user id")
-	}
-	if _, err := p.pool.Exec(ctx, queryUpsertDriverAccessByVIN, vin, userID, accessType, now); err != nil {
-		return fmt.Errorf("OwnerProvisioner.RecordDriverAccess: %w", err)
-	}
-	return nil
-}
 
 // queryDeleteDriverAccessByVehicle is the VEHICLE-ID-KEYED delete used INSIDE
 // the provisioning transaction (MYR-599) and by the owner-wins transfer.
 //
-// WHY IT IS KEYED BY ID AND ITS VIN-KEYED SIBLING IS NOT. The VIN-keyed
-// statements resolve the cuid through a SELECT on "Vehicle" because their caller
-// holds only a VIN. The provisioning transaction has just written that row and
-// has its id in hand from the upsert's RETURNING, so it needs no resolution —
-// and must not do one, because a SELECT inside the same transaction would be
-// reading a row this transaction has not committed. Keying by id is also what
-// makes the write ATOMIC with the vehicle it gates.
+// KEYED BY ID, and there is no VIN-keyed sibling any more. There used to be one
+// — the pre-transaction design resolved the cuid through a SELECT on "Vehicle"
+// because its caller held only a VIN — and it is gone with the rest of that
+// design. The provisioning transaction has this row's id in hand from the
+// upsert's RETURNING, so it needs no resolution, and MUST NOT do one: a SELECT
+// inside the same transaction would be reading a row this transaction has not
+// committed. Keying by id is also what makes the write ATOMIC with the vehicle
+// it gates.
 //
 // The matching INSERT lives in owner_vehicle_driver_gate.go as
 // queryGateDriverAccessByVehicle, because it is not a plain upsert: it carries
 // the bound that stops a non-OWNER signal converting an established owner's car
 // into a gated one.
 //
-// No `"userId"` guard is needed here, unlike the VIN-keyed siblings: the id came
-// from an upsert whose own WHERE clause already refused to touch a car belonging
-// to anybody else, so there is no window in which the owner could have changed.
+// No `"userId"` guard is needed here: the id came from an upsert whose own WHERE
+// clause already refused to touch a car belonging to anybody else, so there is
+// no window in which the owner could have changed.
 const queryDeleteDriverAccessByVehicle = `
 DELETE FROM go_vehicle_driver_access WHERE vehicle_id = $1`
-
-// queryDeleteDriverAccessByVIN removes the driver-access row for the vehicle
-// owning vin, scoped to the same user for the same reason the upsert is.
-const queryDeleteDriverAccessByVIN = `
-DELETE FROM go_vehicle_driver_access
-WHERE vehicle_id IN (
-    SELECT v."id" FROM "Vehicle" v WHERE v."vin" = $1 AND v."userId" = $2
-)`
-
-// ClearDriverAccess removes the driver-access row for vin.
-//
-// CALLED WHEN AN OWNER-ACCESS LISTING ARRIVES for a car that carries one, which
-// is the access-UPGRADE case: the person was a driver when they first linked and
-// Tesla now reports them as the OWNER (a title transfer, or an owner who had
-// been sharing their own car back to themselves through a second account). The
-// row is EVIDENCE ABOUT A CLAIM THAT IS NO LONGER TRUE, and a stale one would
-// keep the wire saying `teslaAccessType: "driver"` about a car this person owns
-// outright — and, if it were never acknowledged, would keep the push gate shut
-// on a car nobody needs permission for.
-//
-// It does NOT run the other way. Tesla downgrading an owner to a driver is not
-// observed here (nothing re-lists an already-provisioned owner's cars for that
-// purpose), and the gap is recorded in the PR rather than papered over.
-//
-// Idempotent: deleting zero rows is the ordinary result and is success.
-func (p *OwnerProvisioner) ClearDriverAccess(ctx context.Context, vin, userID string) error {
-	if strings.TrimSpace(vin) == "" || strings.TrimSpace(userID) == "" {
-		return fmt.Errorf("store.ClearDriverAccess: empty vin or user id")
-	}
-	if _, err := p.pool.Exec(ctx, queryDeleteDriverAccessByVIN, vin, userID); err != nil {
-		return fmt.Errorf("OwnerProvisioner.ClearDriverAccess: %w", err)
-	}
-	return nil
-}
 
 // queryAcknowledgeDriverAccess stamps the acknowledgment on one car's row.
 //
@@ -161,8 +70,8 @@ func (p *OwnerProvisioner) ClearDriverAccess(ctx context.Context, vin, userID st
 // overwrite this row. The append-only AuditLog trail is where a second
 // acknowledgment would be recorded, and it is the only surface that can hold
 // more than one — which is the right shape for a history.
-// The `user_id = $4` guard matches the two statements above and is here for the
-// same reason, even though the §7.29 handler already establishes ownership: a
+// The `user_id = $4` guard is here even though the §7.29 handler already
+// establishes ownership, and for the plainest of reasons: a
 // consent record must not be writable against a car the acknowledging account
 // does not hold, and defence that lives only in the caller is defence that the
 // second caller will not have.
@@ -267,25 +176,4 @@ func (r *VehicleRepo) AcknowledgeOwnerApproval(
 	}
 	r.metrics.ObserveQueryDuration("vehicle.acknowledge_owner_approval", time.Since(start).Seconds())
 	return true, nil
-}
-
-// GetDriverAccess reads one car's driver-access row.
-//
-// The §7.29 handler already holds a VehicleSnapshotRow (which carries the row
-// through the snapshot's LEFT JOIN), so this exists for the OPS surfaces and
-// for tests that assert the write half without going through a vehicle read.
-// Absence is not an error — it is owner access, the zero value.
-func (r *VehicleRepo) GetDriverAccess(ctx context.Context, vehicleID string) (VehicleDriverAccess, error) {
-	var scan driverAccessScan
-	err := r.pool.QueryRow(ctx,
-		`SELECT created_at, acknowledged_at FROM go_vehicle_driver_access WHERE vehicle_id = $1`,
-		vehicleID,
-	).Scan(scan.dests()...)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return VehicleDriverAccess{}, nil
-		}
-		return VehicleDriverAccess{}, fmt.Errorf("VehicleRepo.GetDriverAccess(%s): %w", vehicleID, err)
-	}
-	return scan.value(), nil
 }

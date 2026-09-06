@@ -137,7 +137,7 @@ func annotateDriverAccess(
 			// No VIN in the message: the owner handle names the failure well
 			// enough, and the report's VIN lines are the one authoritative copy.
 			out.Errors = append(out.Errors,
-				fmt.Sprintf("user %s: list driver access: %s", userID, truncate(err.Error())))
+				fmt.Sprintf("user %s: list driver access: %s", userID, fleetorphan.ErrText(err)))
 			continue
 		}
 		for vin, listing := range found {
@@ -156,18 +156,4 @@ func annotateDriverAccess(
 		})
 	}
 	return out
-}
-
-// errorTextCap bounds an error string added to the report, mirroring the cap
-// fleetorphan applies to its own error lines so one verbose driver error cannot
-// bury the run's real findings.
-const errorTextCap = 200
-
-// truncate caps an error string at errorTextCap runes' worth of bytes, marking
-// that it was cut so nobody reads a clipped message as the whole story.
-func truncate(s string) string {
-	if len(s) <= errorTextCap {
-		return s
-	}
-	return s[:errorTextCap] + "…(truncated)"
 }

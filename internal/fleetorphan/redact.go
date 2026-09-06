@@ -36,6 +36,16 @@ var vinPattern = regexp.MustCompile(`(^|[^A-Za-z0-9])([A-HJ-NPR-Z0-9]{17})($|[^A
 // report field, and the diagnostic value is in the first line.
 const maxErrorText = 512
 
+// ErrText is errText, exported for the cmd-side annotation pass that decorates
+// this package's report (MYR-599).
+//
+// It exists so there is ONE rendering of a third-party error reaching an
+// operator artifact rather than two. The cmd side previously carried its own
+// truncate() with a different cap and NO VIN SCRUB — which is the failure this
+// helper's whole doc comment is about, reintroduced one package over, on a
+// report whose lines already carry the VIN in a field of their own.
+func ErrText(err error) string { return errText(err) }
+
 // errText renders a third-party error for both the slog line and the report's
 // Detail, with any embedded VIN reduced to its last four and the whole string
 // length-capped.
@@ -44,6 +54,13 @@ const maxErrorText = 512
 // text cannot go to a log. It is scrubbed in the REPORT too: the line already
 // carries the VIN in its own field, so a second copy inside an error body adds
 // nothing and only widens where the value can end up.
+//
+// THE CAP COUNTS RUNES, not bytes. A byte slice at a fixed offset can land
+// mid-sequence and hand the JSON encoder an invalid UTF-8 string, which it
+// silently rewrites to U+FFFD — so a report truncated at an awkward byte would
+// end in a replacement character an operator has no way to explain. Tesla error
+// bodies are usually ASCII, where the two are identical; "usually" is not a
+// property to build a cap on.
 func errText(err error) string {
 	if err == nil {
 		return ""
@@ -55,8 +72,8 @@ func errText(err error) string {
 		}
 		return g[1] + redactVIN(g[2]) + g[3]
 	})
-	if len(s) > maxErrorText {
-		s = s[:maxErrorText] + "…(truncated)"
+	if r := []rune(s); len(r) > maxErrorText {
+		s = string(r[:maxErrorText]) + "…(truncated)"
 	}
 	return strings.TrimSpace(s)
 }

@@ -204,6 +204,21 @@ const unacknowledgedDriverAccessGate = `
 // carrying it, but the column is what makes the invariant hold: a third producer
 // added later inherits the gate instead of silently reopening it.
 //
+// IN THE PERIODIC QUERY THE COLUMN IS ALWAYS FALSE, and that is not an
+// oversight to tidy away. The same statement's NOT EXISTS has already removed
+// every row that could make it true, so the projection is, today, a constant —
+// and hardcoding the constant is precisely what would make the gate fragile.
+// The rule this package is trying to hold is that EVERY producer of a
+// FleetConfigCandidate reports the field truthfully, so the one consumer can
+// enforce it without knowing which door a row came through. A `false` literal
+// would encode "this producer's rows are never pending" as a fact about the
+// code rather than a fact about the data, and the day somebody relaxes or
+// reorders that filter — to admit a car for a cheap streaming check, say — the
+// column would keep confidently answering false and the hole would be open
+// again with no test failing. The redundancy is the invariant paying for
+// itself: it costs an index probe on rows the planner has already narrowed, and
+// it buys a guarantee that survives an edit to a WHERE clause three files away.
+//
 // Two spellings only because the two statements name the vehicle relation
 // differently — `v` for the candidate listing, the `veh` CTE for the pairing
 // reset. The predicate is otherwise identical, and identical to the gate above.

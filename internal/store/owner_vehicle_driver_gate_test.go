@@ -51,26 +51,34 @@ func TestOwnerProvisioner_DriverGateBounds(t *testing.T) {
 		accessType   string
 		access       store.TeslaAccessSignal
 		wantRows     int
-		wantPending  bool
-		wantDowngade bool
-		because      string
+		// wantAccessType is what tesla_access_type must hold afterwards, when a
+		// row is expected. THE EMPTY STRING IS A REAL EXPECTATION: older Fleet
+		// responses have shipped an absent access_type, and inventing "DRIVER"
+		// here would erase the one thing this column exists for — answering,
+		// later, what Tesla actually said.
+		wantAccessType string
+		wantPending    bool
+		wantDowngade   bool
+		because        string
 	}{
 		{
-			name:        "an EMPTY access_type on a NEW car writes the gate",
-			accessType:  "",
-			access:      store.AccessSignalFor(""),
-			wantRows:    1,
-			wantPending: true,
+			name:           "an EMPTY access_type on a NEW car writes the gate",
+			accessType:     "",
+			access:         store.AccessSignalFor(""),
+			wantRows:       1,
+			wantAccessType: "",
+			wantPending:    true,
 			because: "nothing is established, nobody is streaming, and an unknown access level " +
 				"on a first sighting is exactly what fail-closed exists for",
 		},
 		{
-			name:        "a DRIVER access_type on a NEW car writes the gate",
-			accessType:  "DRIVER",
-			access:      store.AccessSignalDriver,
-			wantRows:    1,
-			wantPending: true,
-			because:     "the ordinary MYR-599 case",
+			name:           "a DRIVER access_type on a NEW car writes the gate",
+			accessType:     "DRIVER",
+			access:         store.AccessSignalDriver,
+			wantRows:       1,
+			wantAccessType: "DRIVER",
+			wantPending:    true,
+			because:        "the ordinary MYR-599 case",
 		},
 		{
 			name:         "an EMPTY access_type on an ESTABLISHED OWNER row writes NOTHING",
@@ -94,14 +102,16 @@ func TestOwnerProvisioner_DriverGateBounds(t *testing.T) {
 				"recorded is that the signal was seen and refused, not a gate on a live car",
 		},
 		{
-			name:         "a re-link of an EXISTING driver car refreshes its gate",
-			seedExisting: strPtr("DRIVER"),
-			accessType:   "DRIVER",
-			access:       store.AccessSignalDriver,
-			wantRows:     1,
-			wantPending:  true,
+			name:           "a re-link of an EXISTING driver car refreshes its gate",
+			seedExisting:   strPtr("DRIVER"),
+			accessType:     "DRIVER_2",
+			access:         store.AccessSignalDriver,
+			wantRows:       1,
+			wantAccessType: "DRIVER_2",
+			wantPending:    true,
 			because: "the row already carries a gate, so this is a refresh rather than a " +
-				"conversion — the bound is on CREATING one, not on maintaining one",
+				"conversion — the bound is on CREATING one, not on maintaining one, and the " +
+				"refresh must record what Tesla NOW says",
 		},
 		{
 			name:         "an OWNER re-link of a driver car CLEARS the gate",
@@ -112,14 +122,16 @@ func TestOwnerProvisioner_DriverGateBounds(t *testing.T) {
 			because:      "the access-UPGRADE case; a stale row would hold the push gate shut on a car needing nobody's permission",
 		},
 		{
-			name:         "an UNKNOWN signal touches nothing and reports the gate honestly",
-			seedExisting: strPtr("DRIVER"),
-			accessType:   "",
-			access:       store.AccessSignalUnknown,
-			wantRows:     1,
-			wantPending:  true,
+			name:           "an UNKNOWN signal touches nothing and reports the gate honestly",
+			seedExisting:   strPtr("DRIVER"),
+			accessType:     "",
+			access:         store.AccessSignalUnknown,
+			wantRows:       1,
+			wantAccessType: "DRIVER",
+			wantPending:    true,
 			because: "the caller made no claim, so there is no basis for changing a consent " +
-				"fact — but 'we did not look' must not be REPORTED as 'there is no gate'",
+				"fact — not even the access type — but 'we did not look' must not be " +
+				"REPORTED as 'there is no gate'",
 		},
 	}
 
@@ -160,6 +172,17 @@ func TestOwnerProvisioner_DriverGateBounds(t *testing.T) {
 			}
 			if got := gateRows(t); got != tc.wantRows {
 				t.Errorf("driver-access rows = %d, want %d (%s)", got, tc.wantRows, tc.because)
+			}
+			if tc.wantRows == 1 {
+				var got string
+				if err := testPool.QueryRow(ctx,
+					`SELECT tesla_access_type FROM go_vehicle_driver_access`).Scan(&got); err != nil {
+					t.Fatalf("read tesla_access_type: %v", err)
+				}
+				if got != tc.wantAccessType {
+					t.Errorf("tesla_access_type = %q, want Tesla's own %q — this column exists "+
+						"to answer what Tesla actually said", got, tc.wantAccessType)
+				}
 			}
 			if out.DriverAccessPending != tc.wantPending {
 				t.Errorf("DriverAccessPending = %v, want %v (%s)",

@@ -111,9 +111,9 @@ func applyDriverAccess(ctx context.Context, tx pgx.Tx, res *VehicleUpsertResult,
 // the standing row says — so the caller learns whether the gate is shut without
 // a second round trip.
 //
-// No `"userId"` guard, unlike the VIN-keyed sibling: the id came from an upsert
-// whose own WHERE clause already refused to touch a car belonging to anybody
-// else, so there is no window in which the owner could have changed.
+// No `"userId"` guard: the id came from an upsert whose own WHERE clause already
+// refused to touch a car belonging to anybody else, so there is no window in
+// which the owner could have changed.
 const queryGateDriverAccessByVehicle = `
 INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type)
 SELECT $1, $2, $3

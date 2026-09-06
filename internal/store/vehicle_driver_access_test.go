@@ -44,123 +44,40 @@ func setupDriverAccess(t *testing.T) {
 	}
 }
 
-// readDriverAccessRow returns the raw stored row, or ok=false when absent.
-func readDriverAccessRow(t *testing.T, vehicleID string) (accessType string, ackAt *time.Time, version *string, ok bool) {
+// readDriverAccessRow returns the row's ACKNOWLEDGMENT columns, or ok=false when
+// there is no row. tesla_access_type is deliberately not returned: what that
+// column holds is a property of the write in owner_vehicle_driver_gate.go and is
+// asserted by that file's tests, against the statement that actually writes it.
+func readDriverAccessRow(t *testing.T, vehicleID string) (ackAt *time.Time, version *string, ok bool) {
 	t.Helper()
 	err := testPool.QueryRow(context.Background(), `
-		SELECT tesla_access_type, acknowledged_at, acknowledgment_version
+		SELECT acknowledged_at, acknowledgment_version
 		FROM go_vehicle_driver_access WHERE vehicle_id = $1`,
-		vehicleID).Scan(&accessType, &ackAt, &version)
+		vehicleID).Scan(&ackAt, &version)
 	if err != nil {
-		return "", nil, nil, false
+		return nil, nil, false
 	}
-	return accessType, ackAt, version, true
+	return ackAt, version, true
 }
 
-// TestRecordDriverAccess pins what the link-time hook writes, and — more
-// importantly — what it refuses to write.
-func TestRecordDriverAccess(t *testing.T) {
-	setupDriverAccess(t)
-	ctx := context.Background()
-	prov := newTestProvisioner(t)
-	now := time.Date(2026, 9, 5, 10, 4, 0, 0, time.UTC)
-
-	seedVehicleForOwner(t, testPool, "cveh_d1", "5YJ3E1EA1NF000601", driverAccessUser)
-
-	t.Run("files the row with Tesla's token verbatim", func(t *testing.T) {
-		if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000601", driverAccessUser, "DRIVER", now); err != nil {
-			t.Fatalf("RecordDriverAccess: %v", err)
-		}
-		accessType, ackAt, version, ok := readDriverAccessRow(t, "cveh_d1")
-		if !ok {
-			t.Fatal("no row written — the car is provisioned with the consent gate OPEN")
-		}
-		if accessType != "DRIVER" {
-			t.Errorf("tesla_access_type = %q, want Tesla's own %q", accessType, "DRIVER")
-		}
-		// NULL on both acknowledgment columns IS the shut gate.
-		if ackAt != nil || version != nil {
-			t.Errorf("acknowledged_at/version = %v/%v, want NULL/NULL — a fresh row must not be pre-acknowledged",
-				ackAt, version)
-		}
-	})
-
-	// AN EMPTY access_type IS STORED AS '', NOT INVENTED. Older Fleet responses
-	// have shipped one, the caller already treats absence as not-owner (fail
-	// closed), and writing "DRIVER" here would erase the one thing this column
-	// is for: answering, later, what Tesla actually said.
-	t.Run("stores an EMPTY access type rather than inventing one", func(t *testing.T) {
-		seedVehicleForOwner(t, testPool, "cveh_d2", "5YJ3E1EA1NF000602", driverAccessUser)
-		if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000602", driverAccessUser, "", now); err != nil {
-			t.Fatalf("RecordDriverAccess: %v", err)
-		}
-		accessType, _, _, ok := readDriverAccessRow(t, "cveh_d2")
-		if !ok {
-			t.Fatal("an empty access_type must still produce a row — it is the fail-closed case")
-		}
-		if accessType != "" {
-			t.Errorf("tesla_access_type = %q, want the empty string Tesla actually sent", accessType)
-		}
-	})
-
-	// THE `"userId" = $2` PREDICATE IS A GUARD, NOT A CONVENIENCE. The upsert
-	// runs a round trip after UpsertOwnedVehicle, so a car that changed hands in
-	// between must not have a consent record filed against the wrong person.
-	t.Run("writes nothing for a car owned by somebody else", func(t *testing.T) {
-		seedVehicleForOwner(t, testPool, "cveh_d3", "5YJ3E1EA1NF000603", driverAccessOther)
-		if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000603", driverAccessUser, "DRIVER", now); err != nil {
-			t.Fatalf("RecordDriverAccess: %v", err)
-		}
-		if _, _, _, ok := readDriverAccessRow(t, "cveh_d3"); ok {
-			t.Fatal("a driver-access row was filed against a user who does not hold the Vehicle row")
-		}
-	})
-
-	t.Run("an unknown VIN is a silent no-op, not an error", func(t *testing.T) {
-		if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000999", driverAccessUser, "DRIVER", now); err != nil {
-			t.Fatalf("RecordDriverAccess on an unknown VIN = %v, want nil (best-effort by contract)", err)
-		}
-	})
-}
-
-// A RE-LINK REFRESHES WHAT TESLA SAYS AND NEVER RE-SHUTS THE GATE. Incidental
-// re-links are common (the MYR-517 re-auth path runs one), and clobbering
-// acknowledged_at would demand a second acknowledgment for a car that is
-// already streaming.
-func TestRecordDriverAccessDoesNotClobberAnAcknowledgment(t *testing.T) {
-	setupDriverAccess(t)
-	ctx := context.Background()
-	prov := newTestProvisioner(t)
-	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
-	linked := time.Date(2026, 9, 5, 10, 0, 0, 0, time.UTC)
-	acked := time.Date(2026, 9, 5, 10, 30, 0, 0, time.UTC)
-
-	seedVehicleForOwner(t, testPool, "cveh_d4", "5YJ3E1EA1NF000604", driverAccessUser)
-	if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000604", driverAccessUser, "DRIVER", linked); err != nil {
-		t.Fatalf("RecordDriverAccess: %v", err)
-	}
-	if _, err := repo.AcknowledgeOwnerApproval(ctx, "cveh_d4", driverAccessUser, "owner-approval-v1", acked); err != nil {
-		t.Fatalf("AcknowledgeOwnerApproval: %v", err)
-	}
-
-	// The re-link, with Tesla now spelling the access level differently.
-	relinked := time.Date(2026, 9, 6, 9, 0, 0, 0, time.UTC)
-	if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000604", driverAccessUser, "DRIVER_2", relinked); err != nil {
-		t.Fatalf("RecordDriverAccess (re-link): %v", err)
-	}
-
-	accessType, ackAt, version, ok := readDriverAccessRow(t, "cveh_d4")
-	if !ok {
-		t.Fatal("the row vanished on a re-link")
-	}
-	if accessType != "DRIVER_2" {
-		t.Errorf("tesla_access_type = %q, want the re-link to refresh it to %q", accessType, "DRIVER_2")
-	}
-	if ackAt == nil || !ackAt.UTC().Equal(acked) {
-		t.Fatalf("acknowledged_at = %v, want it untouched at %v — a re-link must not re-shut the gate", ackAt, acked)
-	}
-	if version == nil || *version != "owner-approval-v1" {
-		t.Errorf("acknowledgment_version = %v, want it untouched", version)
+// seedDriverAccessRow files a driver-access row directly.
+//
+// RAW SQL RATHER THAN A STORE METHOD, deliberately. The only production writer
+// of this row is applyDriverAccess, inside the provisioning transaction, and
+// driving it from here would mean seeding a whole "Vehicle" upsert to set up a
+// test about the acknowledgment. The VIN-keyed RecordDriverAccess that used to
+// serve this purpose was deleted with the rest of the pre-transaction design —
+// keeping a second spelling of a consent write alive as a test fixture is
+// exactly how a later change picks the wrong one.
+//
+// What applyDriverAccess actually writes is pinned by its own tests in
+// owner_vehicle_driver_gate_test.go, which go through UpsertOwnedVehicle.
+func seedDriverAccessRow(t *testing.T, vehicleID, userID string) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(), `
+		INSERT INTO go_vehicle_driver_access (vehicle_id, user_id, tesla_access_type)
+		VALUES ($1, $2, 'DRIVER')`, vehicleID, userID); err != nil {
+		t.Fatalf("seed driver-access row for %s: %v", vehicleID, err)
 	}
 }
 
@@ -172,15 +89,12 @@ func TestRecordDriverAccessDoesNotClobberAnAcknowledgment(t *testing.T) {
 func TestAcknowledgeOwnerApprovalFirstWriteWins(t *testing.T) {
 	setupDriverAccess(t)
 	ctx := context.Background()
-	prov := newTestProvisioner(t)
 	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 	first := time.Date(2026, 9, 5, 10, 30, 0, 0, time.UTC)
 	second := time.Date(2026, 12, 25, 8, 0, 0, 0, time.UTC)
 
 	seedVehicleForOwner(t, testPool, "cveh_d5", "5YJ3E1EA1NF000605", driverAccessUser)
-	if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000605", driverAccessUser, "DRIVER", first.Add(-time.Hour)); err != nil {
-		t.Fatalf("RecordDriverAccess: %v", err)
-	}
+	seedDriverAccessRow(t, "cveh_d5", driverAccessUser)
 
 	recorded, err := repo.AcknowledgeOwnerApproval(ctx, "cveh_d5", driverAccessUser, "owner-approval-v1", first)
 	if err != nil {
@@ -199,7 +113,7 @@ func TestAcknowledgeOwnerApprovalFirstWriteWins(t *testing.T) {
 		t.Error("recorded = true on a REPEAT — the handler would write a second audit row for one consent")
 	}
 
-	_, ackAt, version, ok := readDriverAccessRow(t, "cveh_d5")
+	ackAt, version, ok := readDriverAccessRow(t, "cveh_d5")
 	if !ok {
 		t.Fatal("the row vanished")
 	}
@@ -253,50 +167,11 @@ func TestAcknowledgeOwnerApprovalOnAnOwnerCarWritesNothing(t *testing.T) {
 	}
 }
 
-// ClearDriverAccess is the access-UPGRADE case: Tesla now calls this account the
-// car's OWNER, so the standing claim must go or the wire keeps calling a car
-// "driver" that this person owns outright.
-func TestClearDriverAccess(t *testing.T) {
-	setupDriverAccess(t)
-	ctx := context.Background()
-	prov := newTestProvisioner(t)
-	now := time.Date(2026, 9, 5, 10, 4, 0, 0, time.UTC)
-
-	seedVehicleForOwner(t, testPool, "cveh_d7", "5YJ3E1EA1NF000607", driverAccessUser)
-	seedVehicleForOwner(t, testPool, "cveh_d8", "5YJ3E1EA1NF000608", driverAccessOther)
-	for _, v := range []struct{ vin, user string }{
-		{"5YJ3E1EA1NF000607", driverAccessUser},
-		{"5YJ3E1EA1NF000608", driverAccessOther},
-	} {
-		if err := prov.RecordDriverAccess(ctx, v.vin, v.user, "DRIVER", now); err != nil {
-			t.Fatalf("seed driver access %s: %v", v.vin, err)
-		}
-	}
-
-	if err := prov.ClearDriverAccess(ctx, "5YJ3E1EA1NF000607", driverAccessUser); err != nil {
-		t.Fatalf("ClearDriverAccess: %v", err)
-	}
-	if _, _, _, ok := readDriverAccessRow(t, "cveh_d7"); ok {
-		t.Error("the stale driver row survived an OWNER re-link")
-	}
-	// Owner-scoped, like the upsert: another person's row is untouched.
-	if _, _, _, ok := readDriverAccessRow(t, "cveh_d8"); !ok {
-		t.Error("another user's driver-access row was cleared")
-	}
-
-	// Idempotent — the overwhelmingly common case is an owner's car that never
-	// had a row, and a missing row is success.
-	if err := prov.ClearDriverAccess(ctx, "5YJ3E1EA1NF000607", driverAccessUser); err != nil {
-		t.Errorf("second ClearDriverAccess = %v, want nil", err)
-	}
-}
-
 // The VIN-keyed gate the fleet-config push route consults. Its three answers
 // must be distinguishable, because two of them permit a push and one forbids it.
 func TestPendingDriverAcknowledgmentByVIN(t *testing.T) {
 	setupDriverAccess(t)
 	ctx := context.Background()
-	prov := newTestProvisioner(t)
 	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
 	now := time.Date(2026, 9, 5, 10, 4, 0, 0, time.UTC)
 
@@ -304,14 +179,10 @@ func TestPendingDriverAcknowledgmentByVIN(t *testing.T) {
 	seedVehicleForOwner(t, testPool, "cveh_d9", "5YJ3E1EA1NF000609", driverAccessUser)
 	// A driver's car, unacknowledged: the gate is SHUT.
 	seedVehicleForOwner(t, testPool, "cveh_d10", "5YJ3E1EA1NF000610", driverAccessUser)
-	if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000610", driverAccessUser, "DRIVER", now); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	seedDriverAccessRow(t, "cveh_d10", driverAccessUser)
 	// A driver's car, acknowledged: the gate is OPEN.
 	seedVehicleForOwner(t, testPool, "cveh_d11", "5YJ3E1EA1NF000611", driverAccessUser)
-	if err := prov.RecordDriverAccess(ctx, "5YJ3E1EA1NF000611", driverAccessUser, "DRIVER", now); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
+	seedDriverAccessRow(t, "cveh_d11", driverAccessUser)
 	if _, err := repo.AcknowledgeOwnerApproval(ctx, "cveh_d11", driverAccessUser, "owner-approval-v1", now); err != nil {
 		t.Fatalf("acknowledge: %v", err)
 	}
@@ -336,5 +207,53 @@ func TestPendingDriverAcknowledgmentByVIN(t *testing.T) {
 				t.Errorf("pending = %v, want %v", pending, tc.wantPending)
 			}
 		})
+	}
+}
+
+// THE `user_id = $4` GUARD ON THE ACKNOWLEDGMENT STATEMENT.
+//
+// The §7.29 handler establishes ownership before it calls, so this predicate is
+// pure defence — which is exactly why it needs a test of its own. Defence that
+// lives only in the caller is defence the SECOND caller will not have, and the
+// thing it protects is a consent record: a stamp written against a car the
+// acknowledging account does not hold would be the platform asserting that a
+// named person agreed to something about somebody else's vehicle.
+func TestAcknowledgeOwnerApprovalIsUserScoped(t *testing.T) {
+	setupDriverAccess(t)
+	ctx := context.Background()
+	repo := store.NewVehicleRepo(testPool, store.NoopMetrics{})
+
+	seedVehicleForOwner(t, testPool, "cveh_d12", "5YJ3E1EA1NF000612", driverAccessUser)
+	seedDriverAccessRow(t, "cveh_d12", driverAccessUser)
+	// The other person's own driver car, so the assertion below is about the
+	// PREDICATE and not merely about a statement that happened to match nothing:
+	// this account really does hold a row of its own, just not this car's.
+	seedVehicleForOwner(t, testPool, "cveh_d13", "5YJ3E1EA1NF000613", driverAccessOther)
+	seedDriverAccessRow(t, "cveh_d13", driverAccessOther)
+
+	recorded, err := repo.AcknowledgeOwnerApproval(
+		ctx, "cveh_d12", driverAccessOther, "owner-approval-v1", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("AcknowledgeOwnerApproval = %v, want nil — a non-match is zero rows, not a fault", err)
+	}
+	if recorded {
+		t.Fatal("recorded = true for an account that does not hold this car's driver-access row")
+	}
+	if ackAt, _, ok := readDriverAccessRow(t, "cveh_d12"); !ok || ackAt != nil {
+		t.Errorf("acknowledged_at = %v, want it still NULL — the gate was opened by the wrong person", ackAt)
+	}
+	if ackAt, _, ok := readDriverAccessRow(t, "cveh_d13"); !ok || ackAt != nil {
+		t.Errorf("acknowledged_at on the OTHER car = %v, want NULL — the statement is keyed on "+
+			"vehicle_id and must not wander to a row this account does hold", ackAt)
+	}
+
+	var audits int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM "AuditLog" WHERE "action" = $1 AND "targetId" = $2`,
+		string(store.AuditActionOwnerApprovalAcknowledged), "cveh_d12").Scan(&audits); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if audits != 0 {
+		t.Errorf("audit rows = %d, want 0 — nothing was acknowledged", audits)
 	}
 }

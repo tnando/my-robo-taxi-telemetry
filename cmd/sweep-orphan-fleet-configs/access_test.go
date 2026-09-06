@@ -167,8 +167,19 @@ func TestAnnotateDriverAccess_Batching(t *testing.T) {
 
 // TestAnnotateDriverAccess_LookupFailure: a failed lookup is reported, never
 // fatal, and never turns a line into a confident answer.
+//
+// IT ALSO PINS THE VIN SCRUB (MYR-599 review finding K). This pass used to
+// render its errors through a local truncate() with its own cap and no
+// redaction at all, so a store error quoting the VIN it failed on would have
+// written that VIN into the report's Errors block — the one part of the
+// artifact that is NOT already a VIN-keyed line, and the part an operator is
+// most likely to paste somewhere. It now goes through fleetorphan.ErrText, the
+// same rendering every other error in this report gets.
 func TestAnnotateDriverAccess_LookupFailure(t *testing.T) {
-	lister := &fakeDriverAccessLister{err: errors.New(strings.Repeat("x", errorTextCap+50))}
+	const vin = "5YJ3E1EA1PF000001"
+	lister := &fakeDriverAccessLister{
+		err: errors.New(vin + " " + strings.Repeat("x", 600)),
+	}
 	got := annotateDriverAccess(context.Background(), lister,
 		fleetorphan.Report{VINs: []fleetorphan.VINOutcome{{VIN: "VIN-1", UserID: "cuser1"}}})
 
@@ -177,6 +188,12 @@ func TestAnnotateDriverAccess_LookupFailure(t *testing.T) {
 	}
 	if len(got.Errors) != 1 || !strings.Contains(got.Errors[0], "list driver access") {
 		t.Fatalf("errors = %v, want one driver-access error", got.Errors)
+	}
+	if strings.Contains(got.Errors[0], vin) {
+		t.Errorf("the VIN survived into the report's Errors block: %q", got.Errors[0])
+	}
+	if !strings.Contains(got.Errors[0], "***0001") {
+		t.Errorf("the VIN was not reduced to its last four: %q", got.Errors[0])
 	}
 	if !strings.HasSuffix(got.Errors[0], "…(truncated)") {
 		t.Errorf("error was not capped: %q", got.Errors[0])
