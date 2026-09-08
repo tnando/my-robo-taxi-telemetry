@@ -2,11 +2,8 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // The MYR-602 CATALOG and PUSH-TO-START TOKEN reads.
@@ -100,29 +97,6 @@ func (r *TripRepo) ActiveTripIDsForUser(ctx context.Context, userID string) (map
 		return nil, fmt.Errorf("TripRepo.ActiveTripIDsForUser(%s): rows: %w", userID, err)
 	}
 	return out, nil
-}
-
-// ActiveTripID resolves VehicleSummary.activeTripId for ONE (caller, vehicle)
-// pair — the owner's own row, and the snapshot.
-//
-// Empty string means none. The owner arm carries no share join (an owner holds
-// no grant); the participant arm carries the full live-grant predicate, so the
-// field can never name a trip whose access the caller does not actually have.
-func (r *TripRepo) ActiveTripID(ctx context.Context, userID, vehicleID string) (string, error) {
-	const op = "trip.active_id"
-	start := time.Now()
-	defer func() { r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds()) }()
-
-	var tripID string
-	err := r.pool.QueryRow(ctx, queryActiveTripIDForUserVehicle, userID, vehicleID).Scan(&tripID)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return "", nil
-	case err != nil:
-		r.metrics.IncQueryError(op)
-		return "", fmt.Errorf("TripRepo.ActiveTripID(vehicle=%s): %w", vehicleID, err)
-	}
-	return tripID, nil
 }
 
 // RegisterActivityStartToken stores one party's ActivityKit PUSH-TO-START token

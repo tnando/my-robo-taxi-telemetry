@@ -1,10 +1,9 @@
-package telemetry
+package wserrors
 
 import (
 	"net/http"
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
-	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
 // HOW A REJECTED BEARER TOKEN IS REPORTED (MYR-612).
@@ -33,19 +32,34 @@ import (
 // THE CHECK ITSELF IS UNCHANGED AND STILL FAILS CLOSED: an unanswerable
 // existence probe still refuses the request. What changes is only WHICH refusal
 // the client is told, and therefore whether retrying is the right response.
+//
+// ⚠ ONE COPY, HERE, AND THE PLACEMENT IS THE POINT (MYR-612 review). This
+// classifier existed in FOUR places — internal/telemetry, internal/push,
+// internal/teslalink and, differently, internal/ws — and the fourth had already
+// drifted: it answered a typed `service_unavailable` FRAME on a transport whose
+// ErrorPayload.code enum deliberately excludes that member. A rule that decides
+// what thirty surfaces tell a phone about its credential cannot live in four
+// files. It lives beside the error catalog it draws its codes from, which is
+// the one package both transports already depend on.
 
-// authFailure classifies a ValidateToken error into the status, wire code and
+// AuthFailure classifies a ValidateToken error into the status, wire code and
 // message the caller should see.
 //
 // Returned as three values rather than written to the ResponseWriter here
 // because every handler has its own `writeError` — the envelope is the
 // handler's, the CLASSIFICATION is shared, and that is the only part that must
 // not drift between thirty surfaces.
-func authFailure(err error) (status int, code wserrors.ErrorCode, message string) {
+//
+// THE WEBSOCKET DOES NOT USE THIS FUNCTION and must not: it has no HTTP status
+// to return and no `service_unavailable` member to name. Its analogue of the
+// 503 arm is close code 1013 Try Again Later, in
+// internal/ws/handler.go:refuseHandshake — the same distinction, in the
+// vocabulary that transport actually has (websocket-protocol.md §2.4, §6.2).
+func AuthFailure(err error) (status int, code ErrorCode, message string) {
 	if auth.IsLookupFailure(err) {
 		return http.StatusServiceUnavailable,
-			wserrors.ErrCodeServiceUnavailable,
+			ErrCodeServiceUnavailable,
 			"authentication is temporarily unavailable; retry shortly"
 	}
-	return http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token"
+	return http.StatusUnauthorized, ErrCodeAuthFailed, "invalid or expired token"
 }

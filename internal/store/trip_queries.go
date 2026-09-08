@@ -464,30 +464,6 @@ WHERE d."vehicleId" = $1
 ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $6`
 
-// queryActiveTripIDForUserVehicle answers VehicleSummary.activeTripId: the id
-// of the open window on this car that this caller is party to, as OWNER or as
-// live participant.
-//
-// The owner arm has no share join — an owner holds no grant — and the
-// participant arm carries the full live-share predicate, so the field can never
-// name a trip whose access the caller does not actually have.
-const queryActiveTripIDForUserVehicle = `
-SELECT t.id FROM go_trips t
-WHERE t.vehicle_id = $2
-  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
-  AND (
-		t.owner_user_id = $1
-		OR EXISTS (
-			SELECT 1 FROM go_trip_participants p
-			JOIN go_vehicle_shares s
-			  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
-			 AND s.status = 'accepted' AND s.suspended_at IS NULL
-			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
-		)
-	)
-ORDER BY t.starts_at DESC
-LIMIT 1`
-
 // queryActiveTripIDsForUser answers "which of the cars in this caller's catalog
 // — however they got there — have a window open right now?".
 //
@@ -504,7 +480,7 @@ LIMIT 1`
 // The owner arm carries no share join — an owner holds no grant — and the
 // participant arm carries the full live-share predicate, so the field can never
 // name a trip whose access the caller does not actually have. It is the same
-// two-armed shape as queryActiveTripIDForUserVehicle, widened from one vehicle
+// two-armed shape the per-vehicle form had, widened from one vehicle
 // to all of them, and the window predicate is spelled the one way it is spelled
 // everywhere (trips.md §2).
 //

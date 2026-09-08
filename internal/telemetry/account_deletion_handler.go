@@ -116,7 +116,7 @@ func (h *AccountDeletionHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	userID, err := h.auth.ValidateToken(ctx, token)
 	if err != nil {
 		h.logger.Warn("account deletion: invalid token", slog.String("error", err.Error()))
-		status, code, message := authFailure(err)
+		status, code, message := wserrors.AuthFailure(err)
 		h.writeError(w, status, code, message)
 		return
 	}

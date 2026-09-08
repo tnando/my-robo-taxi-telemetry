@@ -257,7 +257,7 @@ func (h *ShareInviteHandler) authOwner(
 	userID, err := h.auth.ValidateToken(ctx, token)
 	if err != nil {
 		h.logger.Warn(surface+": invalid token", slog.String("error", err.Error()))
-		status, code, message := authFailure(err)
+		status, code, message := wserrors.AuthFailure(err)
 		h.writeError(w, status, code, message)
 		return VehicleSnapshotRow{}, "", "", false
 	}

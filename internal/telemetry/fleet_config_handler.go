@@ -100,7 +100,7 @@ func (h *FleetConfigHandler) authorize(w http.ResponseWriter, r *http.Request) (
 			slog.String("vin", redactVIN(vin)),
 			slog.String("error", err.Error()),
 		)
-		status, code, message := authFailure(err)
+		status, code, message := wserrors.AuthFailure(err)
 		h.writeError(w, status, code, message)
 		return "", TeslaToken{}, false
 	}

@@ -385,7 +385,7 @@ func (h *RideRequestHandler) authUser(w http.ResponseWriter, r *http.Request) (s
 	userID, err := h.auth.ValidateToken(r.Context(), token)
 	if err != nil {
 		h.logger.Warn("ride-request: invalid token", slog.String("error", err.Error()))
-		status, code, message := authFailure(err)
+		status, code, message := wserrors.AuthFailure(err)
 		h.writeError(w, status, code, message)
 		return "", false
 	}

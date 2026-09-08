@@ -3,9 +3,12 @@
 // error code the server emits across both transports (WebSocket
 // `error` frame and REST `error.code` envelope).
 //
-// Both internal/ws/ and internal/telemetry/ depend on this package; it
-// depends on no other internal package, which is what lets the WS and
-// REST layers share the catalog without forming an import cycle.
+// Both internal/ws/ and internal/telemetry/ depend on this package. Its
+// only internal dependency is internal/auth, itself a leaf, which
+// auth_failure.go needs to tell a dead credential apart from an
+// unanswerable existence probe (MYR-612); every consumer of this package
+// already imports internal/auth, so the WS and REST layers still share
+// the catalog without forming an import cycle.
 package wserrors
 
 import (
