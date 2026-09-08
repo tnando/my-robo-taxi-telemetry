@@ -137,6 +137,12 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 		return
 	}
 
+	// MYR-601 review round: ONE widening for the whole pass. A first link of a
+	// three-car fleet is one access-set change, and announcing per car closed
+	// every session this owner held three times — each close provoking a
+	// reconnect that raced the next — to deliver a fact the first re-handshake
+	// already delivered in full. See accessGain.
+	var gain accessGain
 	for _, v := range vehicles {
 		// MYR-599 REPLACED THE OWNERSHIP FILTER WITH CONSENT. MYR-257 finding 3
 		// skipped every non-OWNER vehicle here, silently by design — and the
@@ -145,8 +151,9 @@ func (h *ownerStreamHook) AfterLink(ctx context.Context, userID, accessToken str
 		// about why. Both access types are provisioned now; what separates them
 		// is that nothing is pushed at a driver's car until they acknowledge
 		// the owner approved it. provisionVehicle owns that branch.
-		h.provisionVehicle(ctx, userID, accessToken, v)
+		h.provisionVehicle(ctx, userID, accessToken, v, &gain)
 	}
+	h.flushGain(userID, gain)
 }
 
 // ReaddVehicle is the targeted re-provision behind the deliberate re-add
@@ -177,7 +184,12 @@ func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken,
 		if v.ID.String() != teslaVehicleID {
 			continue
 		}
-		return h.provisionVehicle(ctx, userID, accessToken, v)
+		// ONE car, so the accumulator flushes immediately and the deliberate
+		// re-add keeps the single announce it always had (MYR-601).
+		var gain accessGain
+		provisioned := h.provisionVehicle(ctx, userID, accessToken, v, &gain)
+		h.flushGain(userID, gain)
+		return provisioned
 	}
 	h.logger.Warn("owner re-add: target not in caller fleet (tombstone cleared, nothing to provision)",
 		slog.String("user_id", userID),
@@ -213,7 +225,9 @@ func (h *ownerStreamHook) ReaddVehicle(ctx context.Context, userID, accessToken,
 // UpsertOwnedVehicle, so a still-tombstoned car is skipped here (returns false)
 // regardless of caller and regardless of access type. Returns whether the car
 // was provisioned.
-func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessToken string, v telemetry.FleetVehicle) bool {
+func (h *ownerStreamHook) provisionVehicle(
+	ctx context.Context, userID, accessToken string, v telemetry.FleetVehicle, gain *accessGain,
+) bool {
 	vin := v.VIN
 	res, err := h.upsert.UpsertOwnedVehicle(ctx, store.OwnedVehicleInput{
 		UserID:         userID,
@@ -291,12 +305,16 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 	}
 
 	// MYR-601: THE CAR IS ON THE ROW, SO THE ACCESS SET HAS ALREADY CHANGED.
-	// Announced here rather than at either exit below, because both of them
+	// Recorded here rather than at either exit below, because both of them
 	// provisioned a car: an unacknowledged driver-access vehicle is in its
 	// linker's access set exactly like an owner's — the consent gate holds the
 	// Tesla-side PUSH, not the row, and §7.0 lists the car either way. Placed
 	// before the fork so no future branch can return past it.
-	h.announceProvisioned(userID, res)
+	//
+	// The GAIN lands in the caller's accumulator and is announced once the pass
+	// is over; the transfer's LOSSES are published from inside this call,
+	// immediately. See announceProvisioned for why the two differ.
+	h.announceProvisioned(res, gain)
 
 	// MYR-599: the fork. Taken BEFORE the `owner_vehicle_owned` line below,
 	// because that line's whole meaning is "this account owns this car" and

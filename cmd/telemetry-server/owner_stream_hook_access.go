@@ -106,25 +106,13 @@ type ownerStreamAccess struct {
 // cached set would come back without the car — a no-op that looks like a fix.
 // It is the same order every narrowing path in internal/telemetry documents,
 // for the mirror-image reason.
-//
-// Best-effort by construction, like every other step in this hook: a nil seam,
-// an empty user or an empty vehicle are ordinary no-ops, and the link the
-// caller is completing does not depend on anybody being online to hear this.
 func (h *ownerStreamHook) gained(userID, vehicleID, reason string) {
-	if userID == "" || vehicleID == "" {
-		return
+	var publish func(userID, vehicleID, reason string)
+	if w := h.access.widener; w != nil {
+		publish = w.ShareAccessWidened
 	}
-	if h.access.invalidator != nil {
-		h.access.invalidator.InvalidateVehicles(userID)
-	}
-	if h.access.widener != nil {
-		h.access.widener.ShareAccessWidened(userID, vehicleID, reason)
-	}
-	h.logger.Info("owner stream setup: access set widened",
-		slog.String("event", "owner_vehicle_access_widened"),
-		slog.String("user_id", userID),
-		slog.String("vehicle_id", vehicleID),
-		slog.String("reason", reason))
+	h.announceAccessChange(userID, vehicleID, reason,
+		"owner_vehicle_access_widened", "owner stream setup: access set widened", publish)
 }
 
 // lost announces that userID's access set no longer contains vehicleID — the
@@ -133,24 +121,88 @@ func (h *ownerStreamHook) gained(userID, vehicleID, reason string) {
 // SAME ORDER, DIFFERENT STAKES. A widening that arrives late costs somebody a
 // car on their map; a narrowing that arrives late leaves a stranger streaming
 // live GPS from a car that is no longer theirs in any sense, for up to the
-// cache TTL and for as long as they hold the socket open. The former driver's
-// grants were revoked inside the provisioning transaction, so the database
-// agrees already — these two calls are what make the running process agree.
+// cache TTL and for as long as they hold the socket open. That is also why
+// announceProvisioned publishes the losses BEFORE the gain. The revocations
+// happened inside the provisioning transaction, so the database agrees already
+// — these calls are what make the running process agree.
 func (h *ownerStreamHook) lost(userID, vehicleID, reason string) {
+	var publish func(userID, vehicleID, reason string)
+	if n := h.access.narrower; n != nil {
+		publish = n.ShareAccessRevoked
+	}
+	h.announceAccessChange(userID, vehicleID, reason,
+		"owner_vehicle_access_narrowed", "owner stream setup: access set narrowed", publish)
+}
+
+// announceAccessChange is the ONE body both directions share: bust the user's
+// cached access set, hand the change to the seam, say so in the log.
+//
+// The two callers were byte-identical apart from the seam field and the two
+// strings, which is the shape a rule takes just before one copy drifts — and
+// the rule here is an ORDERING that a drifted copy would silently invert.
+//
+// BEST-EFFORT BY CONSTRUCTION, like every other step in this hook: an empty
+// user, an empty vehicle or a nil seam are ordinary no-ops, and the link the
+// caller is completing does not depend on anybody being online to hear this.
+//
+// AND IT SAYS NOTHING WHEN IT DID NOTHING. With no invalidator and no seam —
+// the all-nil configuration every test that wires no bus gets — an
+// `owner_vehicle_access_widened` line would be an audit trail asserting an
+// announcement that never left the process.
+func (h *ownerStreamHook) announceAccessChange(
+	userID, vehicleID, reason, event, message string,
+	publish func(userID, vehicleID, reason string),
+) {
 	if userID == "" || vehicleID == "" {
 		return
 	}
+	acted := false
 	if h.access.invalidator != nil {
 		h.access.invalidator.InvalidateVehicles(userID)
+		acted = true
 	}
-	if h.access.narrower != nil {
-		h.access.narrower.ShareAccessRevoked(userID, vehicleID, reason)
+	if publish != nil {
+		publish(userID, vehicleID, reason)
+		acted = true
 	}
-	h.logger.Info("owner stream setup: access set narrowed",
-		slog.String("event", "owner_vehicle_access_narrowed"),
+	if !acted {
+		return
+	}
+	h.logger.Info(message,
+		slog.String("event", event),
 		slog.String("user_id", userID),
 		slog.String("vehicle_id", vehicleID),
 		slog.String("reason", reason))
+}
+
+// accessGain is the widening one pass over a fleet produced, held until the
+// pass is over.
+//
+// A FIRST LINK OF AN N-CAR FLEET IS ONE ACCESS-SET CHANGE, NOT N (MYR-601
+// review round). Announcing per car closed every session that owner held N
+// times — each close provoking a reconnect that raced the next close — to
+// deliver one fact the first re-handshake had already delivered in full, since
+// the reconnect re-derives the WHOLE access set. It is the same argument
+// §7.5.5 redeem makes for publishing once per redemption rather than once per
+// granted car, arriving from the other side.
+//
+// The vehicle id and reason are the FIRST gain of the pass and are for the log
+// alone: `Hub.WidenUserAccess` cannot find a user's sessions by a car they are
+// not yet authorized for — that is the whole reason it exists — so it closes
+// every session the user holds whatever id it is handed.
+type accessGain struct {
+	vehicleID string
+	reason    string
+	found     bool
+}
+
+// record keeps the first gain of the pass. Later ones change nothing: one
+// re-handshake already covers every car the pass provisioned.
+func (g *accessGain) record(vehicleID, reason string) {
+	if g.found {
+		return
+	}
+	g.vehicleID, g.reason, g.found = vehicleID, reason, true
 }
 
 // announceProvisioned is the ONE call provisionVehicle makes once a car is on
@@ -169,14 +221,19 @@ func (h *ownerStreamHook) lost(userID, vehicleID, reason string) {
 // the previous linker's and out of every grantee's, so ALL of those ends are
 // announced.
 //
-// THE LOSSES GO FIRST, AND THE ORDER FOLLOWS THE STAKES. A widening that
-// arrives late costs the arriving owner a car on their map for one reconnect; a
-// narrowing that arrives late leaves a stranger streaming live GPS from a car
-// that is no longer theirs in any sense. Both publishes are best-effort onto an
-// in-process bus that drops the OLDEST event when a subscriber is behind, so if
-// exactly one of them is going to be lost it must not be a security one. See
-// `lost`.
-func (h *ownerStreamHook) announceProvisioned(userID string, res store.VehicleUpsertResult) {
+// THE GAIN IS COLLECTED, THE LOSSES ARE PUBLISHED NOW, and the asymmetry is the
+// stakes. A gain deferred to the end of the pass costs the arriving user
+// nothing — one re-handshake covers every car — while a loss deferred is a
+// stranger streaming live GPS from a car that is no longer theirs in any sense
+// for as long as the pass runs. Both ride an in-process bus that drops the
+// OLDEST event when a subscriber is behind, so if exactly one is going to be
+// lost it must not be the security one. See `lost`.
+//
+// IT NO LONGER TAKES THE GAINING USER. Everything it publishes is addressed at
+// somebody ELSE — the accounts the transfer cut — and the one fact about the
+// caller travels in `gain`, to be announced once by flushGain when the pass is
+// over.
+func (h *ownerStreamHook) announceProvisioned(res store.VehicleUpsertResult, gain *accessGain) {
 	switch {
 	case res.Outcome == store.VehicleOwnedByTransfer:
 		// The former driver, who was not asked and is not told anywhere else.
@@ -190,10 +247,19 @@ func (h *ownerStreamHook) announceProvisioned(userID string, res store.VehicleUp
 		for _, granteeID := range res.RevokedGranteeIDs {
 			h.lost(granteeID, res.VehicleID, "share_superseded_by_owner")
 		}
-		h.gained(userID, res.VehicleID, "owner_transfer")
+		gain.record(res.VehicleID, "owner_transfer")
 	case res.Inserted:
-		h.gained(userID, res.VehicleID, "provisioned")
+		gain.record(res.VehicleID, "provisioned")
 	}
+}
+
+// flushGain announces at most ONE widening for a whole pass. A pass that
+// provisioned nothing new says nothing at all.
+func (h *ownerStreamHook) flushGain(userID string, gain accessGain) {
+	if !gain.found {
+		return
+	}
+	h.gained(userID, gain.vehicleID, gain.reason)
 }
 
 // ownerStreamAccessFrom binds the seam to the objects main already built for

@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -276,16 +278,25 @@ func TestOwnerStreamHook_TransferWithNoPreviousHolderNarrowsNobody(t *testing.T)
 // on the link path.
 func TestOwnerStreamHook_NilAccessSeamIsAQuietNoOp(t *testing.T) {
 	upsert := &fakeUpserter{inserted: true}
-	hook := newAccessHook(t,
-		[]telemetry.FleetVehicle{ownedVehicle("111", accessVIN, "Lunar")},
-		upsert,
-		ownerStreamAccess{},
-	)
+	// A REAL log sink, because "quiet" is half the claim: with nothing wired
+	// there is no announcement to make, and an `owner_vehicle_access_widened`
+	// line would be the audit trail asserting one that never left the process.
+	var logged bytes.Buffer
+	hook := &ownerStreamHook{
+		lister: &fakeLister{vehicles: []telemetry.FleetVehicle{ownedVehicle("111", accessVIN, "Lunar")}},
+		upsert: upsert,
+		access: ownerStreamAccess{},
+		logger: slog.New(slog.NewTextHandler(&logged, nil)),
+	}
 
 	hook.AfterLink(context.Background(), "cuser1", "token")
 
 	if len(upsert.inputs) != 1 {
 		t.Fatalf("the link itself did not complete: upserts = %+v", upsert.inputs)
+	}
+	if strings.Contains(logged.String(), "owner_vehicle_access_widened") {
+		t.Errorf("logged an access-set widening with no invalidator and no seam wired:\n%s",
+			logged.String())
 	}
 }
 
@@ -435,4 +446,80 @@ func TestOwnerStreamHook_TransferNarrowsEveryRevokedGrantee(t *testing.T) {
 	awaitClose4002(t, viewerA, start, "a viewer the transfer revoked")
 	awaitClose4002(t, viewerB, start, "the second viewer the transfer revoked")
 	awaitClose4002(t, ownerConn, start, "the arriving owner")
+}
+
+// A FIRST LINK OF AN N-CAR FLEET IS ONE ACCESS-SET CHANGE, NOT N (MYR-601
+// review round). The pass announced per car, so a three-car first link closed
+// every session that owner held three times — each close provoking a reconnect
+// that raced the next one — to deliver a fact the FIRST re-handshake had
+// already delivered in full, since the reconnect re-derives the whole access
+// set. It is §7.5.5 redeem's one-signal-per-redemption rule from the other side.
+func TestOwnerStreamHook_AFleetOfNewCarsAnnouncesOnce(t *testing.T) {
+	inv := &recordingInvalidator{}
+	wid := &recordingWidener{inv: inv}
+	hook := newAccessHook(t,
+		[]telemetry.FleetVehicle{
+			ownedVehicle("111", "5YJ3E1EA7KF000042", "Lunar"),
+			ownedVehicle("222", "5YJ3E1EA7KF000043", "Solar"),
+			ownedVehicle("333", "5YJ3E1EA7KF000044", "Stellar"),
+		},
+		&fakeUpserter{inserted: true},
+		ownerStreamAccess{invalidator: inv, widener: wid},
+	)
+
+	hook.AfterLink(context.Background(), "cuser1", "token")
+
+	if len(wid.calls) != 1 {
+		t.Fatalf("widenings = %+v, want exactly 1 for a three-car first link — the "+
+			"re-handshake re-derives the WHOLE access set, so the second and third "+
+			"closes deliver nothing and race the reconnect the first one provoked",
+			wid.calls)
+	}
+	if len(inv.users) != 1 || inv.users[0] != "cuser1" {
+		t.Errorf("cache busts = %v, want exactly one for the linking owner", inv.users)
+	}
+	// It is still ordered: the one bust precedes the one publish.
+	if len(wid.busted) != 1 || len(wid.busted[0]) != 1 {
+		t.Errorf("the widening was published before the cache bust (busts at publish: %v)", wid.busted)
+	}
+}
+
+// AND A MIXED PASS STILL ANNOUNCES ONCE, with the losses published in full.
+// Every account the transfer cut has its own socket to close — one per person,
+// because they are different people — while the arriving owner gains one
+// re-handshake however many cars arrived in the same pass.
+func TestOwnerStreamHook_MixedFleetAnnouncesOneGainAndEveryLoss(t *testing.T) {
+	var seq []string
+	inv := &recordingInvalidator{}
+	wid := &recordingWidener{inv: inv, seq: &seq}
+	nar := &recordingNarrower{seq: &seq}
+	hook := newAccessHook(t,
+		[]telemetry.FleetVehicle{
+			ownedVehicle("111", "5YJ3E1EA7KF000042", "Lunar"),
+			ownedVehicle("222", "5YJ3E1EA7KF000043", "Solar"),
+		},
+		// Both cars take the TRANSFER branch, so the pass produces two gains
+		// worth of evidence and two sets of losers.
+		&fakeUpserter{
+			outcome:           store.VehicleOwnedByTransfer,
+			previousUserID:    "cdriver",
+			revokedGranteeIDs: []string{"cviewer_a"},
+		},
+		ownerStreamAccess{invalidator: inv, widener: wid, narrower: nar},
+	)
+
+	hook.AfterLink(context.Background(), "cowner", "token")
+
+	if len(wid.calls) != 1 || wid.calls[0].reason != "owner_transfer" {
+		t.Errorf("widenings = %+v, want exactly one {cowner … owner_transfer}", wid.calls)
+	}
+	if len(nar.calls) != 4 {
+		t.Errorf("narrowings = %+v, want four — the driver and the viewer, once per car, "+
+			"because each is a different person's socket on a different car", nar.calls)
+	}
+	// And the single gain is announced LAST, after every loss of the pass.
+	if len(seq) == 0 || seq[len(seq)-1] != "gained:cowner" {
+		t.Errorf("publish order = %v, want the gain last — a deferred loss is a stranger "+
+			"streaming live GPS for as long as the pass runs", seq)
+	}
 }
