@@ -24,6 +24,14 @@ import (
 // security property that depends on every caller remembering to announce it is
 // not a security property. This sweep re-derives from the database and is
 // therefore correct regardless of who mutated what, where.
+//
+// SINCE MYR-601 THE SAME ARGUMENT COVERS THE WIDENING DIRECTION, and it had to:
+// every one of those failure modes exists there too, plus one that has no
+// event-driven answer at all — the Next.js app writes `"Vehicle"` rows straight
+// into the shared database (react-frontend `sync.ts`), reaching neither this
+// process's access cache nor its bus. Nothing can publish for a writer in
+// another process. Re-deriving from the database is what makes the ≤60s bound
+// a property of the DATA rather than of every writer remembering the rule.
 const DefaultRevalidateInterval = 60 * time.Second
 
 // AccessResolver re-derives a user's authorized vehicle set AND their role on
@@ -46,9 +54,17 @@ type AccessResolver interface {
 }
 
 // AccessRevalidator periodically re-derives every connected user's access set
-// and closes sessions that are holding a vehicle the user can no longer see
-// (MYR-373, websocket-protocol.md §10 DV-09) — and, since MYR-602, RE-MASKS in
-// place the sessions whose access changed TIER rather than disappearing.
+// and reconciles every connected session against it. THREE ARMS, added in the
+// order the gaps were found:
+//
+//   - CLOSE a session holding a vehicle the user can no longer see (MYR-373,
+//     websocket-protocol.md §10 DV-09).
+//   - CLOSE a session that is missing a vehicle the user CAN now see, so the
+//     reconnect picks it up (MYR-601). This is what makes the ≤60s bound true
+//     in the widening direction, including for writers outside this process.
+//     See access_widen_backstop.go.
+//   - RE-MASK in place the sessions whose access changed TIER rather than
+//     appearing or disappearing (MYR-602). See access_remask.go.
 //
 // THE SECOND JOB IS WHAT TRIPS NEEDED. A share is revoked by somebody clicking
 // something, so there is a mutation to hang the fast nudge off. A TRIP WINDOW
@@ -58,7 +74,7 @@ type AccessResolver interface {
 // sweep is not a backstop for the window case — it IS the mechanism, and its
 // interval is the whole latency budget (~60s, matching the trip sweeper's).
 //
-// Two directions, and both are real:
+// Two directions of the TIER change, and both are real:
 //
 //   - NARROWING. A participant whose window just closed still holds their
 //     accepted share, so the VEHICLE stays in their access set and the old
@@ -72,9 +88,11 @@ type AccessResolver interface {
 //     `trip_participant` in place, which is what makes "the trip started and my
 //     map came alive" true without the app having to reconnect on a timer.
 //
-// A KICK STILL BEATS A RE-MASK. The lost-vehicle check runs first and returns:
-// a session that must be closed is closed, and re-masking a client that is
-// about to be torn down would be work for a socket with no future.
+// A KICK STILL BEATS A RE-MASK, and so does a widen. The lost-vehicle check
+// runs first and returns, then the gained-vehicle one: a session that is about
+// to be torn down is torn down, and re-masking a socket with no future would be
+// work for nobody. A client that both lost and gained is closed once, by the
+// loss, and its reconnect resolves both.
 type AccessRevalidator struct {
 	hub      *Hub
 	resolver AccessResolver
@@ -113,8 +131,9 @@ func (r *AccessRevalidator) Run(ctx context.Context) {
 }
 
 // SweepOnce runs a single revalidation pass and returns the number of sessions
-// it closed. Exported so a test can drive one deterministic pass instead of
-// waiting on the ticker.
+// it closed — narrowings and widenings together, since both end a session; the
+// pass's own log line is where they are told apart. Exported so a test can
+// drive one deterministic pass instead of waiting on the ticker.
 func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 	clients := r.hub.snapshotClients()
 	if len(clients) == 0 {
@@ -137,7 +156,12 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 	// connections, which is what keeps the 60-second interval — the whole
 	// window-edge latency budget — affordable.
 	roles := make(map[userVehicle]auth.Role, len(clients))
-	closed, remasked := 0, 0
+	// AND ONE WIDENING PER USER PER PASS (MYR-601). Unlike a narrowing, which
+	// is keyed on the session holding the lost car, a widening closes EVERY
+	// session that user holds — so a second tab would publish a second close
+	// for sessions the first one already ended. See widenUser.
+	announced := make(map[string]struct{})
+	closed, widened, remasked := 0, 0, 0
 
 	for _, client := range clients {
 		// Dev-mode wildcard clients are authorized for everything by
@@ -170,6 +194,16 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 			closed += r.hub.RevokeUserAccess(client.userID, lost, "revalidation_backstop")
 			continue
 		}
+		// MYR-601 — and the other direction, which until then had event-driven
+		// producers and no backstop at all: this user may now see a car this
+		// SESSION was never authorized for. Re-handshake it, which is what makes
+		// the documented ≤60s bound true for a widening that nobody announced —
+		// including one written by a producer outside this process. See
+		// access_widen_backstop.go.
+		if gained, found := firstGainedVehicle(client, allowed); found {
+			widened += r.widenUser(client, gained, announced)
+			continue
+		}
 		// MYR-602 — the access set is intact; is the TIER? Only reached for a
 		// session that is staying open, and only for the vehicles it actually
 		// holds.
@@ -182,9 +216,15 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 	// signal worth seeing — either the nudge did not reach this hub, or a
 	// mutation happened somewhere that does not publish — and logging every
 	// quiet pass at Info would bury exactly that line once a minute forever.
-	if closed > 0 || remasked > 0 {
+	if closed > 0 || widened > 0 || remasked > 0 {
 		r.logger.Info("access revalidation swept",
 			slog.Int("sessions_closed", closed),
+			// MYR-601: a widening reaching the BACKSTOP means the same thing a
+			// close does — nothing announced it — but in the harmless direction,
+			// so it is counted apart from the narrowings rather than folded into
+			// them. The two must not share a number for the same reason the two
+			// bus topics do not.
+			slog.Int("sessions_widened", widened),
 			// MYR-602: a re-mask is the ORDINARY outcome at a trip window edge,
 			// unlike a close, which always means the nudge failed to arrive.
 			// Both are on one line so an operator reading it can tell a window
@@ -193,7 +233,11 @@ func (r *AccessRevalidator) SweepOnce(ctx context.Context) int {
 			slog.Int("clients_examined", len(clients)),
 		)
 	}
-	return closed
+	// Both arms END SESSIONS, and the caller's one number is "how many sockets
+	// did this pass close". A widening closes them to hand the user more; a
+	// narrowing to take something away. The log line above is where the two are
+	// told apart.
+	return closed + widened
 }
 
 // resolveRole fetches one (user, vehicle) role under the same timeout the
@@ -208,60 +252,4 @@ func (r *AccessRevalidator) resolveRole(ctx context.Context, userID, vehicleID s
 		return auth.Role(""), fmt.Errorf("revalidator.resolveRole(user=%s, vehicle=%s): %w", userID, vehicleID, err)
 	}
 	return role, nil
-}
-
-// accessSet is one user's current entitlement.
-//
-// The `all` flag is why this is a struct and not a bare map. "All access" and
-// "no access" both produce zero per-vehicle entries, and they are opposite
-// answers: the first must close nothing, the second must close everything that
-// user has open. A bare map would have to encode the difference as nil-versus-
-// empty, which is exactly the distinction a future edit drops.
-type accessSet struct {
-	// all is the dev-mode wildcard sentinel: authorized for every vehicle.
-	all bool
-	// allowed holds the concrete vehicle ids. Empty and non-nil is a real
-	// answer — the user may see nothing.
-	allowed map[string]struct{}
-}
-
-// resolveTimeout caps a single resolver call. The sweep walks every connected
-// user on one goroutine, so a hung database read would wedge the whole pass
-// and, with it, every later pass — the backstop would go quiet exactly when
-// the thing it backstops is most likely to be struggling. Nothing on the path
-// today blocks unboundedly; this is the guard that keeps that true.
-const resolveTimeout = 5 * time.Second
-
-// resolve fetches the user's current entitlement.
-func (r *AccessRevalidator) resolve(ctx context.Context, userID string) (accessSet, error) {
-	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
-	defer cancel()
-
-	ids, err := r.resolver.GetUserVehicles(ctx, userID)
-	if err != nil {
-		return accessSet{}, fmt.Errorf("revalidator.resolve(user=%s): %w", userID, err)
-	}
-	out := accessSet{allowed: make(map[string]struct{}, len(ids))}
-	for _, id := range ids {
-		if id == WildcardVehicleID {
-			return accessSet{all: true}, nil
-		}
-		out.allowed[id] = struct{}{}
-	}
-	return out, nil
-}
-
-// firstLostVehicle reports a vehicle the client is still holding that the
-// user's current entitlement no longer covers. One is enough: RevokeUserAccess
-// closes the whole session, so finding a second would change nothing.
-func firstLostVehicle(c *Client, set accessSet) (string, bool) {
-	if set.all {
-		return "", false
-	}
-	for _, held := range c.authorizedVehicles() {
-		if _, ok := set.allowed[held]; !ok {
-			return held, true
-		}
-	}
-	return "", false
 }
