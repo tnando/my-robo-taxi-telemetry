@@ -125,9 +125,7 @@ func (r *TripRepo) AddParticipants(ctx context.Context, tripID, actorUserID stri
 		return TripView{}, ErrTripEnded
 	}
 
-	if _, err := addAndAuditParticipants(
-		ctx, tx, tripID, access.VehicleID, actorUserID, shareIDs,
-	); err != nil {
+	if err := addAndAuditParticipants(ctx, tx, tripID, access.VehicleID, actorUserID, shareIDs); err != nil {
 		if !errors.Is(err, ErrTripParticipantNotShared) {
 			r.metrics.IncQueryError(op)
 		}
@@ -146,10 +144,13 @@ func (r *TripRepo) AddParticipants(ctx context.Context, tripID, actorUserID stri
 // addAndAuditParticipants is the shared body of "somebody was added to a trip
 // that already existed": resolve, diff against the live roster, upsert, audit.
 //
-// Returns the participants that were GENUINELY new — the ones the push fan-out
-// is about. A re-send of somebody already on the trip resolves fine, upserts to
-// a no-op, appears in no audit row and is announced to nobody, which is exactly
-// what "already-present → no-op 200" means one layer up.
+// THE AUDIT ROWS ARE THE DIFF. A re-send of somebody already on the trip
+// resolves fine, upserts to a no-op and appears in no audit row — which is what
+// "already-present → no-op 200" means one layer up. The set is deliberately NOT
+// returned: the handler computes its own before/after roster diff for the push
+// fan-out (it has both TripViews already), and a second answer to the same
+// question, produced here and passed up through two adapters, is a second
+// answer that could disagree.
 //
 // THE ROSTER IS READ INSIDE THE TRANSACTION and once. It decides both the audit
 // rows and the caller's fan-out list; reading it twice, or outside the
@@ -157,38 +158,36 @@ func (r *TripRepo) AddParticipants(ctx context.Context, tripID, actorUserID stri
 // audit row for an add nobody was told about.
 func addAndAuditParticipants(
 	ctx context.Context, tx tripQuerier, tripID, vehicleID, actorUserID string, shareIDs []string,
-) ([]TripParticipantView, error) {
+) error {
 	resolved, err := resolveShareParticipants(ctx, tx, vehicleID, shareIDs)
 	if err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
-			return nil, err
+			return err
 		}
-		return nil, fmt.Errorf("add participants(trip=%s): %w", tripID, err)
+		return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 	}
 	if len(resolved) == 0 {
-		return nil, nil
+		return nil
 	}
 
 	present, err := liveParticipantUserIDs(ctx, tx, tripID)
 	if err != nil {
-		return nil, fmt.Errorf("add participants(trip=%s): %w", tripID, err)
+		return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 	}
 
 	if err := addTripParticipants(ctx, tx, tripID, actorUserID, resolved); err != nil {
-		return nil, fmt.Errorf("add participants(trip=%s): %w", tripID, err)
+		return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 	}
 
-	arrivals := make([]TripParticipantView, 0, len(resolved))
 	for _, p := range resolved {
 		if present[p.UserID] {
 			continue
 		}
-		arrivals = append(arrivals, p)
 		if err := insertTripParticipantAddedAudit(ctx, tx, actorUserID, tripID, vehicleID, p.ParticipantID); err != nil {
-			return nil, fmt.Errorf("add participants(trip=%s): %w", tripID, err)
+			return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 		}
 	}
-	return arrivals, nil
+	return nil
 }
 
 // liveParticipantUserIDs reads the trip's current roster as a set.
@@ -242,9 +241,9 @@ func insertTripParticipantAddedAudit(
 	}
 	now := time.Now().UTC()
 	if _, err := tx.Exec(ctx, queryAuditInsert,
-		newProvisionID(), // id (cuid)
-		actorUserID,      // userId — the OWNER or the PARTICIPANT who added
-		now,              // timestamp
+		newProvisionID(),                        // id (cuid)
+		actorUserID,                             // userId — the OWNER or the PARTICIPANT who added
+		now,                                     // timestamp
 		string(AuditActionTripParticipantAdded), // action
 		auditTargetTypeTrip,                     // targetType
 		tripID,                                  // targetId

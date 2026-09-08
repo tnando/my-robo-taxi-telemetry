@@ -68,6 +68,7 @@ func tripData(v store.TripView) telemetry.TripData {
 			ParticipantID: p.ParticipantID,
 			Name:          p.Name,
 			UserID:        p.UserID,
+			AddedByName:   p.AddedByName,
 		})
 	}
 

@@ -73,6 +73,14 @@ func tripWire(t TripData, callerID string) map[string]any {
 			"participantId": p.ParticipantID,
 			"name":          p.Name,
 			"userIsSelf":    p.UserID == callerID,
+			// MYR-618. A pointer with NO omitempty, the platform's convention
+			// for a nullable name: the key is always present and "nobody
+			// recorded who added this person" is an explicit null rather than
+			// a missing field a client has to guess about. Everyone on the
+			// trip sees it, because everyone on the trip can now BE the
+			// answer — a roster that showed the attribution only to the owner
+			// would be a private ledger of who invited whom.
+			"addedByName": derefOrNil(p.AddedByName),
 		})
 	}
 
@@ -198,18 +206,49 @@ func (h *TripHandler) parseCreate(w http.ResponseWriter, vehicleID, userID strin
 // updateTripBody is UpdateTripRequest. Pointers so an ABSENT key ("leave this
 // alone") is distinguishable from a present one — the distinction PATCH is
 // entirely built on.
+//
+// ⚠ THE TWO LISTS ARE POINTERS TOO, SINCE MYR-618, and that is not symmetry for
+// its own sake. A participant's PATCH is admitted for `addParticipantIds` and
+// refused outright for anything else, so the handler has to distinguish
+// `{"removeParticipantIds": []}` — a present field, refused — from a body that
+// simply omits it. A plain []string flattens those two into the same nil, which
+// would let a participant send an owner-only key and receive a 200 for it.
 type updateTripBody struct {
-	Name                 *string  `json:"name"`
-	EndsAt               *string  `json:"endsAt"`
-	AddParticipantIDs    []string `json:"addParticipantIds"`
-	RemoveParticipantIDs []string `json:"removeParticipantIds"`
+	Name                 *string   `json:"name"`
+	EndsAt               *string   `json:"endsAt"`
+	AddParticipantIDs    *[]string `json:"addParticipantIds"`
+	RemoveParticipantIDs *[]string `json:"removeParticipantIds"`
+}
+
+// ownerOnlyFieldPresent reports whether the body carries anything a live
+// participant may not change (MYR-618).
+//
+// PRESENCE, NOT VALUE. `{"name": null}` and `{"removeParticipantIds": []}` both
+// count: they are the client asking to exercise an owner's verb, and the answer
+// to that question must not depend on whether the request happened to be a
+// no-op. A rule that refused only the requests that would have DONE something
+// would be a rule nobody could state.
+func (b updateTripBody) ownerOnlyFieldPresent() bool {
+	return b.Name != nil || b.EndsAt != nil || b.RemoveParticipantIDs != nil
+}
+
+// addedShareIDs is the add list, flattened. Nil for an absent key and for an
+// explicit empty list alike — by then the presence question has already been
+// asked and answered.
+func (b updateTripBody) addedShareIDs() []string {
+	if b.AddParticipantIDs == nil {
+		return nil
+	}
+	return *b.AddParticipantIDs
 }
 
 func (h *TripHandler) parseUpdate(w http.ResponseWriter, body updateTripBody) (TripUpdateInput, bool) {
 	in := TripUpdateInput{
-		Name:                 body.Name,
-		AddParticipantIDs:    body.AddParticipantIDs,
-		RemoveParticipantIDs: body.RemoveParticipantIDs,
+		Name:              body.Name,
+		AddParticipantIDs: body.addedShareIDs(),
+	}
+	if body.RemoveParticipantIDs != nil {
+		in.RemoveParticipantIDs = *body.RemoveParticipantIDs
 	}
 	if body.EndsAt != nil {
 		endsAt, ok := h.parseInstant(w, "endsAt", *body.EndsAt)

@@ -135,7 +135,7 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // allowed to make the request, and in nothing that reaches the database. The
 // REMOVE half has no counterpart and never will: removal stays owner-only.
 func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID, ownerUserID string, in UpdateTripInput) error {
-	if _, err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, in.AddParticipantIDs); err != nil {
+	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, in.AddParticipantIDs); err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
 			return err
 		}

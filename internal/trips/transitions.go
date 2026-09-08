@@ -47,6 +47,11 @@ type TripNotifier interface {
 	// afterwards: nothing in the database will ever again name who was on that
 	// trip.
 	NotifyTripDeleted(ctx context.Context, tripID string) error
+	// NotifyTripParticipantAdded tells the trip's OWNER that a PARTICIPANT
+	// widened their roster (MYR-618). The names are the roster's own — resolved
+	// by the handler that just read them back — because a second resolution
+	// here could disagree with the trip sheet the banner deep-links to.
+	NotifyTripParticipantAdded(ctx context.Context, tripID, actorName string, addedNames []string) error
 }
 
 // Compile-time proof that the sweeper's own service satisfies the surface the

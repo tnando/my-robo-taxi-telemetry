@@ -72,6 +72,47 @@ type fakeTripStore struct {
 	// asserted directly.
 	lastCreate TripCreateInput
 	lastUpdate TripUpdateInput
+
+	// MYR-618. addCalls counts AddTripParticipants so a refused participant
+	// PATCH can be proven to have reached no store at all, and lastAddShareIDs
+	// / lastAddActor capture what it was asked to do.
+	addCalls        int
+	lastAddShareIDs []string
+	lastAddActor    string
+	addErr          error
+	// addedTrip replaces `trip` as the AddTripParticipants result when set, so
+	// a test can script the before/after roster diff the push fan-out is built
+	// on.
+	addedTrip *TripData
+
+	addable       []TripAddablePersonData
+	addableErr    error
+	addableCalls  int
+	lastAddableID string
+}
+
+func (f *fakeTripStore) AddTripParticipants(
+	_ context.Context, _, actorUserID string, shareIDs []string,
+) (TripData, error) {
+	f.addCalls++
+	f.lastAddActor = actorUserID
+	f.lastAddShareIDs = shareIDs
+	if f.addErr != nil {
+		return TripData{}, f.addErr
+	}
+	if f.addedTrip != nil {
+		return *f.addedTrip, nil
+	}
+	return f.trip, f.err
+}
+
+func (f *fakeTripStore) TripAddablePeople(_ context.Context, tripID, _ string) ([]TripAddablePersonData, error) {
+	f.addableCalls++
+	f.lastAddableID = tripID
+	if f.addableErr != nil {
+		return nil, f.addableErr
+	}
+	return f.addable, nil
 }
 
 func (f *fakeTripStore) CreateTrip(_ context.Context, in TripCreateInput) (TripData, error) {
@@ -148,6 +189,8 @@ type recordingTripNotifier struct {
 	started [][]string
 	ended   [][]string
 	deleted [][]string
+	// participantAdded records MYR-618's owner-directed banner.
+	participantAdded []participantAdd
 
 	// onDeleted lets a test observe the ORDER of the two calls the delete route
 	// makes, which is the one property no status code can express.
@@ -163,6 +206,19 @@ func (n *recordingTripNotifier) TripStarted(_ context.Context, _ TripData, ids [
 func (n *recordingTripNotifier) TripEnded(_ context.Context, _ TripData, ids []string) {
 	n.ended = append(n.ended, ids)
 }
+
+// participantAdd records one MYR-618 owner banner: who added, and whom.
+type participantAdd struct {
+	actor string
+	added []string
+}
+
+func (n *recordingTripNotifier) TripParticipantAdded(
+	_ context.Context, _ TripData, actorName string, addedNames []string,
+) {
+	n.participantAdded = append(n.participantAdded, participantAdd{actor: actorName, added: addedNames})
+}
+
 func (n *recordingTripNotifier) TripDeleted(_ context.Context, _ TripData, ids []string) {
 	n.deleted = append(n.deleted, ids)
 	if n.onDeleted != nil {
@@ -219,6 +275,7 @@ func newTripTestHandler(t *testing.T, store TripStore, enabled bool, opts ...Tri
 	mux.HandleFunc("POST /api/trips/{tripId}/end", h.ServeEnd)
 	mux.HandleFunc("DELETE /api/trips/{tripId}/participants/me", h.ServeLeave)
 	mux.HandleFunc("GET /api/trips/{tripId}/drives", h.ServeDrives)
+	mux.HandleFunc("GET /api/trips/{tripId}/addable-people", h.ServeAddablePeople)
 	mux.HandleFunc("POST /api/trips/{tripId}/activity-start-token", h.ServeRegisterActivityToken)
 	mux.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", h.ServeDeleteActivityToken)
 	mux.HandleFunc("POST /api/trip-legs/{legId}/activity-token", h.ServeRegisterLegActivityToken)

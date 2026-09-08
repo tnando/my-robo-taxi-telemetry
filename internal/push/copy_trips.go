@@ -1,6 +1,9 @@
 package push
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+)
 
 // Notification copy for the `trips` category (MYR-602).
 //
@@ -34,18 +37,27 @@ import "strings"
 
 // tripAlert renders the title/body for one trips event.
 //
-// vehicleName may be "" (the car has no nickname, or the lookup failed) and
-// destination may be "" on the two leg events (a leg cannot start without a
-// destination, so this only happens if the name failed to decrypt) — both fall
-// back rather than producing an empty sentence.
+// IT TAKES THE WHOLE PUSH rather than the three or five fields it happens to
+// read. The events differ from each other in which fields they use — the leg
+// pair wants a destination, MYR-618's owner banner wants two names, the
+// lifecycle three want neither — and a positional signature that grew a
+// parameter per event is how a leg destination ends up in the actor slot. The
+// vehicle name stays a separate argument because it is not on the push: it is
+// resolved by the notifier against the vehicle id.
+//
+// vehicleName may be "" (the car has no nickname, or the lookup failed),
+// destination may be "" on the two leg events (a leg cannot start without one,
+// so this means the name failed to decrypt), and the MYR-618 names may be empty
+// — all of them fall back rather than producing an empty sentence.
 //
 // The second return reports whether this event has copy at all. It is always
 // true today and is returned anyway, matching statusAlert's shape, so that a
 // future silent event is expressed by the switch rather than by an empty alert
 // nobody notices going out.
-func tripAlert(event TripEvent, vehicleName, destination string) (alert, bool) {
+func tripAlert(p TripPush, vehicleName string) (alert, bool) {
 	car := tripVehicleLabel(vehicleName)
-	switch event {
+	destination := p.DestinationName
+	switch p.Event {
 	case TripEventAdded:
 		return alert{
 			title: "You've been added to a trip",
@@ -71,8 +83,62 @@ func tripAlert(event TripEvent, vehicleName, destination string) (alert, bool) {
 			title: car + " has arrived",
 			body:  arrivedAt(destination),
 		}, true
+	case TripEventParticipantAdded:
+		return participantAddedAlert(car, p.ActorName, p.AddedNames), true
 	default:
 		return alert{}, false
+	}
+}
+
+// participantAddedAlert is MYR-618's owner banner: somebody who is on the
+// owner's trip put somebody else on it too.
+//
+// ⚠ THE TRIP NAME IS NOT IN IT, and that is this file's standing line rather
+// than an oversight about the client's phrasing. The ask was "{Participant}
+// added {Person} to {Trip}"; a trip name is free text a person typed, routinely
+// naming where they are going ("DFW → LA with Mom"), it is P1 user content
+// sealed at rest, and a banner renders to whoever is holding a phone that is
+// unlocked enough. The CAR is what the owner needs to disambiguate — they may
+// have two — and the car's nickname is already permitted here. The trip's own
+// name is one tap away, on the sheet the deep link opens.
+//
+// The names are first names off the trip roster, the same class of value the
+// ride copy already interpolates for a requester, and both fall back: an
+// unresolvable actor is "Someone", an unresolvable addition is "someone".
+func participantAddedAlert(car, actorName string, addedNames []string) alert {
+	actor := truncateLabel(strings.TrimSpace(actorName))
+	if actor == "" {
+		actor = "Someone"
+	}
+	return alert{
+		title: actor + " added " + addedPeopleLabel(addedNames) + " to your trip",
+		body:  "They can follow " + car + " until the trip ends.",
+	}
+}
+
+// addedPeopleLabel names one addition, or counts several.
+//
+// TWO PEOPLE ARE COUNTED RATHER THAN LISTED, deliberately. A banner is one line
+// on a lock screen and a comma-joined list of names is what pushes the sentence
+// past it; the count is legible at any length and the sheet behind the deep
+// link has the actual roster. One name is the overwhelmingly common case and is
+// worth spelling out.
+func addedPeopleLabel(names []string) string {
+	trimmed := make([]string, 0, len(names))
+	for _, n := range names {
+		if s := strings.TrimSpace(n); s != "" {
+			trimmed = append(trimmed, s)
+		}
+	}
+	switch len(trimmed) {
+	case 0:
+		// Every name failed to resolve, or the caller passed none. "someone"
+		// is still a true sentence, and the count would be a lie.
+		return "someone"
+	case 1:
+		return truncateLabel(trimmed[0])
+	default:
+		return strconv.Itoa(len(trimmed)) + " people"
 	}
 }
 

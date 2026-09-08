@@ -34,14 +34,22 @@ func (h *TripHandler) ServeGet(w http.ResponseWriter, r *http.Request) {
 	h.writeJSON(w, http.StatusOK, tripWire(trip, userID))
 }
 
-// ServePatch handles PATCH /api/trips/{tripId} — OWNER ONLY, 404 to everybody
-// else including a participant.
+// ServePatch handles PATCH /api/trips/{tripId} — the OWNER's whole patch, and
+// since MYR-618 a LIVE PARTICIPANT's `addParticipantIds` and nothing else.
 //
-// A participant getting 404 rather than 403 is deliberate and is the one place
-// the rule costs something in clarity: they can SEE the trip through GET, so a
-// 404 from PATCH reads as odd. It is still the right answer — the alternative
-// leaks nothing here but would make the surface's rule conditional, and a rule
-// with one exception is a rule somebody applies inconsistently next time.
+// ⚠ THE ROLE IS RESOLVED BEFORE THE BODY IS INTERPRETED, and the order is the
+// rule rather than an implementation detail. A participant who sends
+// `{"endsAt": "not-a-date"}` must be told they may not move the window, not
+// that their date is malformed: answering 400 would let them discover which
+// fields this server validates and in what order, and it would also be the
+// wrong sentence — the request was refused for what it asked to do, not for how
+// it was spelled.
+//
+// A caller who is on neither side of the trip still gets 404, from the read,
+// exactly as before. The 404-not-403 rule is unchanged; what MYR-618 changes is
+// that a person who CAN see the trip and asks for something they may not have
+// now hears 403 instead of 404 — which is the honest answer for somebody whose
+// membership is not in doubt.
 func (h *TripHandler) ServePatch(w http.ResponseWriter, r *http.Request) {
 	tripID, ctx, userID, ok := h.beginTrip(w, r)
 	if !ok {
@@ -52,20 +60,26 @@ func (h *TripHandler) ServePatch(w http.ResponseWriter, r *http.Request) {
 	if !h.decode(w, r, &body) {
 		return
 	}
-	in, ok := h.parseUpdate(w, body)
-	if !ok {
-		return
-	}
 
-	// READ BEFORE WRITE, purely so the push fan-out can name the people this
-	// patch ACTUALLY ADDED. Sending `trip_added` to the whole roster on every
-	// patch would re-notify everybody already on the trip, which reads as the
-	// trip having been created a second time. A failure here is the caller's
-	// answer (404 for a non-owner), so the read is a gate as well as a
-	// baseline.
+	// READ BEFORE WRITE, for two reasons that happen to want the same read. It
+	// is the ACCESS GATE — 404 for a caller who is on neither side of the trip,
+	// and the caller's `role` for the branch below — and it is the BASELINE the
+	// push fan-out diffs against, so `trip_added` names only the people this
+	// patch actually added. Sending it to the whole roster on every patch would
+	// re-notify everybody already on the trip, which reads as the trip having
+	// been created a second time.
 	before, err := h.trips.GetTrip(ctx, tripID, userID)
 	if err != nil {
 		h.failTrip(w, "patch", tripID, err)
+		return
+	}
+	if before.Role != tripRoleOwner {
+		h.patchAsParticipant(ctx, w, tripID, userID, before, body)
+		return
+	}
+
+	in, ok := h.parseUpdate(w, body)
+	if !ok {
 		return
 	}
 
@@ -77,6 +91,11 @@ func (h *TripHandler) ServePatch(w http.ResponseWriter, r *http.Request) {
 
 	if added := newParticipantUserIDs(before, trip); len(added) > 0 {
 		h.notifier.TripAdded(ctx, trip, added)
+		// NO `trip_participant_added` HERE. That banner tells the owner
+		// somebody else widened their roster, and this branch is the owner
+		// doing it themselves — a phone that buzzes to tell its owner about
+		// their own tap is the most common way a notification category gets
+		// switched off.
 	}
 	// REMOVAL SENDS NOTHING, and that is a decision rather than an omission.
 	// The contract lists five `trips` events and none of them is "you were
