@@ -67,8 +67,8 @@ func seedDriverProvisionedCar(t *testing.T, vehicleID string) {
 			(id, vehicle_id, owner_user_id, accepted_by_user_id, label, permission, code, status, expires_at)
 		 VALUES
 			('shr_xfer',   $1, $2, $3,   'A friend',   'rides',  'XFERCODE', 'accepted', NOW() + INTERVAL '7 days'),
-			('shr_xfer_2', $1, $2, $4,   'Another',    'viewer', 'XFERCOD2', 'accepted', NOW() + INTERVAL '7 days'),
-			('shr_xfer_3', $1, $2, NULL, 'Not yet in', 'viewer', 'XFERCOD3', 'pending',  NOW() + INTERVAL '7 days')`,
+			('shr_xfer_2', $1, $2, $4,   'Another',    'live',   'XFERCOD2', 'accepted', NOW() + INTERVAL '7 days'),
+			('shr_xfer_3', $1, $2, NULL, 'Not yet in', 'live',   'XFERCOD3', 'pending',  NOW() + INTERVAL '7 days')`,
 		vehicleID, transferDriver, transferViewerA, transferViewerB); err != nil {
 		t.Fatalf("seed shares: %v", err)
 	}

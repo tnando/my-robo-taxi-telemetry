@@ -111,7 +111,7 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 		// un-suspend widens; an un-suspend of an already-live grant is a
 		// harmless extra reconnect, which is the same trade the narrowing makes
 		// in its direction.
-		h.widenLiveAccess(granteeID, row.VehicleID, "unsuspended")
+		publishAccessWidened(h.widened, granteeID, row.VehicleID, "unsuspended")
 	}
 
 	// The invite id and what changed — never the label (P1), and there is no

@@ -106,7 +106,7 @@ func (h *RideRequestHandler) ServeJoin(w http.ResponseWriter, r *http.Request) {
 		// to the car until they happen to reconnect. Published after the bust,
 		// for the reason every widening path states: a re-handshake served from
 		// the pre-join set comes back without the car.
-		h.widenLiveAccess(userID, rec.VehicleID, "ride_joined")
+		publishAccessWidened(h.widened, userID, rec.VehicleID, "ride_joined")
 		h.logger.Info("ride join: member joined",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("user_id", userID),
@@ -194,14 +194,4 @@ func WithRideAccessWidener(wd ShareAccessWidener) RideRequestOption {
 	return func(h *RideRequestHandler) {
 		h.widened = wd
 	}
-}
-
-// widenLiveAccess publishes the join's widening. Best-effort by construction: a
-// nil widener or an empty user is an ordinary no-op, and the joiner's 200 does
-// not depend on anybody hearing it.
-func (h *RideRequestHandler) widenLiveAccess(userID, vehicleID, reason string) {
-	if h.widened == nil || userID == "" {
-		return
-	}
-	h.widened.ShareAccessWidened(userID, vehicleID, reason)
 }
