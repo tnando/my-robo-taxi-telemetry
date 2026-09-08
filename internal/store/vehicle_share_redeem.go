@@ -67,11 +67,27 @@ func (r *VehicleShareRepo) RedeemCode(ctx context.Context, code, redeemerID stri
 		return nil, ErrShareSelfRedeem
 	}
 
+	// PER-ROW ACCEPT (MYR-609). Retire the rows that CANNOT become grants
+	// before trying to accept any of them — see supersedeCollidingRows.
+	superseded, err := supersedeCollidingRows(ctx, tx, ids, redeemerID)
+	if err != nil {
+		return nil, err
+	}
+
 	grants, err := acceptLockedRows(ctx, tx, ids, redeemerID)
 	if err != nil {
 		return nil, err
 	}
 	if len(grants) == 0 {
+		if superseded > 0 {
+			// EVERY row in the code collided with a grant this person
+			// already holds. Nothing was granted and nothing is left to
+			// grant, which is the already-shared conflict — the same 409
+			// the single-vehicle case has always produced, now reached
+			// only when it is the whole truth about the code rather than
+			// the fate of one row in it.
+			return nil, ErrShareAlreadyGranted
+		}
 		// The rows were locked and pending a statement ago; zero updated
 		// means the expiry boundary was crossed mid-transaction.
 		return nil, ErrShareNotFound
@@ -113,14 +129,61 @@ func lockPendingRows(ctx context.Context, tx pgx.Tx, code string) (ids []string,
 	return ids, owner, nil
 }
 
+// supersedeCollidingRows tombstones the locked pending rows that CANNOT become
+// grants, and returns how many it retired.
+//
+// THE BUG IT FIXES, which §7.5.8 extend turned from a corner into a routine
+// path (MYR-609). Accepting a code was all-or-nothing: one UPDATE over every
+// row the code backs, so a single row colliding with an existing accepted grant
+// raised 23505 and the WHOLE redemption failed with a 409. That was tolerable
+// while the only way to hold a grant was to redeem one — the collision meant
+// the person had already redeemed this very invite. It stopped being tolerable
+// the moment an owner could ADD a car to somebody with one button: owner mints
+// a two-car code for B and C, extends B onto that person before they get round
+// to redeeming, and the code now bricks — C is grantable, B is not, and the
+// redeemer is told 409 for both. The invite the owner sent becomes unusable by
+// an action the owner took, with no way for either of them to see why.
+//
+// So the colliding rows are RETIRED rather than allowed to fail the batch: they
+// are tombstoned `superseded` (revoked_by = 'owner', migration 0051), the rest
+// accept normally, and the caller answers 409 only when EVERY row collided —
+// which is the single-vehicle case, unchanged.
+//
+// TOMBSTONED, NOT LEFT PENDING. A row left behind would stay redeemable-looking
+// until it expired, keep appearing on the owner's §7.5.2 listing as an
+// outstanding invite for a car the person already has, and back a code its
+// siblings had already consumed. `superseded` says which of those it was.
+//
+// AUTHORED BY THE OWNER, which matters because `revoked_by` is what §7.5.8
+// consults before re-granting: this tombstone must not read as the grantee
+// walking away from the car. Nobody walked away — the access is live, through
+// the other row.
+//
+// The EXISTS is evaluated inside the UPDATE, over rows this transaction already
+// holds under FOR UPDATE, so a grant appearing between a check and the write
+// cannot slip through the gap.
+func supersedeCollidingRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID string) (int, error) {
+	tag, err := tx.Exec(ctx, querySupersedeCollidingShares, ids, redeemerID,
+		ShareRevokedByOwner, ShareRevokedReasonSuperseded)
+	if err != nil {
+		return 0, fmt.Errorf("store.RedeemCode: supersede: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 // acceptLockedRows flips the locked ids to accepted and returns what was
 // granted. A unique violation here is the partial-unique accepted-grant index
 // refusing a SECOND grant of the same vehicle to the same person through a
 // different invite — a conflict, not a failure.
+//
+// supersedeCollidingRows has already retired every row this transaction could
+// see colliding, so reaching this mapping means a CONCURRENT redemption or
+// extend won the index between the two statements. The mapping stays because
+// that race is real; it is now the only way to get here.
 func acceptLockedRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID string) ([]ShareGrant, error) {
 	rows, err := tx.Query(ctx, queryAcceptSharesByID, ids, redeemerID)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isUniqueViolationOn(err, constraintAcceptedGrant) {
 			return nil, ErrShareAlreadyGranted
 		}
 		return nil, fmt.Errorf("store.RedeemCode: accept: %w", err)
@@ -129,7 +192,7 @@ func acceptLockedRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID s
 
 	grants, err := scanGrants(rows)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isUniqueViolationOn(err, constraintAcceptedGrant) {
 			return nil, ErrShareAlreadyGranted
 		}
 		return nil, fmt.Errorf("store.RedeemCode: accept: %w", err)
@@ -137,10 +200,25 @@ func acceptLockedRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID s
 	return grants, nil
 }
 
-// isUniqueViolation reports whether err is a Postgres 23505.
-func isUniqueViolation(err error) bool {
+// constraintAcceptedGrant is the partial-unique index that enforces ONE
+// accepted grant per (person, vehicle) — migration 0020. It is named here so
+// the two paths that translate its violation into a 409 both branch on the
+// index that actually decides, rather than on the SQLSTATE class.
+const constraintAcceptedGrant = "uq_go_vehicle_shares_accepted_grant"
+
+// isUniqueViolationOn reports whether err is a Postgres 23505 raised by ONE
+// NAMED constraint.
+//
+// THE NAME IS THE POINT. A bare 23505 check answers "already shared" for any
+// unique violation on the table — a primary-key collision on a freshly minted
+// cuid, or whatever unique index the next migration adds — which reports a
+// genuine server fault as a conflict the contract tells clients to render as
+// success. Everything else falls through to the wrapped error and its 500.
+func isUniqueViolationOn(err error, constraint string) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgUniqueViolation &&
+		pgErr.ConstraintName == constraint
 }
 
 // alreadyRedeemed serves the idempotent re-redeem: rows this same person
