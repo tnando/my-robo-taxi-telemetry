@@ -96,20 +96,54 @@ func (r *TripRepo) Leave(ctx context.Context, tripID, userID string) (bool, erro
 // Scoped to trips that have NOT ended: rewriting a finished trip's roster would
 // rewrite history for no benefit — the window is closed, the access is already
 // gone, and the roster is the only record of who was on it.
+//
+// ⚠ IT IS NOW WIRED INTO BOTH SEVERING PATHS, IN THEIR OWN TRANSACTIONS (the
+// MYR-618 review round). `VehicleShareRepo.RevokeInvite` (§7.5.3) and
+// `LeaveVehicleShares` (§7.5.7) call `removeTripParticipantsForShare` — the
+// same statement, in the same transaction as the tombstone flip — so a grant
+// and the rosters drawn from it cannot end at two different instants. Before
+// that, nothing in production ran this repair at all and the roster kept
+// listing people whose access was already gone.
+//
+// **SUSPENSION DELIBERATELY DOES NOT CASCADE.** A suspend is reversible — the
+// owner is pausing somebody, not removing them — and stamping `left_at` would
+// turn a pause into a departure that un-suspending could not undo. What stops a
+// suspended grant-holder ACTING is the live-grant re-join in the role probe
+// (tripMemberRoleExpr); what stops them SEEING is the four access legs. Neither
+// needs the roster to move.
 func (r *TripRepo) RemoveParticipantsForShare(ctx context.Context, vehicleID, userID string) (int, error) {
 	const op = "trip.cascade_share_revoke"
 	start := time.Now()
 	defer func() { r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds()) }()
 
+	n, err := removeTripParticipantsForShare(ctx, r.pool, vehicleID, userID)
+	if err != nil {
+		r.metrics.IncQueryError(op)
+		return 0, fmt.Errorf("TripRepo.RemoveParticipantsForShare(vehicle=%s): %w", vehicleID, err)
+	}
+	return n, nil
+}
+
+// removeTripParticipantsForShare is the cascade's BODY, taking any querier so
+// the two severing paths can run it INSIDE their own transactions.
+//
+// It is a package-level function rather than a TripRepo method because
+// VehicleShareRepo is what calls it, and it must run on that repository's
+// transaction — a method on TripRepo would either need a second pool or would
+// commit separately, which is the split that lets a grant and its rosters end
+// at two different instants.
+//
+// Returns the number of memberships stamped, which the callers log and the
+// method above reports.
+func removeTripParticipantsForShare(ctx context.Context, q tripQuerier, vehicleID, userID string) (int, error) {
 	if vehicleID == "" || userID == "" {
 		// A revoke on an invite nobody redeemed has no user to cascade for.
 		// Not an error: there is simply no membership that could exist.
 		return 0, nil
 	}
-	tag, err := r.pool.Exec(ctx, queryLeaveTripByShare, vehicleID, userID)
+	tag, err := q.Exec(ctx, queryLeaveTripByShare, vehicleID, userID)
 	if err != nil {
-		r.metrics.IncQueryError(op)
-		return 0, fmt.Errorf("TripRepo.RemoveParticipantsForShare(vehicle=%s): %w", vehicleID, err)
+		return 0, fmt.Errorf("cascade share revoke to trip rosters(vehicle=%s): %w", vehicleID, err)
 	}
 	return int(tag.RowsAffected()), nil
 }

@@ -122,9 +122,15 @@ Both elevated probes **fail closed by returning false rather than an error**: th
 
 When a grant is revoked or handed back, `TripRepo.RemoveParticipantsForShare` stamps `left_at` on that person's memberships in that car's **non-ended** trips.
 
+**⚠ IT IS NOW ACTUALLY WIRED, which until the [MYR-618](https://linear.app/myrobotaxi/issue/MYR-618) review round it was not.** The function had existed since MYR-602 with exactly one caller in the repository — a test — so in production a severed grant left the person on every roster on that car indefinitely. Both severing paths now run it **in the same transaction as the tombstone flip**: the owner's revoke (`VehicleShareRepo.RevokeInvite`, [`rest-api.md`](../contracts/rest-api.md) §7.5.3) and the grantee's own leave (`LeaveVehicleShares`, §7.5.7). A repair that lands separately from the thing it repairs can land late, or not at all, and then the roster is wrong for a window nobody can bound.
+
+**SUSPENSION DELIBERATELY DOES NOT CASCADE.** A suspend is reversible — the owner is pausing somebody, not removing them — and stamping `left_at` would turn a pause into a departure that un-suspending could not undo. What stops a suspended grant-holder **acting** is the live-grant re-join in the role probe (`tripMemberRoleExpr`, §10B); what stops them **seeing** is the four access legs in §3. Neither needs the roster to move.
+
 **⚠ THIS IS NOT WHAT ENFORCES THE ACCESS RULE, and mistaking it for that would be the dangerous reading.** Trip access cannot outlive the share because **every access query re-joins the live grant** — the fourth UNION leg, `queryActiveTripParticipation`, `queryTripWindowsForUserVehicle` and the catalog leg all carry `status = 'accepted' AND suspended_at IS NULL`. **A revoked grant stops granting the instant it is revoked, cascade or no cascade, and if this function never ran the security property would still hold.**
 
 **What it fixes is the ROSTER.** Without it the owner's trip card keeps listing somebody who can no longer see anything, the participant count lies, and the person appears in the "who is on this trip" list of a car they have been removed from. It is a **display-consistency repair**, and it is written down as one — here, in the function's own doc comment, and in `data-classification.md` §1.26 — **so nobody later deletes an access predicate on the strength of it.**
+
+It stamps `left_at` and **not** `removed_by_owner` (§10B): the one statement serves both severing paths and cannot tell an owner's revoke from a grantee's own exit. Nothing turns on that, because a person whose grant is gone is refused by the add's live-grant predicate long before the marker would be read.
 
 It is keyed on `(vehicle, user)` rather than on the share id, so a grant revoked and re-issued under a new id still removes the person from trips they joined under the old one. It is scoped to trips that have **not ended**: rewriting a finished trip's roster would rewrite history for no benefit — the window is closed, the access is already gone, and the roster is the only record of who was on it.
 
