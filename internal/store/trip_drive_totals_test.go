@@ -152,6 +152,83 @@ func TestDriveTripIDIsBoundedByTheWindowAtBothEnds(t *testing.T) {
 	})
 }
 
+// TestTripDriveCursorPagesCarryTheTripID exercises the RESUME statements, which
+// nothing else in this repository did.
+//
+// ⚠ THE REASON IT EXISTS IS PLACEHOLDER RENUMBERING. MYR-608 added a parameter
+// to all four trip-drive statements, which shifted the cursor anchor and the
+// LIMIT in the two cursor forms — `($4, $5)` became `($5, $6)`, `$6` became
+// `$7`. An off-by-one there is not a wrong answer, it is a runtime SQL error on
+// the SECOND page only, and no test in this package had ever asked for a second
+// page. The first-page tests would all still be green.
+func TestTripDriveCursorPagesCarryTheTripID(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareID := seedTripFixture(t)
+	repo := newTripRepo(t)
+	drives := store.NewDriveRepo(testPool, store.NoopMetrics{})
+
+	// A window that has already OPENED. A future one would be `scheduled`, and
+	// `TripDriveWindows` excludes those on purpose — a window that has not
+	// opened contains no drives, and admitting one would let an owner grant
+	// read access to the past by scheduling a trip for next week. The
+	// participant arm below is the one that would silently pass against a
+	// future fixture by returning nothing at all.
+	start := time.Now().UTC().Add(-48 * time.Hour).Truncate(time.Hour)
+	trip := mustCreateTrip(t, repo, vehicleID, start, start.Add(24*time.Hour), []string{shareID})
+	for i := 0; i < 3; i++ {
+		seedDriveAt(t, "cdrv_pg_"+string(rune('a'+i)), vehicleID, start.Add(time.Duration(i+1)*time.Hour))
+	}
+
+	// One row per page, so every statement runs at least one resume.
+	type lister func(cursor store.DriveListCursor) (store.DriveListPage, error)
+	for _, tc := range []struct {
+		name string
+		list lister
+	}{
+		{"§7.30.7, the trip's own drives", func(c store.DriveListCursor) (store.DriveListPage, error) {
+			return repo.TripDrivesForUser(ctx, trip.ID, shareViewer1, c, 1)
+		}},
+		{"§7.2 narrowed to a participant's windows", func(c store.DriveListCursor) (store.DriveListPage, error) {
+			return repo.VehicleDrivesInTripWindows(ctx, shareViewer1, vehicleID, c, 1)
+		}},
+		{"§7.2 as the owner", func(c store.DriveListCursor) (store.DriveListPage, error) {
+			return drives.ListByVehicleID(ctx, vehicleID, shareOwnerA, c, 1)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var cursor store.DriveListCursor
+			seen := map[string]bool{}
+			for page := 1; page <= 3; page++ {
+				got, err := tc.list(cursor)
+				if err != nil {
+					t.Fatalf("page %d: %v", page, err)
+				}
+				if len(got.Items) != 1 {
+					t.Fatalf("page %d returned %d rows, want 1", page, len(got.Items))
+				}
+				item := got.Items[0]
+				if seen[item.ID] {
+					t.Fatalf("page %d repeated %s — the cursor anchor is bound to the wrong parameter", page, item.ID)
+				}
+				seen[item.ID] = true
+				// THE DECORATION MUST SURVIVE THE RESUME. A cursor statement
+				// that dropped or misbound the trip-id parameter would page
+				// correctly and silently blank the field from page two on.
+				if item.TripID == nil || *item.TripID != trip.ID {
+					t.Errorf("page %d: %s carries tripId %v, want %s", page, item.ID, deref(item.TripID), trip.ID)
+				}
+				cursor = store.DriveListCursor{StartTime: item.StartTime, ID: item.ID}
+			}
+			if len(seen) != 3 {
+				t.Fatalf("paged %d distinct drives, want 3", len(seen))
+			}
+		})
+	}
+}
+
 // TestDriveTripIDPrefersTheNewestOverlappingWindow documents the tie-break, and
 // documents why a tie is reachable at all.
 //
