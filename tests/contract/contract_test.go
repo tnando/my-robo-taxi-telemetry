@@ -171,7 +171,6 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 	LANGUAGE plpgsql
 	IMMUTABLE
 	STRICT
-	PARALLEL SAFE
 	SET search_path = pg_catalog, pg_temp
 	AS $$
 	BEGIN

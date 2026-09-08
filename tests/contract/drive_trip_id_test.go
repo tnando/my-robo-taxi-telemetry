@@ -2,6 +2,12 @@
 
 // Contract conformance for MYR-608's `DriveSummary.tripId` (rest-api.md §7.2).
 //
+// ⚠ THE FILE IS NAMED FOR WHAT IT TESTS. It was `trip_totals_test.go` and
+// tested no total: the two `Trip` totals never reach this harness (see the
+// paragraph below on why §7.30 is not mounted here), so a reader looking for
+// them opened this file and found a drive-list test. `drive_trip_id_test.go`
+// says the true thing.
+//
 // END TO END THROUGH THE REAL SERVER, because `tripId` is a composition no unit
 // test holds at once: a Drive row, a trip window, a standing share, and the
 // caller's ROLE deciding which of the three statements resolves the field.

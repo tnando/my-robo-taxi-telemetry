@@ -492,6 +492,36 @@ const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endT
 // ⚠ THE `d` ALIAS IS LOAD-BEARING: the trip-id expression correlates on
 // `d."startTime"`, and it has to name something the sub-select's own FROM
 // clause does not shadow.
+//
+// ── WHAT THE CORRELATED SUB-SELECT ACTUALLY COSTS (MYR-608 review round) ────
+//
+// IT IS NOT PAID PER DRIVE IN THE CAR'S HISTORY, WHICH IS THE ONLY REASON THIS
+// SHAPE IS AFFORDABLE. Postgres postpones the `SubPlan` past the `Sort`, so it
+// is evaluated on the ~21 rows the `LIMIT` returns rather than on all 60 000 a
+// well-driven car has. Measured on Postgres 16 against a synthetic
+// 60 000-drive vehicle, `EXPLAIN (ANALYZE)`, median of three:
+//
+//	§7.2 WITHOUT the trip-id expression (pre-MYR-608)   21.9 ms
+//	§7.2 WITH it (this statement)                       21.6 ms
+//
+// So `tripId` and the totals add no measurable time to this list. A projection
+// that could not be postponed — a join, or a lateral producing one row per
+// drive — would have been paid 60 000 times instead of 21.
+//
+// ⚠ WHAT DOES COST 21 ms IS THE `Sort` THIS STATEMENT CANNOT AVOID, and it is
+// pre-existing rather than anything MYR-608 introduced. `"Drive"` carries a
+// plain `("vehicleId")` index, so the planner reads every drive on the car and
+// top-N heapsorts it to find the newest page. An ORDERED index matching the
+// `ORDER BY` — `("vehicleId", "startTime" DESC, "id" DESC)` — lets it walk the
+// LIMIT straight out of the index and skip the sort entirely:
+//
+//	§7.2 with the composite index                        0.59 ms   (37× faster)
+//
+// IT CANNOT BE ADDED FROM THIS REPO. `"Drive"` is Prisma-owned and CG-DL-9
+// forbids a Go migration from naming it, so the index belongs in
+// react-frontend's Prisma schema — filed as a follow-up rather than smuggled
+// in here. The same index also serves this statement's cursor form and
+// §7.30.7, which page the identical `(startTime, id)` tuple.
 const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `,` + ownerTripIDForDriveExpr + `
 FROM "Drive" d
 WHERE "vehicleId" = $1

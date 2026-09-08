@@ -794,9 +794,21 @@ This is the **only** place on the platform where two surfaces report a different
 | Admitted what it could not cast | `2026-13-45T00:00:00Z`, `2026-02-30T08:00:00Z`, `2026-01-01T25:00:00Z` | matches | **errors** | The `THEN` arm ran and raised `date/time field value out of range` — the permanent `500` the guard existed to prevent, through the guard's own front door |
 | Rejected what it could cast | `2026-07-02` | no match | `2026-07-02 00:00:00+00` | §7.2 blanked the `tripId` while §7.30.7's strict cast placed the **same drive in the same window** — two surfaces disagreeing about one drive, in a change whose subject is making them agree |
 
-A pattern counts **digits**; it cannot decide whether a date **exists**, because that is a calendar question and the only thing in the database that can answer it is the cast itself. So the cast guards itself: **`go_try_timestamptz(text)`** (migration `0070`, PL/pgSQL, `IMMUTABLE STRICT PARALLEL SAFE`) returns `NULL` for anything `::timestamptz` refuses, via the `EXCEPTION` block that is the only construct in Postgres able to catch a cast failure. It is a Go-owned, `go_`-prefixed **function**; CG-DL-9 forbids a Go migration from naming a Prisma **table**, which this does not. An unreadable row therefore resolves **`tripId: null`** and nothing else — the direction [MYR-614](https://linear.app/myrobotaxi/issue/MYR-614) settled on for the single-drive gate: **a data fault is logged for an operator and never told to a reader.**
+A pattern counts **digits**; it cannot decide whether a date **exists**, because that is a calendar question and the only thing in the database that can answer it is the cast itself. So the cast guards itself: **`go_try_timestamptz(text)`** (migration `0070`, PL/pgSQL, `IMMUTABLE STRICT`) returns `NULL` for anything `::timestamptz` refuses, via the `EXCEPTION` block that is the only construct in Postgres able to catch a cast failure. It is a Go-owned, `go_`-prefixed **function**; CG-DL-9 forbids a Go migration from naming a Prisma **table**, which this does not. An unreadable row therefore resolves **`tripId: null`** and nothing else — the direction [MYR-614](https://linear.app/myrobotaxi/issue/MYR-614) settled on for the single-drive gate: **a data fault is logged for an operator and never told to a reader.**
 
 **⚠ THE `WHERE` CASTS ARE GUARDED TOO, WHICH THE FIRST ROUND LEFT UNDONE.** §7.30.7's window bound, the participant narrowing and `queryTripDriveTotals` compared a strict `::timestamptz` on the argument that an **access** predicate must not soften. That argument does not survive contact with what a strict cast actually does: it never gets to **refuse** the row it cannot read, because it fails the **statement** first. One unreadable value anywhere in a car's history made §7.30.7, the participant's §7.2, §7.30.2 and §7.30.3 a `500` for **every** person on that car — so the "takes nothing down" claim held only for the owner's own list.
+
+**⚠ IT IS PARALLEL UNSAFE, AND THAT IS NOT THE DEFAULT BEING LEFT ALONE — IT IS A MEASURED CORRECTION.** The function was first declared `PARALLEL SAFE`, on the reasoning that it sits in `WHERE` clauses scanning a whole vehicle's history and that losing parallel plans there would cost something real. Running it produced `ERROR: cannot start subtransactions during a parallel operation`: an `EXCEPTION` block **is** a subtransaction, a parallel worker may not open one, and PostgreSQL's parallel-safety documentation names this exact case as requiring `PARALLEL UNSAFE`. A `SAFE` label would have turned a large car's drive list into a `500` the moment the planner chose a parallel plan — the failure mode this function exists to prevent, reintroduced by the label on the function preventing it. `PARALLEL RESTRICTED` is no escape: it permits execution in the leader *during parallel mode*, which is still parallel mode.
+
+**THE GUARD COSTS ABOUT 0.85 µs PER ROW, AND THE COST LANDS ON THE `WHERE` SURFACES.** Measured on Postgres 16 against a synthetic 60 000-drive vehicle (`EXPLAIN (ANALYZE)`, median of three):
+
+| Statement | Strict cast | Guarded | Note |
+|---|---|---|---|
+| §7.30.7 window filter | 15.3 ms | **67.4 ms** | The function is evaluated per scanned row, and the plan can no longer go parallel |
+| `queryTripDriveTotals` | 14.0 ms | **65.5 ms** | Same scan, same reason — and §7.30.2 pays it once per trip it lists |
+| §7.2 owner list (projection only) | 21.9 ms | **21.6 ms** | No change: the correlated `SubPlan` is postponed past the `Sort` and runs only on the rows the `LIMIT` returns |
+
+Postgres already collapses the two calls per row into one (a `LATERAL` form that calls it once measured identically), so there is no cheaper spelling of the same decision. The cost buys a list that answers instead of a list that `500`s, and the surface carrying most of it has a much larger win available to it — see §13.5.
 
 **Softening them widens nothing**, which is why it is safe rather than a trade: `NULL` satisfies neither `>=` nor `<=`, so the unreadable row is **excluded** from every window it might have fallen in — exactly the answer the strict cast was trying to give, delivered without taking the other rows with it. `TestUnreadableStartTimeTakesDownNoTripSurface` asserts both halves (each surface answers `200`; the junk is not in the answer) on all four.
 
@@ -811,6 +823,20 @@ A pattern counts **digits**; it cannot decide whether a date **exists**, because
 **NULL IS NOT ZERO.** `SUM` over zero rows is NULL and is carried to the wire uncoalesced: `null` means the window holds **no drives**, while `0` is a real total for a window whose drives went nowhere. A consumer that collapsed the two would print *"0 mi"* on a trip that has not begun.
 
 **THE TOTALS ARE RUNNING, AND ARE SENT WHILE THE TRIP IS ACTIVE.** Withholding them until the window closed would have matched the client's old honesty rule and been wrong for the same reason it was: **the surface that most wants a total is a road trip in progress.** They are read at read time like `driveCount`, they climb between reads, and the client decides how to render a figure that is still moving.
+
+### 13.5 What §7.2 costs, and the index that is not ours to add
+
+**THE CORRELATED SUB-SELECT ADDS NOTHING MEASURABLE**, because Postgres postpones the `SubPlan` past the `Sort` and evaluates it on the ~21 rows the `LIMIT` returns rather than on all 60 000 a well-driven car has. Measured on Postgres 16 against a synthetic 60 000-drive vehicle (`EXPLAIN (ANALYZE)`, median of three):
+
+| §7.2 owner list | Execution |
+|---|---|
+| Without the trip-id expression (pre-MYR-608) | 21.9 ms |
+| With it (`queryDriveListByVehicle` as shipped) | 21.6 ms |
+| With it, **plus an ordered `("vehicleId","startTime" DESC,"id" DESC)` index** | **0.59 ms** |
+
+**The 21 ms was never the trip id — it is the `Sort`,** and it predates this change entirely. `"Drive"` carries a plain `("vehicleId")` index, so the planner reads every drive on the car and top-N heapsorts to find the newest page. An index whose order matches the `ORDER BY` lets it walk the `LIMIT` straight out of the index and skip the sort: **37× on this fixture**, and the same index serves the cursor form and §7.30.7, which page the identical `(startTime, id)` tuple.
+
+**IT IS NOT OURS TO ADD.** `"Drive"` is Prisma-owned and CG-DL-9 forbids a Go migration from naming it, so the index belongs in `react-frontend`'s Prisma schema and is filed as a follow-up rather than smuggled in here. That constraint is also why the far larger win sits behind a different repo's PR while a 65 ms guard cost (§13.2) sits in this one.
 
 ### 13.4 Where the code is
 

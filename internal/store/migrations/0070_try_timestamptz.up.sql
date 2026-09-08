@@ -77,10 +77,32 @@
 -- a change whose subject is making them agree. Every surface now gives the
 -- cast's answer. internal/store/trip_drive_totals_test.go pins it.
 --
--- PARALLEL SAFE matters more than it looks: the function is used in WHERE
--- clauses that scan a whole vehicle's drive history, and a PARALLEL UNSAFE
--- function (the default for PL/pgSQL) would silently disable parallel plans on
--- exactly the statements that most want one.
+-- ⚠ IT IS PARALLEL UNSAFE (the default), DELIBERATELY, AND MARKING IT SAFE IS A
+-- RUNTIME ERROR RATHER THAN A MISSED OPTIMISATION. The first draft of this file
+-- declared PARALLEL SAFE, reasoning that the function is used in WHERE clauses
+-- scanning a whole vehicle's drive history and that disabling parallel plans
+-- there would be a real cost. Measuring it produced:
+--
+--     ERROR: cannot start subtransactions during a parallel operation
+--
+-- An `EXCEPTION` block IS a subtransaction, and a parallel worker may not open
+-- one. PostgreSQL's own parallel-safety documentation names this case: a
+-- PL/pgSQL function that establishes an EXCEPTION block to catch errors changes
+-- the transaction state and MUST be marked PARALLEL UNSAFE. A SAFE label here
+-- would have turned a large car's drive list into a 500 the moment the planner
+-- chose a parallel plan — the exact failure mode this function exists to
+-- prevent, reintroduced by the label on the function preventing it.
+--
+-- PARALLEL RESTRICTED is not the escape either: it permits execution in the
+-- leader during parallel mode, which is still parallel mode.
+--
+-- THE COST IS REAL AND IS PAID SOMEWHERE ELSE. Statements calling this function
+-- cannot use a parallel plan, so §7.30.7, the participant narrowing and the
+-- totals scan a vehicle's history serially. The measured answer is the index in
+-- the PR body's finding-10 note: an ordered `("vehicleId","startTime" DESC,
+-- "id" DESC)` index on the Prisma-owned `Drive` table lets §7.2 walk the LIMIT
+-- in order and never sort at all, which is worth far more than the parallelism
+-- (0.59 ms vs 21.6 ms on a 60k-drive vehicle). It cannot be added from here.
 --
 -- STRICT short-circuits the NULL input without entering the exception block at
 -- all, which is the common case for a `Drive` row written but not yet started.
@@ -98,7 +120,6 @@ RETURNS timestamptz
 LANGUAGE plpgsql
 IMMUTABLE
 STRICT
-PARALLEL SAFE
 SET search_path = pg_catalog, pg_temp
 AS $$
 BEGIN
