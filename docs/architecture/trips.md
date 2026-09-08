@@ -938,13 +938,13 @@ Three details of that statement are the review round's, and each one is load-bea
 
 | Thing | File |
 |---|---|
-| The accumulator, the regen/charging discriminator, the zero clamp | `internal/drives/energy.go` |
+| The accumulator, the regen/charging discriminator, the unbounded-loss asymmetry | `internal/drives/energy.go` |
 | The idle `energyRemaining` cache and the latched `chargeState` (the SOC cache's family) | `internal/drives/caches.go`, `internal/drives/state.go` |
 | Baseline seeding at drive start, per-sample folding | `internal/drives/transitions.go` |
 | `EnergyDelta` sourced from the accumulator | `internal/drives/stats.go` |
 | The three energy outcomes logged at drive end | `internal/drives/debounce.go` |
 | The `EnergyRemaining` resend | `internal/telemetry/fleet_api_fields.go` |
-| The fourth number, and the CASE that voids a mixed window | `internal/store/trip_queries.go` (`queryTripDriveTotals`) |
+| The fourth number, the CASE that voids a mixed window, and the window floor | `internal/store/trip_queries.go` (`queryTripDriveTotals`) |
 | `TotalEnergyKwh` through view → data → wire | `internal/store/trip_view.go`, `internal/store/trip_repo_read.go`, `cmd/telemetry-server/trip_adapters.go`, `internal/telemetry/trip_types.go`, `internal/telemetry/trip_wire.go` |
 | Accumulator + detector regression tests | `internal/drives/energy_test.go` |
 | All-or-nothing, running totals, the N+1 guard | `internal/store/trip_drive_totals_test.go` |
