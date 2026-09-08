@@ -27,7 +27,7 @@ import (
 // version of this test only got away with by accident. 0049 and 0050 add an
 // index and a column INSIDE the four tables, so dropping the tables took them
 // with it and re-applying 0047 alone silently left the shared schema without
-// them. 0051 made that latent hole visible: it adds a SEPARATE table with a
+// them. 0053 made that latent hole visible: it adds a SEPARATE table with a
 // foreign key onto go_trips, so `DROP TABLE go_trips` now fails outright
 // (SQLSTATE 2BP01) rather than quietly under-restoring. The fix for both is the
 // same — a rollback of 0047 is a rollback of everything built on top of it.
@@ -40,7 +40,7 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 
 	// The shared schema must come back whatever happens in between: every other
 	// test in this package reads the four trip tables, the 0049 index, the 0050
-	// column and the 0051 slot table.
+	// column and the 0053 slot table.
 	t.Cleanup(func() {
 		for _, file := range tripMigrationUps {
 			if _, err := testPool.Exec(ctx, readMigrationSQL(t, file)); err != nil {
@@ -71,10 +71,10 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 	mustExec0047(t, `INSERT INTO go_live_activities (id, trip_leg_id, user_id, activity_push_token)
 	                 VALUES ('cla0047down', 'cleg0047down', 'cuser0047down', 'tok-0047')`)
 
-	// 0051 first: its table holds a foreign key onto go_trips, so it is part of
+	// 0053 first: its table holds a foreign key onto go_trips, so it is part of
 	// what "roll back the trips schema" means.
-	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0051_trip_leg_banner_slots.down.sql")); err != nil {
-		t.Fatalf("rolling back 0051 failed: %v", err)
+	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0053_trip_leg_banner_slots.down.sql")); err != nil {
+		t.Fatalf("rolling back 0053 failed: %v", err)
 	}
 	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0047_trips.down.sql")); err != nil {
 		t.Fatalf("down migration failed with a leg-anchored Activity present — "+
@@ -132,7 +132,7 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 
 // tripMigrationUps is the trips schema in dependency order: 0047 builds the
 // four tables, 0049 indexes one of them, 0050 adds a column to another, and
-// 0051 hangs a fifth table off go_trips. Rolling 0047 back means rolling back
+// 0053 hangs a fifth table off go_trips. Rolling 0047 back means rolling back
 // everything above it; rolling forward means replaying all of them.
 //
 // 0048 is absent deliberately — it touches go_push_prefs, not the trip tables,
@@ -141,7 +141,7 @@ var tripMigrationUps = []string{
 	"0047_trips.up.sql",
 	"0049_trip_leg_resume.up.sql",
 	"0050_trip_activity_token_leg_stamp.up.sql",
-	"0051_trip_leg_banner_slots.up.sql",
+	"0053_trip_leg_banner_slots.up.sql",
 }
 
 // columnExists reports whether one column is currently installed.

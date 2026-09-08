@@ -4573,7 +4573,7 @@ consults the register that actually knows.
 **THE SUPPRESSION WINDOW.** A leg banner for the same `(tripId, event,
 normalised destinationName)` is not re-sent within **30 minutes**, however many
 legs open underneath. Held on the Go-owned `go_trip_leg_banners` (migration
-**0051**) as an upsert-as-claim, so two servers racing one flap resolve to
+**0053**) as an upsert-as-claim, so two servers racing one flap resolve to
 exactly one send.
 
 - **The key is a DIGEST**, SHA-256 over the lower-cased, whitespace-collapsed

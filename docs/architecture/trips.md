@@ -451,7 +451,7 @@ the person holding the phone actually cares about:
   where the registry is. A phone with Live Activities disabled never registers,
   so it is still told in prose — which is the whole reason the banner survives.
 - **One banner per (trip, event, destination) per 30 minutes**, on
-  `go_trip_leg_banners` (migration 0051) as an upsert-as-claim, so two servers
+  `go_trip_leg_banners` (migration 0053) as an upsert-as-claim, so two servers
   racing one flap resolve to one send. The key holds a DIGEST of the normalised
   name, never the P1 name itself. The event is part of the key: a departure and
   an arrival are different sentences and the second reports the outcome.

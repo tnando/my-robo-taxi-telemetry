@@ -124,6 +124,14 @@ WITH pre AS (
 )
 SELECT id FROM resumed`
 
+// constraintOpenLegPerTrip is the partial-unique index that enforces ONE open
+// leg per trip — migration 0047. NAMED rather than matched on the SQLSTATE
+// class, for the reason isUniqueViolationOn's own doc gives: a bare 23505 check
+// would read a primary-key collision on a freshly minted cuid, or whatever
+// unique index the next migration adds, as "this trip is already under way" and
+// silently decline a resume that should have happened.
+const constraintOpenLegPerTrip = "idx_go_trip_legs_open_per_trip"
+
 // ResumeRecentLeg re-opens the leg this car just closed WITHIN THIS TRIP, when
 // the car has set off again for the SAME place within the merge window
 // (MYR-612).
@@ -180,7 +188,7 @@ func (r *TripLegRepo) ResumeRecentLeg(
 	case errors.Is(err, pgx.ErrNoRows):
 		// Somebody else re-opened or re-closed it between the two statements.
 		return TripLeg{}, false, nil
-	case isUniqueViolation(err):
+	case isUniqueViolationOn(err, constraintOpenLegPerTrip):
 		// The trip already has an open leg: nothing to resume.
 		return TripLeg{}, false, nil
 	case err != nil:

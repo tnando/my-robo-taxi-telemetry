@@ -1,4 +1,4 @@
--- MYR-620: one banner per (trip, destination) per half hour.
+-- MYR-620 (migration 0053): one banner per (trip, destination) per half hour.
 --
 -- ── WHAT HAPPENED ───────────────────────────────────────────────────────────
 --
