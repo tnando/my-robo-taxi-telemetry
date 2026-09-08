@@ -28,10 +28,11 @@ import (
 // SINCE MYR-601 THE SAME ARGUMENT COVERS THE WIDENING DIRECTION, and it had to:
 // every one of those failure modes exists there too, plus one that has no
 // event-driven answer at all — the Next.js app writes `"Vehicle"` rows straight
-// into the shared database (react-frontend `sync.ts`), reaching neither this
-// process's access cache nor its bus. Nothing can publish for a writer in
-// another process. Re-deriving from the database is what makes the ≤60s bound
-// a property of the DATA rather than of every writer remembering the rule.
+// into the shared database (react-frontend src/features/vehicles/api/sync.ts),
+// reaching neither this process's access cache nor its bus. Nothing here can
+// publish for a writer in another process. Re-deriving from the database is
+// what makes the ≤60s bound a property of the DATA rather than of every writer
+// remembering the rule.
 const DefaultRevalidateInterval = 60 * time.Second
 
 // AccessResolver re-derives a user's authorized vehicle set AND their role on
