@@ -85,6 +85,14 @@ func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination strin
 // Inserting a second row for it produces a second `trip_leg_started` banner, a
 // second card, and a trip history claiming the car drove to one hotel twice.
 //
+// THE PROBE IS SCOPED TO THIS TRIP (MYR-612 review). The merge window is a
+// couple of minutes and a car very often begins its next trip inside one — the
+// owner ends a road trip on the drive and starts the next before setting off
+// again, to the same place, on the same car. A cross-trip resume attaches the
+// row to the trip it already belonged to while every delivery addresses THIS
+// trip's audience: a card for the wrong people, no leg at all in the right
+// trip's history, and nothing this trip's detector could ever close.
+//
 // A RESUME FAILURE IS NOT FATAL and is deliberately swallowed into the ordinary
 // path: the repair is an improvement on inserting a row, never a precondition
 // for it, and a leg that opens as a second row is a cosmetic fault where a leg
@@ -93,7 +101,7 @@ func (s *Service) startOrResumeLeg(
 	ctx context.Context, tv TripVehicle, destination string, at time.Time,
 ) (Leg, bool, error) {
 	notBefore := at.Add(-s.cfg.LegMergeWindow)
-	leg, resumed, err := s.legs.ResumeRecentLeg(ctx, tv.VehicleID, destination, notBefore)
+	leg, resumed, err := s.legs.ResumeRecentLeg(ctx, tv.TripID, tv.VehicleID, destination, notBefore)
 	switch {
 	case err != nil:
 		s.logger.Warn("trips: leg resume probe failed; opening a new leg",

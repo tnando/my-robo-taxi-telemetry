@@ -66,7 +66,9 @@ type LegStore interface {
 	// when it has set off again for the SAME place since notBefore. Reports
 	// false — never an error — for every ordinary reason not to, because the
 	// caller's next move on false is StartLeg. See openLeg.
-	ResumeRecentLeg(ctx context.Context, vehicleID, destination string, notBefore time.Time) (Leg, bool, error)
+	ResumeRecentLeg(
+		ctx context.Context, tripID, vehicleID, destination string, notBefore time.Time,
+	) (Leg, bool, error)
 	EndLeg(ctx context.Context, legID string, endedAt time.Time, arrived bool) error
 	OpenLegForVehicle(ctx context.Context, vehicleID string) (Leg, error)
 	OpenLegsForTrip(ctx context.Context, tripID string) ([]Leg, error)

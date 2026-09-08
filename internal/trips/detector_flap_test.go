@@ -244,7 +244,7 @@ func TestAnArrivedLegIsNeverResumed(t *testing.T) {
 	legs.arrived["leg-1"] = true
 
 	_, resumed, err := legs.ResumeRecentLeg(
-		context.Background(), testVehicle, sedona, frameBase)
+		context.Background(), testTrip, testVehicle, sedona, frameBase)
 	if err != nil {
 		t.Fatal(err)
 	}

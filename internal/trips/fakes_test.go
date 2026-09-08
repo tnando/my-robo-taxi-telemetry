@@ -202,10 +202,10 @@ func (f *fakeLegStore) StartLeg(_ context.Context, tripID, vehicleID, destinatio
 }
 
 // ResumeRecentLeg models the store's merge: the leg this car closed most
-// recently WITHOUT ARRIVING, if it closed since notBefore and was going to the
-// same place, is re-opened rather than replaced.
+// recently WITHIN THIS TRIP and WITHOUT ARRIVING, if it closed since notBefore
+// and was going to the same place, is re-opened rather than replaced.
 func (f *fakeLegStore) ResumeRecentLeg(
-	_ context.Context, vehicleID, destination string, notBefore time.Time,
+	_ context.Context, tripID, vehicleID, destination string, notBefore time.Time,
 ) (Leg, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -221,7 +221,7 @@ func (f *fakeLegStore) ResumeRecentLeg(
 	}
 	var best *Leg
 	for _, leg := range f.byID {
-		if leg.VehicleID != vehicleID || leg.EndedAt == nil || f.arrived[leg.ID] {
+		if leg.TripID != tripID || leg.VehicleID != vehicleID || leg.EndedAt == nil || f.arrived[leg.ID] {
 			continue
 		}
 		if leg.EndedAt.Before(notBefore) || leg.DestinationName != destination {

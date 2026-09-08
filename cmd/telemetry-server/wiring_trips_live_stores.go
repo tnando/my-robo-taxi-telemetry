@@ -117,12 +117,12 @@ func (a *tripLegStoreAdapter) StartLeg(
 	return legFromRow(&row), nil
 }
 
-// ResumeRecentLeg re-opens the leg this car just closed without arriving, when
-// the same journey is starting again (MYR-612).
+// ResumeRecentLeg re-opens the leg this car just closed without arriving WITHIN
+// THIS TRIP, when the same journey is starting again (MYR-612).
 func (a *tripLegStoreAdapter) ResumeRecentLeg(
-	ctx context.Context, vehicleID, destination string, notBefore time.Time,
+	ctx context.Context, tripID, vehicleID, destination string, notBefore time.Time,
 ) (trips.Leg, bool, error) {
-	row, resumed, err := a.repo.ResumeRecentLeg(ctx, vehicleID, destination, notBefore)
+	row, resumed, err := a.repo.ResumeRecentLeg(ctx, tripID, vehicleID, destination, notBefore)
 	if err != nil {
 		return trips.Leg{}, false, fmt.Errorf("trips: resume leg: %w", err)
 	}

@@ -20,19 +20,27 @@
 --
 -- ── THE INDEX ───────────────────────────────────────────────────────────────
 --
--- The lookup is "the most recently ended leg for this car, if it ended in the
--- last couple of minutes". The two existing leg indexes are both partial on
--- `ended_at IS NULL` (the OPEN leg) and answer nothing about closed ones, so
--- without this the probe is a sequential scan of every leg ever recorded, on
--- the leg-open edge. Partial in the complementary direction — closed legs only
--- — so it stays small and never has to hold the row every other leg query is
--- about.
+-- The lookup is "the most recently ended leg of THIS TRIP for this car, if it
+-- ended in the last couple of minutes". The two existing leg indexes are both
+-- partial on `ended_at IS NULL` (the OPEN leg) and answer nothing about closed
+-- ones, so without this the probe is a sequential scan of every leg ever
+-- recorded, on the leg-open edge. Partial in the complementary direction —
+-- closed legs only — so it stays small and never has to hold the row every
+-- other leg query is about.
+--
+-- `trip_id` LEADS because it is the resume probe's first predicate and not
+-- merely a filter: the merge window is a couple of minutes and a car very often
+-- starts its next trip inside one, so a leg may only ever be resumed into the
+-- trip it already belongs to. Resuming across trips attaches the row to the old
+-- trip while the fan-out addresses the new one's audience — a card for the
+-- wrong people, an empty history for the right ones, and no open leg the new
+-- trip's detector could ever close.
 --
 -- CG-DL-9: go_trip_legs is Go-owned; no Prisma-owned relation is named here.
 --
 -- P0 throughout: this migration adds no column and therefore no new data. It
 -- indexes an opaque cuid and an instant that already exist.
 
-CREATE INDEX IF NOT EXISTS idx_go_trip_legs_vehicle_ended
-    ON go_trip_legs (vehicle_id, ended_at DESC)
+CREATE INDEX IF NOT EXISTS idx_go_trip_legs_trip_vehicle_ended
+    ON go_trip_legs (trip_id, vehicle_id, ended_at DESC)
     WHERE ended_at IS NOT NULL;
