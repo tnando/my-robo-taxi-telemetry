@@ -8,7 +8,10 @@ import (
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
 
-// The PER-TRIP routes of §7.30: read, patch, end, leave.
+// The PER-TRIP routes of §7.30: read, patch, end, leave. The fifth — the
+// owner's DELETE (§7.30.10) — is in trip_delete_handler.go, which is a file
+// boundary rather than a category one: it obeys the same rule as these four and
+// carries enough argument about ordering to be worth reading on its own.
 //
 // ALL FOUR ANSWER 404 TO A CALLER WHO IS NOT ON THE TRIP, identically to how
 // they answer for a trip that does not exist. The store makes that structural —

@@ -12,21 +12,22 @@ import (
 	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
-// The MYR-602 TRIPS surface (rest-api.md §7.30). One handler, nine routes:
+// The MYR-602 TRIPS surface (rest-api.md §7.30). One handler, ten routes:
 //
 //	POST   /api/vehicles/{vehicleId}/trips
 //	GET    /api/trips
 //	GET    /api/trips/{tripId}
 //	PATCH  /api/trips/{tripId}
+//	DELETE /api/trips/{tripId}                      (MYR-607, §7.30.10)
 //	POST   /api/trips/{tripId}/end
 //	DELETE /api/trips/{tripId}/participants/me
 //	GET    /api/trips/{tripId}/drives
 //	POST   /api/trips/{tripId}/activity-start-token
 //	DELETE /api/trips/{tripId}/activity-start-token
 //
-// ONE HANDLER TYPE rather than one per route, because all nine share the same
-// three things: the token validator, the store, and the 404-not-403 rule. Nine
-// constructors would be nine chances to wire one of them without the rule.
+// ONE HANDLER TYPE rather than one per route, because all ten share the same
+// three things: the token validator, the store, and the 404-not-403 rule. Ten
+// constructors would be ten chances to wire one of them without the rule.
 //
 // THE 404-NOT-403 RULE, stated once here and enforced by the store: every
 // per-trip route answers 404 to a caller who is not on the trip — identically
