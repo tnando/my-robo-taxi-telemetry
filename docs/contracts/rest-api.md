@@ -213,7 +213,7 @@ All non-2xx responses carry a JSON body with this envelope:
 |-------|------|----------|----------------|-------|
 | `error.code` | `string` (enum) | Yes | P0 | Stable typed code. Consumers branch on this value per FR-7.1. |
 | `error.message` | `string` | Yes | P0 (never contains P1) | Human-readable description for logs and developer tooling. Safe to display in developer-mode banners; not intended for end-user UI. |
-| `error.subCode` | `string` (enum) \| `null` | No | P0 | Optional typed sub-code for branching consumer UI when the primary code is ambiguous across carriers. v1 enum: `device_cap` (WS-only, shared with the WS ErrorPayload — REST does not emit it; declared on the REST envelope for shared-type compatibility), `reauth_required` (REST-only, emitted by §7.6 / §7.7 when the recent-login re-auth gate fails — see §4.1.1 `auth_failed`) `reservation_expired` (REST-only, emitted by §7.21.1 on a `409 conflict` when a Live Activity registration is refused because the ride's reservation lapsed — the ride's own status is still `accepted`, so the primary code alone cannot tell the client what happened) and `time_conflict` (REST-only, emitted by §7.8 create/accept on a `409 vehicle_unavailable` when the target vehicle is already promised to another open ride within 45 minutes of the requested `scheduledFor` — MYR-383. It exists because the code's four other carriers are conditions of the car RIGHT NOW, which a client answers with "try again later", while this one is a property of the TIME the rider picked, which a client answers by returning them to the picker. The fourth of those four, the MYR-581 nameless-owner refusal, deliberately declined a sub-code of its own for exactly this reason — it is a condition of the car and needs no branch). The wire shape is **always present**, serialized as JSON `null` when the carrier emits no sub-code (see §4.1 envelope JSON example above). |
+| `error.subCode` | `string` (enum) \| `null` | No | P0 | Optional typed sub-code for branching consumer UI when the primary code is ambiguous across carriers. v1 enum: `device_cap` (WS-only, shared with the WS ErrorPayload — REST does not emit it; declared on the REST envelope for shared-type compatibility), `reauth_required` (REST-only, emitted by §7.6 / §7.7 when the recent-login re-auth gate fails — see §4.1.1 `auth_failed`) `reservation_expired` (REST-only, emitted by §7.21.1 on a `409 conflict` when a Live Activity registration is refused because the ride's reservation lapsed — the ride's own status is still `accepted`, so the primary code alone cannot tell the client what happened) and `time_conflict` (REST-only, emitted by §7.8 create/accept on a `409 vehicle_unavailable` when the target vehicle is already promised to another open ride within 45 minutes of the requested `scheduledFor` — MYR-383. It exists because the code's four other carriers are conditions of the car RIGHT NOW, which a client answers with "try again later", while this one is a property of the TIME the rider picked, which a client answers by returning them to the picker. The fourth of those four, the MYR-581 nameless-owner refusal, deliberately declined a sub-code of its own for exactly this reason — it is a condition of the car and needs no branch), and `already_shared` (REST-only, emitted by §7.5.8 on a `409 conflict` when an owner extends a share onto a car the same person already has a live grant on — [MYR-609](https://linear.app/myrobotaxi/issue/MYR-609). `conflict` otherwise means an illegal lifecycle *transition*, which a client must not retry and must report; this one means the thing the caller asked for is ALREADY TRUE, which is not an error they made. A client marks that person as already having the car and moves on — which is what makes an "Add all" affordance safe, since these responses are successes to render rather than failures to report). The wire shape is **always present**, serialized as JSON `null` when the carrier emits no sub-code (see §4.1 envelope JSON example above). |
 
 Two rules are non-negotiable for every error response:
 
@@ -232,7 +232,7 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 | `vehicle_not_owned` | 403 | Shared (WS + REST, PLANNED on WS per DV-07) | Implemented on REST (MYR-47); PLANNED on WS per DV-07 | Surface to UI; do not auto-retry the same vehicleId. | Specific case of `permission_denied` for a vehicle-scoped endpoint whose `vehicleId` path param is not in the caller's ownership set. |
 | `not_found` | 404 | **REST-only** | Implemented (MYR-47) | Surface to UI; do not retry. The resource either does not exist or is filtered out by ownership / role mask. | Unknown `vehicleId`, `driveId`, or `inviteId`. The SDK cannot distinguish "never existed" from "revoked access" -- this is intentional, so the server never leaks the existence of resources the caller cannot see. |
 | `invalid_request` | 400 | **REST-only** | Implemented (MYR-47) | Surface to UI as a developer error; do not retry. | Request body, path params, or query string failed server-side validation (malformed cursor, `limit` out of range, malformed email on invite creation, etc.). |
-| `conflict` | 409 | **REST-only** | Implemented (MYR-174) | Surface to UI; **do not auto-retry the same mutation** — the ride is not in a state that permits it. | A ride-request state mutation is illegal from the row's current lifecycle state (e.g. cancelling a `completed` ride, accepting a `cancelled` one). The legal-transition matrix is §7.8. Member of the shared `ErrorPayload.code` enum for single-union SDK typing, but never emitted over the WS transport. |
+| `conflict` | 409 | **REST-only** | Implemented (MYR-174, MYR-172, MYR-369, MYR-599, MYR-609) | Surface to UI; **do not auto-retry the same mutation** — the ride is not in a state that permits it. **`subCode: already_shared` is different: it is not a failure at all** — the grant the caller asked for already exists, so a client renders that person as already having the car and moves on. | A ride-request state mutation is illegal from the row's current lifecycle state (e.g. cancelling a `completed` ride, accepting a `cancelled` one). The legal-transition matrix is §7.8. It also carries four non-ride refusals: `subCode: reservation_expired` (§7.21.1), a §7.5.7 `PATCH` against a still-pending invite, the §7.29 owner-approval gate on the §7.5 share surfaces, and **`subCode: already_shared`** — §7.5.8 extending a share onto a car that person already holds a live grant on ([MYR-609](https://linear.app/myrobotaxi/issue/MYR-609)). Member of the shared `ErrorPayload.code` enum for single-union SDK typing, but never emitted over the WS transport. |
 | `ride_active` | 409 | **REST-only** | Implemented (MYR-230) | **Do not auto-retry the create.** Adopt the returned `activeRideRequest` into the pending/tracking UI — this is the ride the rider should be looking at. | The caller tried to create a second **instant** ride request while already holding an OPEN one (status `requested`/`accepted` or any in-progress state — everything short of terminal `completed`/`declined`/`cancelled`). Only one active instant ride per rider is allowed; **scheduled rides are exempt** and never trigger this. Distinct from `conflict` (an illegal *transition* on a known ride) — this rejects the *creation* of a second concurrent ride. The 409 body carries the existing open request under `activeRideRequest` (same shape as `GET /api/ride-requests/{id}`) so the client adopts it. See §7.8. |
 | `vehicle_unavailable` | 409 | **REST-only** | Implemented (MYR-277, MYR-266, MYR-342, MYR-383, MYR-581) | Surface to UI; **do not auto-retry** while the vehicle stays in service / offline / paused / on another ride / owned by a nameless account — retry once the owner brings it back. **`subCode: time_conflict` is different: do NOT retry at all** — the car is fine and the *slot* is taken, so the client returns the rider to the time picker with the conflicting instant from the message. | The target vehicle cannot serve this ride, for one of **five** capability reasons: **(a)** its persisted status is `in_service` or `offline` — MYR-277, **accept only**; **(b)** it is already **committed to another active instant ride** (`accepted`/`arrived`/`enroute`) — the per-vehicle one-active-ride guard MYR-266, **accept only**; **(c)** its owner has **PAUSED ride sharing** — MYR-342, on **create AND accept**; **(d)** **`subCode: time_conflict`** — it is already promised to another open ride within **45 minutes** of the requested `scheduledFor`, the per-vehicle window gate MYR-383, on **create AND accept**, **SCHEDULED rides only**; **(e)** its **OWNER has no CONFIRMED display name** — no name on any identity rung, or (since [MYR-583](https://linear.app/myrobotaxi/issue/MYR-583)) a resolvable name the owner never confirmed through §7.26 — [MYR-581](https://linear.app/myrobotaxi/issue/MYR-581)/[MYR-583](https://linear.app/myrobotaxi/issue/MYR-583), on **create AND accept**, with **NO sub-code**. Cases (a) and (b) apply to **INSTANT rides only** — a ride with `scheduledFor` skips the status gate (MYR-313) and is outside the per-vehicle index's `scheduled_for IS NULL` predicate (MYR-266). Case (d) is the mirror image: it applies to **reservations only** and never to an instant ride. **The MYR-313 exemption is therefore narrower than "reservations are never refused `vehicle_unavailable`"** — it exempts a reservation from the *status* gate (a), not from (c) or (d), which ask about the reservation instant rather than about the car today. In every case the ride is still legally acceptable/creatable, so this is **not** `conflict` (an illegal lifecycle *transition*) — it is a capability gate on the vehicle. Case (e) applies to both ride shapes like (c), and needs no sub-code precisely because it is the SAME CLASS as (a)/(b)/(c) — a condition of the car right now, which the owner clears by setting a name (§7.26); only (d), a property of the *time* the rider picked, needs a branch. Arbitration: (a)/(c)/(e) read the current persisted row; (b) is the partial unique index `uq_go_ride_requests_active_instant_vehicle` (23505) on the guarded write; (d) is a per-vehicle **advisory transaction lock** held across probe-and-write, so two conflicting bookings resolve to exactly one winner. **Decline is never gated by any of them.** Member of the shared `ErrorPayload.code` enum for single-union SDK typing, but never emitted over the WS transport. See §7.8. |
 | `rate_limited` | 429 | Shared (WS + REST) | Implemented for WS pre-auth per-IP cap (MYR-47); REST per-user request cap PLANNED (DV-22); WS post-auth per-user cap PLANNED (DV-08) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
@@ -1311,7 +1311,7 @@ Mounted on the **Go telemetry server** as of **MYR-184** (2026-07-29). This **SU
 
 **Links, not dictation (MYR-368).** Every pending row also carries `shareUrl`, a complete **signed** join URL that embeds the code. It is what the share sheet actually sends; the bare `code` remains on the wire as the fallback and as what the redeem endpoint consumes. The signature is verified **statically by the web join shell**, against a public key compiled into it — no database, no round trip, so a forged or tampered link is bounced before it can turn the join page into a code oracle. See **§7.5.6** for the full format, the canonical signed payload, key management, and rotation.
 
-**Six endpoints, two audiences.** Five are OWNER-facing and speak in `ShareInvite` — the revoke being the one that answers with no body at all; one is RIDER-facing and returns `RedeemShareInviteResponse`. `ShareInvite` is **never** delivered to an invited party: it carries the owner-typed `label`, the owner's per-grant controls (§7.5.7), and, while pending, the live `code`.
+**Eight endpoints, two audiences.** Seven are OWNER-facing and speak in `ShareInvite` — the revoke being the one that answers with no body at all, and the viewer's own leave (§7.5.7 `DELETE .../share`) being the one owner-shaped route a VIEWER calls; one is RIDER-facing and returns `RedeemShareInviteResponse`. `ShareInvite` is **never** delivered to an invited party: it carries the owner-typed `label`, the owner's per-grant controls (§7.5.7), and, while pending, the live `code`.
 
 | Endpoint | Audience | Returns |
 |----------|----------|---------|
@@ -1320,6 +1320,8 @@ Mounted on the **Go telemetry server** as of **MYR-184** (2026-07-29). This **SU
 | `DELETE /api/invites/{inviteId}` | owner | no body (204) |
 | `PATCH /api/invites/{inviteId}` | owner | `ShareInvite` (200) — the updated **accepted** grant |
 | `POST /api/invites/{inviteId}/resend` | owner | `ShareInvite` (200) |
+| `POST /api/vehicles/{vehicleId}/share/extend` | owner | `ShareInvite` (201) — a NEW **accepted** grant copied from another car (§7.5.8) |
+| `DELETE /api/vehicles/{vehicleId}/share` | viewer | no body (204) — the viewer's own way out (§7.5.7) |
 | `POST /api/invites/redeem` | any authenticated caller | `RedeemShareInviteResponse` (200) |
 
 #### 7.5.0 Grant capabilities (MYR-369 — the tier is retired)
@@ -1814,6 +1816,99 @@ The RIDER's own way out of a share. Tombstones every **accepted** grant the **ca
 **The one refusal is `409 conflict` while the caller has a live ride on the car** (`requested` / `accepted` / `arrived` / `enroute`). The ride's telemetry access rides the grant, so a mid-ride leave would put a rider aboard a car their own app can no longer see. The guard is INSIDE the tombstoning `UPDATE` (`NOT EXISTS` over the caller's live rides), so a ride created between a check and the write cannot slip through — and the `409` is spoken only when an accepted grant genuinely exists to hold, so an owner self-riding a never-shared car still gets the ordinary `204` no-op. The rider's path out is the one they already have: cancel the ride, then leave.
 
 **The owner is not notified** in v1 — the roster row disappears on the owner's next §7.5.2 read. A push is recorded as an open product question on the issue, not silently decided.
+
+#### 7.5.8 `POST /api/vehicles/{vehicleId}/share/extend` — add somebody who already sees another of your cars ([MYR-609](https://linear.app/myrobotaxi/issue/MYR-609))
+
+##### Purpose
+
+Copies one of the caller's **ACCEPTED** grants onto another car the caller owns, in one call. Owner-only.
+
+**The hole it fills.** An owner with two cars, and two people accepted on the first one, had exactly one route to putting those same people on the second: mint a fresh code and make them redeem it again. The tester report on the issue is that owner looking at "nobody is shared on this car" with the two people who *are* shared one screen away, reading "Invite someone" as a dead end. Everything needed to serve him is already on the source row — who holds the grant, what he called them, and what the grant conveys.
+
+**Consent basis — read this before adding a second caller.** This is the only endpoint in the family that produces an accepted grant **without the grantee performing an act**, and what makes that legitimate is narrow and load-bearing:
+
+1. **The grantee already accepted a share FROM THIS OWNER.** The relationship exists and the person opted into it; what is added is another car belonging to the same person.
+2. **Both halves must be the CALLER's** — the source grant's `owner_user_id` and the target vehicle — checked **in SQL** on both, so this can never reach across owners. A viewer cannot use their own grant as a source: they do not own it.
+3. **The owner could already do this unilaterally.** §7.5.1 mints one code across N of the caller's vehicles, so a multi-car grant was always the owner's to compose at invite time. What this removes is the pointless second redemption, not the grantee's say.
+4. **The grantee keeps every exit they had.** §7.5.7 leave, and the new row appears in their §7.0 catalog exactly like a redeemed one.
+
+Anything wider than that — extending across owners, extending from a grant the caller merely holds, extending onto a car the caller does not own — is refused, and the refusals are the bulk of this section.
+
+##### Request
+
+```
+POST /api/vehicles/clxyz1234567890abcdeg/share/extend HTTP/1.1
+Authorization: Bearer <token>
+Content-Type: application/json; charset=utf-8
+
+{
+  "shareId": "csh0123456789abcdef0123456789abcd"
+}
+```
+
+| Field | Type | Required | Classification | Notes |
+|-------|------|----------|----------------|-------|
+| `shareId` | string | Yes | P0 | The `inviteId` of an **accepted** grant of the caller's, on a **different** vehicle they own — i.e. a `ShareInvite` with `status: "accepted"` from any §7.5.2 listing of the caller's other cars. Opaque cuid |
+
+**Strictly decoded.** The body has exactly one field and unknown keys are **rejected** (`400`), unlike the §7.5.7 `PATCH` body one surface over. The asymmetry is deliberate: a patch carries optional fields where a typo'd key means "leave it alone", whereas here a typo'd key means the request names no share at all, and failing loudly is the only reading that cannot look like success.
+
+##### Response — 201 Created
+
+A single `ShareInvite`: the **NEW** grant, on the path vehicle. It is an **accepted** row, so it carries `allowRides` / `suspended` and the derived `permission`, and carries neither `code` nor `shareUrl` nor `expiresAt`.
+
+```json
+{
+  "inviteId": "cshx0123456789abcdef0123456789ab",
+  "vehicleId": "clxyz1234567890abcdeg",
+  "label": "Mira Chen",
+  "permission": "rides",
+  "status": "accepted",
+  "allowRides": true,
+  "suspended": false,
+  "createdAt": "2026-09-07T18:30:00Z",
+  "acceptedAt": "2026-09-07T18:30:00Z",
+  "acceptedByName": "Sam"
+}
+```
+
+**A COPY, NOT A COMPOSITION.** `label`, `permission`, `allowRides` and the suspended state all come from the source row; the request cannot supply them. Offering the caller a way to set them here would let them create a grant that disagrees with the one it claims to extend, and the owner already has §7.5.7 `PATCH` for editing either grant afterwards — **per vehicle**, which is the point of the flags being per-grant.
+
+**`accepted_at` is the instant the OWNER extended it**, not the instant the source was redeemed: it is when this car's access actually began, and it is what the owner's "shared {ago}" line on the new row refers to.
+
+**A SUSPENDED source produces a SUSPENDED grant.** Extending is not blocked by a pause — a pause is the owner's own reversible state and refusing here would force them to un-pause somebody in order to add a car — but the pause travels with the grant, because copying it live would be a way to undo a suspension without lifting it. The new row is then excluded from the access set by §7.5.0's suspension invariant, exactly like its source, and one §7.5.7 `PATCH` per row lifts them independently.
+
+**The row is INDISTINGUISHABLE from a redeemed grant everywhere else**, and it must be: the §7.0 catalog merge, the §7.1 snapshot gate, the WebSocket access set and the §7.8 ride gates all admit it with no special case, because there is nothing in the row for them to special-case. The only record that it was not redeemed is the `share.extended` audit row.
+
+**The grantee's cached access set is busted immediately**, in the widening direction of the same rule §7.5.3 and §7.5.7 apply to narrowing: without it, the car would be invisible to the person it was just shared with until their cache entry lapsed (5-minute TTL), while the owner's app already showed them as a pickable participant on it. There is deliberately **no socket signal** to match — `share.access_revoked` exists to END a stream, and gaining access opens nothing that needs closing; the grantee's next handshake reads the widened set.
+
+**No push is sent** in v1 — there is no viewer-facing share notification category to send it through. `viewer_joined` (§7.19) is the OWNER's switch for "somebody redeemed an invite to your car" and has no send site at all; sending on it would address the wrong party through the wrong preference. The new row simply appears in the grantee's §7.0 catalog on their next read. A "{Owner} also shared {car} with you" push is recorded as an open product question on the issue, not silently decided.
+
+##### Response — error
+
+| HTTP | `error.code` | `error.subCode` | When |
+|------|--------------|-----------------|------|
+| 400 | `invalid_request` | — | Malformed JSON; an unknown key; missing, blank or non-string `shareId` |
+| 401 | `auth_failed` | — | Missing/invalid token |
+| 403 | `vehicle_not_owned` | — | Caller does not own the path vehicle |
+| 404 | `not_found` | — | Path `vehicleId` does not exist |
+| 404 | `not_found` | — | `shareId` does not exist, belongs to another owner, is still `pending`, or is a revoked tombstone |
+| 409 | `conflict` | `already_shared` | That person already holds a live grant on the path vehicle |
+| 409 | `invalid_request` | — | The path vehicle is a §7.29 driver-access car still awaiting its owner-approval acknowledgment |
+| 500 | `internal_error` | — | Store-layer error |
+
+**THE FOUR 404 CAUSES ARE ONE ANSWER, WITH ONE BODY.** Missing, another owner's, still pending, and revoked are deliberately indistinguishable — the same non-oracle rule §7.5.3 and §7.5.7 already hold for invite ids, and it matters more here because the id in the request body is one a caller could guess at rather than one the path already proved they own. A blank `shareId` is `400` and not `404` for the same reason the join endpoint splits a malformed code from a dead one (§7.24): the `404` body means "that share is not extendable by you", and folding a client bug into that set would make the indistinguishability harder to reason about rather than easier.
+
+**`already_shared` is a sub-code because `conflict` alone is not actionable.** `conflict` otherwise means an illegal lifecycle *transition*; this one means the thing the caller asked for is already true, which is not an error they made and not one to retry. A client branches on the sub-code to mark that person as already having the car and move on — which is also what makes an "Add all" affordance safe, since the responses that come back `already_shared` are successes to render rather than failures to report.
+
+**Extending a grant onto its OWN vehicle answers `409 already_shared`, not `404`.** It is a special case of the conflict rather than a separate rule: the grantee demonstrably holds a live row on that car — it is the very row named in the request — so the conflict is the honest answer, and a `404` would hide a row the caller owns and can see on their own §7.5.2 listing.
+
+##### Idempotency
+
+`POST` is not idempotent (§4.5), but this one is **effectively** so: the second identical call finds the grant it would have created and answers `409 already_shared` rather than stacking a second row — `uq_go_vehicle_shares_accepted_grant` (migration 0020) is what decides, so two concurrent extends resolve to exactly one winner and the loser gets the same `409`. A client retrying a dropped response can therefore treat `409 already_shared` as success.
+
+##### Audit
+
+One `share.extended` `AuditLog` row per successful call, written **inside the same transaction as the grant** and before it (CG-DL-3): `targetType: "vehicle"`, `targetId` the car gaining the grant, `userId` the owner who acted, `initiator: "user"`, `metadata: {shareId, sourceShareId}` — **two opaque cuids and nothing else** (CG-DL-5). No `label` and no `code`, both P1. It is the only record anywhere that this access was not redeemed, and it is what answers "how did this person get access to this car when no invite for it was ever redeemed?".
 
 ### 7.6 `DELETE /api/users/me`
 

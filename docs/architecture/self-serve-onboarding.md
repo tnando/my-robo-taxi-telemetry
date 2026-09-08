@@ -358,6 +358,30 @@ So a newly paired VIN starts streaming without `ops fleet-config push`:
   `vehicleDriverAccessRowsDeleted` and never the rows. Behaviour change on this
   document's own §7.11 callback path: the link hook no longer filters on
   `access_type`.
+- **MYR-609 addendum — sharing a SECOND car (FR-5.1, FR-5.4).** Self-serve
+  onboarding produces owners with more than one car far more often than the
+  invite flow assumed, and the flow it left them with was: mint a fresh
+  6-character code per car and make the same people redeem it again. The gap is
+  closed by **one new endpoint**,
+  `POST /api/vehicles/{vehicleId}/share/extend`
+  ([`../contracts/rest-api.md`](../contracts/rest-api.md) §7.5.8), which copies
+  one of the owner's **accepted** grants onto another car they own. **No new
+  table and no new column** — it INSERTs an ordinary `go_vehicle_shares` row
+  that is already `accepted`
+  ([`../contracts/data-classification.md`](../contracts/data-classification.md)
+  §1.15) — **one new request shape**, `ExtendShareRequest` (`{shareId}`,
+  strictly decoded); **one new error sub-code**, `already_shared`, qualifying
+  `409 conflict`; and **one new audit action**, `share.extended`, metadata
+  `{shareId, sourceShareId}` only.
+  **The consent basis is the part to carry forward if this is ever widened:**
+  the grantee already accepted a share *from this owner*, and both the source
+  grant and the target car must belong to the caller — checked in SQL on both
+  halves, so it can never reach across owners. It is the same reasoning §4.1's
+  acknowledgment gate rests on, applied one surface over, which is why the gate
+  itself covers this route too: extending a grant is an act of disposal over a
+  car whose Tesla owner may not yet be on record as agreeing it belongs here, so
+  a driver-access car awaiting its acknowledgment refuses the extend exactly as
+  it refuses the create.
 
 ---
 
