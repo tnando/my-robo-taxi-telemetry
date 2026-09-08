@@ -44,9 +44,9 @@ func runFleetConfigRepush(ctx context.Context, opts repushOptions) error {
 	if err != nil {
 		return err
 	}
-	proxyURL := os.Getenv("TESLA_PROXY_URL")
-	if proxyURL == "" {
-		return fmt.Errorf("TESLA_PROXY_URL is required for fleet-config push")
+	proxyURL, err := resolveProxyURL()
+	if err != nil {
+		return err
 	}
 
 	logger := newLogger()
