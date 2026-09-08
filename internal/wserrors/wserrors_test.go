@@ -42,7 +42,7 @@ var reachabilityMatrix = []reachability{
 	{code: ErrCodeKeyNotPaired, scenario: "internal/commands/executor_test.go (transport disabled + not-paired outcome)"},
 	{code: ErrCodeVehicleAsleep, scenario: "internal/commands/executor_test.go (wake+retry budget exhausted)"},
 	{code: ErrCodeCommandFailed, scenario: "internal/commands/executor_test.go (result:false + counter-error exhausted)"},
-	{code: ErrCodeServiceUnavailable, skipUntil: "REST-only forward-compatibility code; not yet emitted (rest-api.md §4.1.1.a)"},
+	{code: ErrCodeServiceUnavailable, scenario: "internal/telemetry/auth_failure_test.go (REST 503 on an unanswerable user-existence probe, MYR-612), internal/telemetry/trip_handler_test.go (kill switch). REST-only on the wire: the WS analogue is close code 1013, asserted in internal/ws/handler_handshake_refusal_test.go"},
 	{code: ErrCodeSnapshotRequired, skipUntil: "DV-02 — envelope sequence numbers"},
 }
 

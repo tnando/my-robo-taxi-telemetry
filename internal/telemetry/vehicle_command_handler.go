@@ -105,7 +105,8 @@ func (h *VehicleCommandHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	userID, err := h.auth.ValidateToken(ctx, token)
 	if err != nil {
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := wserrors.AuthFailure(err)
+		h.writeError(w, status, code, message)
 		return
 	}
 

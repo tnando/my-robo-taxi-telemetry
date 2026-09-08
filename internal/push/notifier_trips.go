@@ -60,13 +60,15 @@ type TripPush struct {
 	// Event is which of the five this is.
 	Event TripEvent
 	// LegID is the driving leg, set on the two leg events and empty on the
-	// three lifecycle ones.
+	// three lifecycle ones. It never reaches the payload — the app has no use
+	// for a leg id — and it is carried for the LOG LINES, which is what an
+	// operator correlates a banner against the leg row with.
 	//
-	// It never reaches the payload — the app has no use for a leg id — and
-	// exists only to make the collapse key per-leg. Without it two consecutive
-	// legs of one trip would present the same `apns-collapse-id` and Apple
-	// would MERGE their banners, so a participant who missed the first arrival
-	// would find only the second in Notification Center.
+	// It used to be the second half of the collapse key, so two consecutive
+	// legs of one trip could not merge their banners. MYR-620 reversed that on
+	// purpose: merging two DEPARTURES of one trip is the whole point, and the
+	// departure/arrival distinction the old key was really protecting is
+	// carried by the topic instead. See collapseSubject.
 	LegID string
 	// DestinationName is where the leg is going, P1, set on the two leg events.
 	// It reaches both the copy and the payload; see copy_trips.go for the
@@ -99,14 +101,33 @@ type TripPush struct {
 // banner is tapped.
 func (t TripPush) deepLink() string { return "myrobotaxi://trips/" + t.TripID }
 
-// collapseSubject is what this push de-duplicates against (MYR-554): the trip,
-// narrowed to the leg on the two events that have one. See LegID.
-func (t TripPush) collapseSubject() string {
-	if t.LegID == "" {
-		return t.TripID
-	}
-	return t.TripID + "|" + t.LegID
-}
+// collapseSubject is what this push de-duplicates against (MYR-554): THE TRIP,
+// on every event.
+//
+// ⚠ IT USED TO BE NARROWED TO THE LEG, so two consecutive legs of one trip
+// could not merge their banners, and MYR-620 reverses that deliberately. The
+// client's screenshot is the argument: ten "Heading to Element by Marriott
+// Sedona." lines stacked in Notification Center, and the ONE of them worth
+// keeping is the newest. Collapsing on the trip is what makes a later banner
+// REPLACE the earlier rather than pile onto it — the behaviour Apple's
+// `apns-collapse-id` exists for, and the second half of "this should be moving
+// into dynamic island".
+//
+// THE EVENT STILL DISCRIMINATES, because collapseID appends the topic: a
+// departure and an arrival carry different ids and never merge. That is the
+// distinction MYR-431 found the old truncation destroying, and it is the one
+// that matters — a participant who missed the departure must still find the
+// arrival. What may safely merge is two DEPARTURES of one trip, which is
+// exactly the noise being removed. The suppression window (MYR-620,
+// internal/trips/leg_banners.go) means there is rarely a second one to merge;
+// this is the belt to that pair of braces, and it also covers the far side of a
+// restart, where no window state is consulted.
+//
+// AND IT IS SHORT AGAIN. `{tripID}|{legID}:{topic}` was ~67 bytes before the
+// topic, over Apple's 64-byte cap, so every leg push was hashed;
+// `{tripID}:{topic}` fits and is sent verbatim, which keeps a packet capture
+// readable.
+func (t TripPush) collapseSubject() string { return t.TripID }
 
 // topic is the fan-out's own topic string, used for the collapse id and every
 // log line. It is NOT an events.Topic — there is no bus topic behind these
@@ -175,13 +196,18 @@ func (n *Notifier) NotifyTrip(ctx context.Context, p TripPush) {
 		tripPush: &p,
 		topic:    p.topic(),
 		category: CategoryTrips,
-		// islandAlerts stays FALSE. The MYR-413 gate defers a banner to an
-		// island that is about to announce the same news, and it is keyed
-		// (ride, user) — a trip leg's Live Activity is anchored to a LEG, so
-		// the lookup would find nothing and the marking could only ever be a
-		// lie. The two surfaces are deliberately both sent here: the banner is
-		// what wakes a phone that never registered a push-to-start token, and a
-		// leg fires at most twice per journey rather than six times per ride.
+		// islandAlerts stays FALSE. The MYR-413 gate is keyed (ride, user) and
+		// a trip leg's Live Activity is anchored to a LEG, so its lookup would
+		// find nothing and the marking could only ever be a lie.
+		//
+		// legActivity is the trips answer to the same question (MYR-620), and
+		// it asks the register that actually knows: a phone holding a
+		// push-to-start token for this trip is getting the leg's CARD, so the
+		// banner would sit on top of the island rather than beside it. Set on
+		// the two LEG events only — the three lifecycle pushes announce
+		// something no card carries, and `trip_ended` is precisely when a card
+		// is going away.
+		legActivity: p.Event == TripEventLegStarted || p.Event == TripEventLegArrived,
 	}
 
 	seen := make(map[string]struct{}, len(p.UserIDs))

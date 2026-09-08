@@ -77,6 +77,11 @@ type notifierStores struct {
 	devices    DeviceStore
 	prefs      PrefStore
 	activities ActivityPresenceStore
+	// tripActivities is the MYR-620 sibling of `activities`: the push-to-start
+	// registry, asked whether this recipient's phone is already getting the
+	// leg's card. Optional — nil suppresses nothing, see
+	// notifier_trip_activity_gate.go.
+	tripActivities TripActivityPresenceStore
 }
 
 // alertLadderStatuses is the set of ride statuses whose Live Activity update

@@ -330,6 +330,13 @@ LIMIT 1`
 // P1 CAPABILITY. The value is never logged beyond an 8-character prefix, never
 // echoed into a response, never placed in an error message.
 //
+// ⚠ A ROTATED TOKEN RESETS `started_leg_id` (MYR-612), and an unchanged one
+// does not. ActivityKit rotates the value, and the new token addresses a phone
+// that holds no card for the current leg — so it must be able to be sent one.
+// An idempotent re-POST of the SAME token, which is what an app does on every
+// foreground, must NOT: that phone already has its card, and clearing the stamp
+// would raise a second one on the same lock screen for the same journey.
+//
 // #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryUpsertTripActivityToken = `
 INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token, sandbox)
@@ -337,6 +344,11 @@ VALUES ($1, $2, $3, $4)
 ON CONFLICT (trip_id, user_id) DO UPDATE
 SET push_to_start_token = EXCLUDED.push_to_start_token,
     sandbox = EXCLUDED.sandbox,
+    started_leg_id = CASE
+        WHEN go_trip_activity_tokens.push_to_start_token IS DISTINCT FROM EXCLUDED.push_to_start_token
+        THEN NULL
+        ELSE go_trip_activity_tokens.started_leg_id
+    END,
     updated_at = NOW()`
 
 // queryDeleteTripActivityToken is the DELETE half. Idempotent: no row is the
@@ -452,29 +464,46 @@ WHERE d."vehicleId" = $1
 ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $6`
 
-// queryActiveTripIDForUserVehicle answers VehicleSummary.activeTripId: the id
-// of the open window on this car that this caller is party to, as OWNER or as
-// live participant.
+// queryActiveTripIDsForUser answers "which of the cars in this caller's catalog
+// — however they got there — have a window open right now?".
 //
-// The owner arm has no share join — an owner holds no grant — and the
+// ⚠ IT IS NOT THE SAME QUESTION AS THE MERGE LEG BELOW, AND CONFLATING THEM WAS
+// MYR-612. That statement lists the cars a trip ADDS to the catalog, which is
+// participant rows only — an owner's cars are the catalog's first leg already.
+// This one ANNOTATES rows that are already there, and an owner's own car is the
+// row a trip is most often opened on. One statement served both, so `VehicleSummary.activeTripId`
+// was never present on an owner's own row: the app registers its ActivityKit
+// push-to-start token from `activeTripIDsForActivityTokens`, which reads the
+// catalog, so the owner of the car on the trip never registered a token and
+// never got a leg card. Nabil, 2026-09-08.
+//
+// The owner arm carries no share join — an owner holds no grant — and the
 // participant arm carries the full live-share predicate, so the field can never
-// name a trip whose access the caller does not actually have.
-const queryActiveTripIDForUserVehicle = `
-SELECT t.id FROM go_trips t
-WHERE t.vehicle_id = $2
-  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
-  AND (
-		t.owner_user_id = $1
-		OR EXISTS (
-			SELECT 1 FROM go_trip_participants p
-			JOIN go_vehicle_shares s
-			  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
-			 AND s.status = 'accepted' AND s.suspended_at IS NULL
-			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
-		)
-	)
-ORDER BY t.starts_at DESC
-LIMIT 1`
+// name a trip whose access the caller does not actually have. It is the same
+// two-armed shape the per-vehicle form had, widened from one vehicle
+// to all of them, and the window predicate is spelled the one way it is spelled
+// everywhere (trips.md §2).
+//
+// DISTINCT ON (vehicle_id) with the newest window first: a car cannot legally
+// carry two open windows — the create endpoint's overlap probe refuses it — but
+// the catalog must project ONE id per row whatever the table holds.
+const queryActiveTripIDsForUser = `
+SELECT DISTINCT ON (vehicle_id) vehicle_id, id FROM (
+	SELECT t.vehicle_id, t.id, t.starts_at
+	FROM go_trips t
+	WHERE t.owner_user_id = $1
+	  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+	UNION ALL
+	SELECT t.vehicle_id, t.id, t.starts_at
+	FROM go_trip_participants p
+	JOIN go_trips t ON t.id = p.trip_id
+	JOIN go_vehicle_shares s
+	  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+	 AND s.status = 'accepted' AND s.suspended_at IS NULL
+	WHERE p.user_id = $1 AND p.left_at IS NULL
+	  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+) w
+ORDER BY vehicle_id, starts_at DESC`
 
 // queryActiveTripVehiclesForUser is the CATALOG's third merge leg: the vehicles
 // of the caller's open windows, as catalog rows, with the trip id attached.

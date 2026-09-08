@@ -170,6 +170,21 @@ The entire REST auth middleware is PLANNED; no REST auth middleware exists in th
 
 Both carry `iss=myrobotaxi`, `aud=telemetry`, `sub=<user CUID>`, so issuer/audience/expiry checks are identical across algorithms. The key callback is type-driven — an HMAC-typed token only ever receives the shared secret, an ECDSA-typed token only ever receives an EC public key — so algorithm-confusion attacks (e.g. signing an HS256 token with the published ES256 public key as the HMAC key) are rejected. The fail-closed user-existence check (§3.2 step 4, FR-10.1) now accepts a `sub` present in EITHER the Prisma `"User"` table OR the Go-owned `go_users` table (Apple-native users have no legacy Prisma row).
 
+#### 3.2.1 An existence check that could not be ANSWERED is `503`, never `401` ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612))
+
+**The fail-closed existence check above has two failure modes, and they are NOT the same answer to a client:**
+
+| What happened | Status | Code | What a client should do |
+|---------------|--------|------|--------------------------|
+| Signature, issuer, audience or expiry rejected the token; or the account genuinely has no row in either relation | `401` | `auth_failed` | §3.3 — one refresh, then surface to the sign-in flow |
+| The existence probe itself could not be answered: a pool wait, a statement timeout, a cancelled peer sharing the coalesced lookup | `503` | `service_unavailable` | Retry. **The credential is not implicated** |
+
+**COLLAPSING THE SECOND ONTO THE FIRST IS A USER-VISIBLE BUG, not an internal detail.** `401` is the one answer a client is entitled to act on destructively — §3.3 says so in as many words: it means this credential is dead, and an app's response is to discard the session and send the person to a sign-in screen. On 2026-09-08 a participant's §7.30.8 registration was refused `401` on a database hiccup while his requests a minute later were served; the log said *"user not found"* for an account that plainly existed, and the incident was diagnosed for hours as a missing table in the existence ladder that has never been missing.
+
+**THE REFUSAL IS UNCHANGED — an unanswerable probe still refuses the request, and authentication still may not survive a database outage.** What changes is only which refusal the client is told, and therefore whether retrying is the right response.
+
+**THE WEBSOCKET HANDSHAKE MAKES THE SAME DISTINCTION IN THE OTHER TRANSPORT'S VOCABULARY** ([`websocket-protocol.md`](websocket-protocol.md) §2.4, §6.2). It does **not** emit a typed `service_unavailable` frame: that code is deliberately absent from `ErrorPayload.code` (§4.1.1.a, [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json)), and the WS analogue of a 503 is a **close code**. An unanswerable probe closes with **`1013` Try Again Later and no error frame at all**; `auth_failed` + close `1008` stays exactly what it was. A client reads 1013 the way it reads a 503 — retry with backoff, keep the credential.
+
 ### 3.3 Auth failure and retry (FR-6.2)
 
 When the SDK receives an HTTP response whose status code is `401`:
@@ -237,7 +252,7 @@ The REST catalog is a superset of the WebSocket catalog in [`websocket-protocol.
 | `vehicle_unavailable` | 409 | **REST-only** | Implemented (MYR-277, MYR-266, MYR-342, MYR-383, MYR-581) | Surface to UI; **do not auto-retry** while the vehicle stays in service / offline / paused / on another ride / owned by a nameless account — retry once the owner brings it back. **`subCode: time_conflict` is different: do NOT retry at all** — the car is fine and the *slot* is taken, so the client returns the rider to the time picker with the conflicting instant from the message. | The target vehicle cannot serve this ride, for one of **five** capability reasons: **(a)** its persisted status is `in_service` or `offline` — MYR-277, **accept only**; **(b)** it is already **committed to another active instant ride** (`accepted`/`arrived`/`enroute`) — the per-vehicle one-active-ride guard MYR-266, **accept only**; **(c)** its owner has **PAUSED ride sharing** — MYR-342, on **create AND accept**; **(d)** **`subCode: time_conflict`** — it is already promised to another open ride within **45 minutes** of the requested `scheduledFor`, the per-vehicle window gate MYR-383, on **create AND accept**, **SCHEDULED rides only**; **(e)** its **OWNER has no CONFIRMED display name** — no name on any identity rung, or (since [MYR-583](https://linear.app/myrobotaxi/issue/MYR-583)) a resolvable name the owner never confirmed through §7.26 — [MYR-581](https://linear.app/myrobotaxi/issue/MYR-581)/[MYR-583](https://linear.app/myrobotaxi/issue/MYR-583), on **create AND accept**, with **NO sub-code**. Cases (a) and (b) apply to **INSTANT rides only** — a ride with `scheduledFor` skips the status gate (MYR-313) and is outside the per-vehicle index's `scheduled_for IS NULL` predicate (MYR-266). Case (d) is the mirror image: it applies to **reservations only** and never to an instant ride. **The MYR-313 exemption is therefore narrower than "reservations are never refused `vehicle_unavailable`"** — it exempts a reservation from the *status* gate (a), not from (c) or (d), which ask about the reservation instant rather than about the car today. In every case the ride is still legally acceptable/creatable, so this is **not** `conflict` (an illegal lifecycle *transition*) — it is a capability gate on the vehicle. Case (e) applies to both ride shapes like (c), and needs no sub-code precisely because it is the SAME CLASS as (a)/(b)/(c) — a condition of the car right now, which the owner clears by setting a name (§7.26); only (d), a property of the *time* the rider picked, needs a branch. Arbitration: (a)/(c)/(e) read the current persisted row; (b) is the partial unique index `uq_go_ride_requests_active_instant_vehicle` (23505) on the guarded write; (d) is a per-vehicle **advisory transaction lock** held across probe-and-write, so two conflicting bookings resolve to exactly one winner. **Decline is never gated by any of them.** Member of the shared `ErrorPayload.code` enum for single-union SDK typing, but never emitted over the WS transport. See §7.8. |
 | `rate_limited` | 429 | Shared (WS + REST) | Implemented for WS pre-auth per-IP cap (MYR-47); REST per-user request cap PLANNED (DV-22); WS post-auth per-user cap PLANNED (DV-08) | Auto-retry with extended backoff (§4.1.2). SDK MAY set `Retry-After` header as backoff hint. | Two distinct caps share the same typed code. WS emits `rate_limited` with `subCode: device_cap` for **concurrent-session cap** breaches (too many simultaneous WebSocket connections per user, see `websocket-protocol.md` §6.1.1 and DV-08). REST emits `rate_limited` (no sub-code in v1) for **request-rate cap** breaches (>120 req/min per authenticated user, see §4.1.2 and DV-22). Consumers distinguish the two via the carrier transport and the presence of `subCode`. |
 | `internal_error` | 500 | Shared (WS + REST) | Implemented on REST (MYR-47); PLANNED on WS | Auto-retry with exponential backoff (NFR-3.10 curve from `websocket-protocol.md` §7.1), cap at 3 REST attempts before surfacing. | Catch-all for unexpected server failures: panics, DB errors, downstream timeouts. |
-| `service_unavailable` | 503 | **REST-only, PLANNED** | PLANNED (DV-21) | Auto-retry with exponential backoff; honor `Retry-After` header if present. | Reserved for maintenance windows and graceful-shutdown states. The server MAY return `503` during rolling deployments; v1 does not yet emit this code. Added to the REST catalog so SDK consumers can write forward-compatible handlers. |
+| `service_unavailable` | 503 | **REST-only** | **Implemented** ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612)) for the unanswerable existence probe (§3.2.1) and for the `TRIPS_ENABLED=false` kill switch; still PLANNED for maintenance windows / graceful shutdown (DV-21). | Auto-retry with exponential backoff; honor `Retry-After` header if present. **The credential is not implicated** — a client MUST NOT discard its session on this code. | Every REST surface answers `503 service_unavailable` when the fail-closed user-existence probe behind `ValidateToken` could not be ANSWERED (a pool wait, a statement timeout, a cancelled peer sharing the coalesced lookup) — §3.2.1. Also the disabled-feature refusal (§7.30 kill switch). Still reserved, additionally, for maintenance windows and graceful-shutdown states. **REST-only on the wire:** the WS handshake's analogue is close code `1013`, not a frame ([`websocket-protocol.md`](websocket-protocol.md) §6.2). |
 | `snapshot_required` | -- | **WS-only** (close code 4005 + error frame) | PLANNED (DV-02) | n/a for REST | WS-only. REST has no analogue because REST is already the snapshot channel (the "fall back to snapshot fetch" signal IS a REST call). Listed here for completeness; REST clients never receive this code. |
 | `key_not_paired` | 403 | **REST-only** | Implemented (MYR-180) | Surface to UI; **do not auto-retry** — needs owner action. | The application's virtual key is not enrolled on the vehicle (owner has not completed the `tesla.com/_ak/<domain>` pairing, MYR-115), or the command-signing transport is not configured. This is the default outcome for every signer-required command in §7.9 until pairing happens. The SDK prompts the owner to pair. |
 | `vehicle_asleep` | 503 | **REST-only** | Implemented (MYR-180) | Auto-retry with backoff (§4.1.2 curve). SDK MAY honor `Retry-After`. | The target vehicle was asleep/offline and did not come online within the executor's bounded wake+retry budget (§7.9). Transient — the executor already woke + retried internally before surfacing this. |
@@ -252,7 +267,7 @@ Nine codes are REST-only extensions of the shared catalog: `not_found`, `invalid
 - `vehicle_unavailable` (HTTP 409) is emitted only over REST when the target vehicle cannot serve a ride — because it is `in_service`/`offline` (MYR-277, accept), already committed to another active instant ride (the per-vehicle one-active-ride guard MYR-266, accept), its owner has paused ride sharing (MYR-342, create + accept), it is already promised to another open ride inside the 45-minute booking window (**`subCode: time_conflict`**, MYR-383, create + accept), or its **owner has no display name at all** (MYR-581, create + accept) (§7.8). Like `conflict` it is request-oriented and has no WS analogue — the WS path never carries a create or an accept. It is a member of the shared `ErrorPayload.code` enum (added by MYR-277) so the SDK's `CoreError` union stays one enum across transports; the schema enum description marks it REST-only-on-the-wire. Distinct from `conflict` (an illegal lifecycle *transition* on a known ride): the ride IS acceptable/creatable — the *vehicle* just cannot serve it. **Decline is never gated** by any of the five. The per-vehicle busy guard is the exact analogue of the per-rider `ride_active` guard (MYR-230) applied to the vehicle, and scheduled rides are exempt from both — **but "exempt from those two" is not "never refused `vehicle_unavailable`"**: the MYR-342 pause and the MYR-383 window gate both apply to reservations, because they ask about the reservation instant rather than about the car right now. `time_conflict` is in fact **reservation-only** and never fires for an instant ride.
 - `not_found` is not emitted over the WebSocket because the WS path enforces ownership via silent filtering in `Hub.Broadcast` (see `websocket-protocol.md` §4.5) -- a client simply does not receive frames for vehicles it does not own, and there is no equivalent "the resource does not exist" signal because the WS is stream-oriented, not request-oriented. On REST, every vehicle-scoped path param MUST return `404 not_found` for unknown IDs.
 - `invalid_request` exists only because REST accepts structured request bodies and query params that can be malformed independently of auth. The WS protocol has no v1 client->server frames that take structured payloads beyond `auth`, so malformed-body errors cannot arise there.
-- `service_unavailable` is RESERVED for the REST contract so the SDK can write forward-compatible handlers before the server begins emitting it during maintenance windows.
+- `service_unavailable` **is emitted on REST today** ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612)): every authenticated surface answers `503 service_unavailable` when the fail-closed existence probe could not be answered (§3.2.1), and the trips kill switch uses it for a disabled feature. It remains reserved, in addition, for maintenance windows. **It is deliberately NOT a member of the WS `ErrorPayload.code` enum**: the WebSocket analogue of a 503 is a close code, not a typed frame, so a WS handshake refused for the same reason closes `1013` Try Again Later with no error frame ([`websocket-protocol.md`](websocket-protocol.md) §2.4, §6.2). Adding the member would have been a breaking decode on every shipped SDK whose generated union does not carry it.
 - `key_not_paired`, `vehicle_asleep`, and `command_failed` are the MYR-180 vehicle-command codes (§7.9). They are REST-only because the WS transport is stream-oriented and carries no command requests — there is no WS surface on which a command could be issued or rejected. They are members of the shared enum (added by MYR-180) so the SDK's `CoreError` union stays one enum across transports; the schema enum description marks them REST-only-on-the-wire.
 
 Both `not_found` and `invalid_request` are now members of the shared `ErrorPayload.code` enum in [`schemas/ws-messages.schema.json`](schemas/ws-messages.schema.json) (added by MYR-98, the DV-20 enum slice) even though the WS never emits them, so the SDK's `CoreError` union is a single enum across both transports. This is not a drift -- the WS contract explicitly lists them as "REST-only" in the catalog description and the schema enum description marks them REST-only-on-the-wire. The shared-enum subCode `reauth_required` was added in the same change (REST-only; see §4.1). DV-20's remaining open scope is the endpoint-mounting work (§10), not the enum.
@@ -323,7 +338,7 @@ Sites NOT in this audit (intentional carve-outs):
 - [`debug_fields_handler.go`](../../internal/telemetry/debug_fields_handler.go) — dev-only debug stream. Not part of the SDK contract surface (handler doc-comment).
 - [`server.go`](../../internal/server/server.go) `/healthz` — healthcheck, has its own response shape distinct from the typed-error contract.
 
-**`service_unavailable` is intentionally REST-only and is NOT promoted to the shared enum** in DV-20. The WS equivalent of a 503 maintenance window is a connection-refused close code (4003/1011), not a typed `service_unavailable` error frame. Keeping `service_unavailable` out of the shared enum preserves transport-appropriate error semantics: REST clients retry on 503+`service_unavailable`, WS clients retry on close 4003/1011 per `websocket-protocol.md` §7.1.
+**`service_unavailable` is intentionally REST-only and is NOT promoted to the shared enum** in DV-20, and MYR-612 did not promote it either — the REST surfaces began emitting it while the WS surface answered the same condition with a close code. The WS equivalent of a 503 is a connection-refused close code, not a typed `service_unavailable` error frame: `1013` Try Again Later on the handshake (`websocket-protocol.md` §2.4, §6.2), 4003/1011 for an overload or maintenance window. Keeping `service_unavailable` out of the shared enum preserves transport-appropriate error semantics: REST clients retry on 503+`service_unavailable`, WS clients retry on the close code per `websocket-protocol.md` §7.1.
 
 #### 4.1.2 Rate limiting
 
@@ -4504,21 +4519,108 @@ privacy. **The TRIP NAME is never interpolated into a title or a body** — it i
 free text a person typed, and it appears only in the Live Activity's
 content-state (§7.21.7).
 
-**`apns-collapse-id`** is built from `{tripId}:{topic}` for the three lifecycle
-events and `{tripId}|{legId}:{topic}` for the two leg ones. The leg narrowing is
-required: without it two consecutive legs of one trip present the same header,
-Apple merges their banners, and a participant who missed the first arrival finds
-only the second in Notification Center.
+#### 7.19.5.a A leg banner is for a phone with no card ([MYR-620](https://linear.app/myrobotaxi/issue/MYR-620))
 
-**A LEG'S SUBJECT IS TWO IDS AND THEREFORE EXCEEDS APPLE'S 64-BYTE CAP, so it is
-HASHED rather than truncated** — the header carries `h.` plus 128 bits of
-SHA-256 over the value above. Truncation was the pre-MYR-602 behaviour and was a
-guard that could not fire while every subject was a single cuid; with two it
-fires on every leg push and it removes **the discriminating tail**, so
-`trip_leg_started` and `trip_leg_arrived` on one leg collapsed into a single
-banner at Apple — the exact merge the leg id was added to prevent, reintroduced
-by the cap. A subject that FITS is still sent verbatim, so an ordinary
-`crr_…:ride.status.changed` stays readable in a packet capture.
+**THE FIELD REPORT, 2026-09-08.** A client screenshot: **ten** *"Tesla is on the
+move — Heading to Element by Marriott Sedona."* banners on one lock screen in 59
+minutes, five of them inside a single minute, plus an older one for a Subway.
+Thomas's reading was *"users reported app spamming notifications when heading to
+next destination, this should be moving into dynamic island"*, and both halves of
+that sentence are rules now.
+
+**EVERY ONE OF THOSE PUSHES WAS CORRECT BY THE OLD RULES.** `trip_leg_started`
+is claimed once per leg on `go_trip_legs.started_notified_at`, and it was: the
+**leg** flapped ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) — a
+transient destination-name delta closed the leg and the next frame reopened it),
+so each banner belonged to a different row. A per-row claim can never bound a
+sentence that is about the **journey**.
+
+Three rules now stand between a leg edge and a lock screen, and they answer
+different questions:
+
+| Rule | Grain | What it asks |
+|------|-------|--------------|
+| The per-leg claim (MYR-602) | one leg | Has this leg's banner been **delivered** yet? |
+| **The Live Activity gate** (MYR-620) | one recipient | Is this person getting the **card** instead? |
+| **The suppression window** (MYR-620) | one (trip, event, destination) | Has this **sentence** already been said recently? |
+
+**THE LIVE ACTIVITY GATE.** For the two LEG events only, a recipient who holds a
+push-to-start registration for that trip (`go_trip_activity_tokens`, §7.30.8)
+receives **the Live Activity and no banner**. The card appearing IS the
+announcement — the leg-open fan-out deliberately attaches no alert to it — and a
+banner on top of it takes the strip of screen the island wants, so the very push
+that duplicates the card is also the thing standing in front of it. That is the
+§7.21.6 (MYR-413) argument exactly, made about a leg instead of a ride, and it
+consults the register that actually knows.
+
+- **A phone with notifications allowed and Live Activities OFF never registers a
+  token**, so it is not in the registry and it is told in prose. That is the
+  whole reason the banner still exists.
+- **The three LIFECYCLE pushes are untouched.** They are not about a leg, no
+  card announces them, and `trip_ended` is precisely when a card is going away.
+- **A registration APNs has rejected with a 410 is DELETED**, so its owner reads
+  as token-less and keeps every banner. A phone whose app is gone is never left
+  dark.
+- **The grain is (trip, user)**, because that is the registry's own primary key
+  — ActivityKit rotates the push-to-start token, so a row per device would mean
+  two cards for one journey on one lock screen. A person signed in on two
+  phones, one with Live Activities disabled, therefore loses the banner on the
+  second.
+- **IT FAILS OPEN** — no registry wired, a lookup error — for the same reason
+  and in the same direction as §7.19.3's preference gate: a duplicate is an
+  annoyance, a silence is somebody never told their car set off.
+
+**THE SUPPRESSION WINDOW.** A leg banner for the same `(tripId, event,
+normalised destinationName)` is not re-sent within **30 minutes**, however many
+legs open underneath. Held on the Go-owned `go_trip_leg_banners` (migration
+**0053**) as an upsert-as-claim, so two servers racing one flap resolve to
+exactly one send.
+
+- **The key is a DIGEST**, SHA-256 over the lower-cased, whitespace-collapsed
+  name. A destination is P1 (`data-classification.md` §1.18) and this table
+  holds none; equality is the only operation the predicate needs. Normalising
+  first is what stops the rule being defeated by a space — Tesla re-sends the
+  name on every re-route and neither the casing nor the inner whitespace is
+  stable across those.
+- **`event` is part of the key**, so a departure and an arrival suppress
+  independently. They are different sentences about one journey and the second
+  reports the outcome; suppressing an arrival because a departure went out ten
+  minutes ago would delete the half worth keeping.
+- **A different destination is never suppressed.** Half an hour is short enough
+  that a genuine second departure for the same place — arrive, wait, set off
+  again — is still announced, and long enough that no realistic flap gets
+  through.
+- **Only a WINNER advances the stamp.** Twenty refused attempts in a minute do
+  not push the next legitimate banner half an hour further out.
+- **A leg with no destination name is never suppressed**: its banner says
+  nothing that could be repeated, and one shared slot for every nameless leg
+  would collapse genuinely different journeys.
+- **IT FAILS OPEN** on a store error, for the same reason.
+
+**`apns-collapse-id`** is built from **`{tripId}:{topic}` on every event**,
+including the two leg ones.
+
+It used to narrow the leg events to `{tripId}|{legId}:{topic}` so two
+consecutive legs of one trip could not merge their banners. **MYR-620 reverses
+that deliberately**: the client's screenshot is ten *"Heading to Element by
+Marriott Sedona."* lines stacked in Notification Center, and the one worth
+keeping is the newest — collapsing on the trip is what makes a later banner
+**replace** the earlier rather than pile onto it, which is what Apple's header
+exists for and the second half of *"this should be moving into dynamic island"*.
+
+**THE DEPARTURE/ARRIVAL DISTINCTION SURVIVES**, because the topic is still
+appended: `trip_leg_started` and `trip_leg_arrived` carry different ids and
+never merge. That is the distinction MYR-431 found the old truncation
+destroying, and it is the one that matters — a participant who missed a
+departure must still find the arrival. What may safely merge is two
+**departures** of one trip, which is exactly the noise being removed.
+
+**AND THE VALUE IS SHORT AGAIN.** `{tripId}|{legId}:{topic}` was ~67 bytes
+before the topic, over Apple's 64-byte cap, so every leg push was hashed to `h.`
+plus 128 bits of SHA-256. `{tripId}:{topic}` fits and is sent verbatim, so a
+leg push is as readable in a packet capture as an ordinary
+`crr_…:ride.status.changed`. The hashing path remains for any subject that does
+exceed the cap — truncation removes a discriminating tail, a digest does not.
 
 ### 7.20 Saved places (MYR-321)
 
@@ -6302,6 +6404,8 @@ An accepted **share** ([MYR-184](https://linear.app/myrobotaxi/issue/MYR-184)) b
 
 **IT FLIPS ON ITS OWN, on BOTH edges, with no user action** — the window opens and closes on the clock. A client MUST re-read the catalog on the `trip_started` / `trip_ended` pushes rather than trusting a cached row. **REST-read-time only:** no `vehicle_update` frame carries it.
 
+> **⚠ THE OWNER'S OWN ROW CARRIES IT, and until [MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) the server did not emit it there.** The catalog's trip leg answers two questions that look alike and are not: *which cars does a trip ADD to this response* (participant rows only — an owner's cars arrive through the FIRST merge leg) and *which of the cars already in it have a window open right now*. An owner's own car is in the second set and **never** in the first, and one statement served both. The consequence was not cosmetic: the iOS client registers its ActivityKit push-to-start token (§7.30.8) for the trips the **catalog** names, so the owner of the car on the trip registered no token at all and could not have received a leg card on their own trip whatever the leg detector did. A client reading this field for that purpose **must include owner rows**.
+
 ##### Kill switch `TRIPS_ENABLED`
 
 Unset is ON. `TRIPS_ENABLED=false` makes **every one of the ten routes — and the two §7.21.7 leg-token routes** — answer `503 service_unavailable`, reads included: a feature that can be switched off has to be switched off whole, and leaving `GET` alive would show an owner a live trip card whose every button returns an error. Anything `ParseBool` rejects **stops the process at boot** rather than being read as "off" — a typo that silently disabled a feature would be indistinguishable from an intentional shutdown.
@@ -6563,6 +6667,22 @@ Content-Type: application/json
 
 **THE TOKEN IS P1 AND A CAPABILITY.** Whoever holds it together with the team's APNs signing key can start a Live Activity on that phone. It is **never echoed in a response, never placed in an error message, and not logged on this path at all**. The `204` carries **no body**, which is the strongest form of *"the caller already knows what they sent"* — echoing it would only put it in every client log and proxy trace.
 
+##### ⚠ REGISTERING DURING AN OPEN LEG RAISES THE CARD IMMEDIATELY ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612))
+
+**A SERVER-SIDE BEHAVIOUR THE CLIENT MUST KNOW ABOUT, because it can produce a Live Activity out of a call that answers `204` with no body.** If the trip has an **open leg** at the moment the registration commits, the server sends **this device** that leg's push-to-start at once, before answering.
+
+**It is why anybody gets a card on a first leg at all.** The leg-open fan-out runs **once**, at the instant the leg opens, over whatever tokens are registered then — and registering is what a phone does when the `trip_leg_started` push **wakes** it, which is necessarily afterwards. In production on 2026-09-08 the only participant's token was written **three seconds** after the leg it was for opened; nothing looked again, and the trip ran an entire evening with no card for anybody.
+
+**IDEMPOTENT PER (DEVICE, LEG), STRUCTURALLY.** Both senders — the fan-out and this catch-up — claim `go_trip_activity_tokens.started_leg_id` before sending, so:
+
+- **Re-POSTing the SAME token sends nothing.** An app that registers on every foreground gets one card per leg, not one per foreground.
+- **Rotating the token DOES send again**, because the new token addresses a phone that holds no card for this leg. That is the intended behaviour and not a duplicate.
+- A new leg claims again: the stamp is per **leg**, and a trip may contain a dozen.
+
+**THE CONTENT STATE CARRIES NO `eta`**, exactly as the fan-out's does. A registration is not a telemetry frame, and the honest answer at this instant is that no arrival estimate has been computed; the next frame that earns a refresh puts a time on the card. Inventing one is forbidden by MYR-194's rule, and an absent `eta` is a first-class state the client already renders.
+
+**A REFUSED REGISTRATION RAISES NOTHING.** The catch-up is a consequence of a **stored** token: a caller who fails the membership read gets `404` and no card, which is the direction that matters — a card names the car and where it is going.
+
 #### 7.30.9 `DELETE /api/trips/{tripId}/activity-start-token` — clear it
 
 > **Anchored:** FR-9.3, NFR-3.21. Contracts **v0.41.0**. No request body, no response body. Implemented by [MYR-602](https://linear.app/myrobotaxi/issue/MYR-602).
@@ -6728,7 +6848,7 @@ See [`websocket-protocol.md`](websocket-protocol.md) §10 status legend -- same 
 |----|--------|-------|------------------|-----------------|--------|------------------------------|
 | **DV-19** | **New** | REST auth middleware | [`internal/server/server.go`](../../internal/server/server.go) wires a `requestLogger` middleware across the client mux but has NO authentication middleware for REST endpoints. The existing `/api/vehicle-status/{vin}` and `/api/fleet-config/{vin}` handlers perform their own ad-hoc validation. The SDK's REST surface needs a shared middleware that parses `Authorization: Bearer <token>`, calls the same `Authenticator` used by the WS handler, resolves the user's vehicle ownership set, and emits observability signals. | Add a `restAuthMiddleware(Authenticator)` in `internal/server/middleware.go` (or a new file) that: (1) parses the header, (2) validates via `Authenticator.ValidateToken`, (3) loads the user's vehicles via `GetUserVehicles`, (4) puts `userId` and `vehicleIDs` in the request context, (5) returns `401 auth_failed` / `401 auth_timeout` on failure with the error envelope from §4.1, (6) strips the Authorization header from the slog `http request` line. Wire this middleware in front of every `/api/...` handler except the existing Tesla-owned endpoints. | FR-6.1, FR-6.2, NFR-3.21, §3 | `MYR-XX Add REST auth middleware + error envelope to internal/server` |
 | **DV-20** | **RESOLVED** | SDK-surface REST endpoints not yet mounted on the Go server | **RESOLVED — all four Go-server-owned §7 endpoints are mounted.** `GET /api/vehicles` (§7.0) landed in MYR-91 (2026-05-10); `GET /api/vehicles/{vehicleId}/snapshot` (§7.1) and `GET /api/vehicles/{vehicleId}/drives` (§7.2) landed in MYR-133 (2026-06-03); `GET /api/drives/{driveId}/route` (§7.4) landed in PR #260 (`DriveRouteHandler`, existing routePoints column + decryption); `GET /api/drives/{driveId}` (§7.3) landed in MYR-130 (2026-07-02) via `internal/telemetry/drive_detail_handler.go` backed by `DriveRepo.GetByID`. (§7.6 `DELETE /api/users/me` was outside DV-20's scope until **MYR-355 superseded the last half of DV-23** on 2026-07-30 and mounted it on the Go server; `cmd/telemetry-server/wiring_account_deletion.go`. The §7.5 endpoints WERE outside DV-20's scope for the same reason until **MYR-184 superseded that half of DV-23** and mounted all five on the Go server; the "terminal 404" statement that stood here is no longer true for §7.5.) | (Resolved.) All handlers enforce bearer auth + ownership + role-based `internal/mask` projection at the handler layer per §5.1; the shared-enum slice (REST-only `not_found` + `invalid_request` on `ErrorPayload.code`, plus `reauth_required` on `subCode`) was completed by MYR-98 on 2026-05-15. A route-surface regression test (`cmd/telemetry-server/wiring_routes_test.go`) guards against a contract route silently losing its mount. | FR-3.3, FR-3.4, NFR-3.5, §6, §7 | (Resolved — see MYR-91 / MYR-133 / PR #260 / MYR-130.) |
-| **DV-21** | **New** | `service_unavailable` code reserved but not emitted | v1 does not emit `503 service_unavailable`. The code is reserved in this contract for forward-compat. | Server begins emitting `503 service_unavailable` during maintenance windows and graceful-shutdown states, with a `Retry-After` header. SDK error catalog already recognizes the code from day one. | NFR-3.10, §4.1.1 | `MYR-XX Emit 503 service_unavailable during graceful shutdown + maintenance` |
+| **DV-21** | **PARTIALLY RESOLVED** | `service_unavailable` code reserved but not emitted | **The "not emitted" half is no longer true.** [MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) makes every authenticated REST surface answer `503 service_unavailable` when the fail-closed user-existence probe could not be ANSWERED (§3.2.1), and the §7.30 kill switch answers it for a disabled feature. What remains open is the ORIGINAL scope: the server still does not emit `503` for maintenance windows or graceful shutdown, and emits no `Retry-After` header on any of the paths that do. The WebSocket surface is not part of this row and never will be — its analogue is close code `1013` (`websocket-protocol.md` §6.2), because `service_unavailable` is not a member of `ErrorPayload.code`. | Server begins emitting `503 service_unavailable` during maintenance windows and graceful-shutdown states, with a `Retry-After` header. SDK error catalog already recognizes the code from day one. | NFR-3.10, §4.1.1 | `MYR-XX Emit 503 service_unavailable during graceful shutdown + maintenance` |
 | **DV-22** | **New** | REST rate limit not enforced | No per-user REST rate limit is configured in [`internal/config/defaults.go`](../../internal/config/defaults.go) or wired through the server. The 120 req/min target in §4.1.2 is a PLANNED default, not an enforced value. | Add `WebSocketConfig.RestRateLimitPerMinutePerUser` (default 120) in `internal/config/defaults.go`. Implement a token-bucket rate limiter in the REST middleware keyed by `userId`. Breach returns `429 rate_limited` with a `Retry-After` header. Independent of `MaxConnectionsPerUser` (which governs concurrent WS sessions, not REST rps). | NFR-3.6, §4.1.2 | `MYR-XX Implement per-user REST rate limit (120 req/min default)` |
 | **DV-23** | **SUPERSEDED (in full)** | Invite endpoints + `DELETE /api/users/me` handler location | Resolved 2026-05-08 (MYR-69) in favour of **Option 2**: the Next.js app owns `DELETE /api/users/me` and the §7.5 invite endpoints, against its Prisma-owned email-keyed `Invite` table, with the public API hostname proxying invite paths to it. | **SUPERSEDED 2026-07-29 (MYR-184) for the §7.5 half.** The premise expired: `react-frontend` is **deprecated**, so "serve it from the Next.js app" no longer names a running process, and the Prisma `Invite` table is **retired unused** — no invite row was ever written against it. Sharing is now **Go-owned end to end**: table `go_vehicle_shares` (migration 0020, no FKs to the sibling schema per CG-DL-9), five endpoints on the Go telemetry server (§7.5.1–§7.5.5), and the MYR-91 viewer merge that makes the `viewer` role real. The contract shape changed with it — **codes, not emails** (there is no email infrastructure and riders are Apple-native), so `email` / `senderId` / `sentDate` / `isOnline` are gone and `label` / `permission` / `code` / `expiresAt` take their place, per contracts v0.19.0 `vehicle-sharing.schema.json`. **The §7.6 half was SUPERSEDED in turn on 2026-07-30 by MYR-355**, for the same expired premise plus a second one: account deletion is an App Store review requirement for the native iOS client, and that client never reaches the Next.js app. Most of what a deletion must remove now lives in Go-owned tables (`go_ride_requests`, `go_vehicle_shares`, `go_push_devices`, `go_refresh_tokens`, `go_users`, `go_identity_apple`) that no Prisma cascade reaches, so the `$transaction` DV-23 assumed was the deletion is now only its last step. `DELETE /api/users/me` is served by the Go telemetry server, answers `204`, and is re-runnable rather than atomic (§7.6). **DV-23 is therefore superseded in full**; the only `/users/me` path still on the Next.js app is §7.7 export. Implementation follow-ups MYR-70 (Next.js invite handler) and MYR-73 (edge routing for invite paths) are **obsolete**; MYR-71 / MYR-72 are **obsolete for the deletion handler**. | FR-5.1, FR-5.2, FR-5.3, FR-10.1, FR-10.2, NFR-3.29, §7.5, §7.6 | (§7.5 superseded — see MYR-184. §7.6 superseded — see MYR-355.) |
 | **DV-24** | **RESOLVED** | Contracts v0.39.0 asserted §7.23 answers `404` on an ownership mismatch; it answers `403` | `vehicle-setup-completion.schema.json`'s `$defs.AcknowledgeOwnerApprovalRequest` description says the §7.29 ownership check is *"the SAME ownership check as §7.23 complete-setup, with the SAME answer when it fails: 404 `not_found`, never 403"*. **The check is the same; the answer is not.** §7.23 answers `403 vehicle_not_owned` on a real mismatch (its own error table, MYR-505) and `404 not_found` only for an unknown or invisible vehicle, matching §7.12 / §7.14 / §7.15. §7.29 collapses both arms to `404` **by design** — it records a consent about somebody else's property and must not be usable as an existence oracle — so it does not inherit that behaviour from §7.23, which does not have it. The schema sentence is the incorrect half. | **RESOLVED 2026-09-05 in contracts v0.40.0**, and resolved the way the row proposed: the schema sentence now says this endpoint answers `404` for BOTH arms *"so it cannot be used to probe which vehicleIds exist"*, states that §7.23 **does** distinguish them (`403 vehicle_not_owned` on a real mismatch, `404` only for a vehicle that does not exist or is ownership-filtered), records that the v0.39.0 text asserting otherwise was wrong, and adds *"a client MUST NOT treat the two endpoints' ownership failures as interchangeable"*. The v0.40.0 schemas are vendored here. **NO SERVER CHANGE WAS MADE OR NEEDED** — the divergence was always the sentence, not the code — and §7.23's `403` and §7.29's `404` both stand exactly as they were. | NFR-3.21, §4.1.1, §7.23, §7.29, MYR-599 | (Resolved in contracts v0.40.0 — no issue needed.) |

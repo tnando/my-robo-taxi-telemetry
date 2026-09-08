@@ -2,7 +2,6 @@ package push
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 )
@@ -111,93 +110,6 @@ func (t *TripActivityNotifier) allowed(ctx context.Context, userID, legID string
 		slog.String("leg_id", legID),
 	)
 	return false
-}
-
-// StartLeg push-to-starts one leg's card on every registered phone.
-//
-// Reports how many cards it asked Apple to create. Zero is an ordinary result —
-// a trip whose participants are all on the web, or one nobody has opened on an
-// iPhone — and is never an error: the leg's pushes still go out through the
-// ordinary notifier, which is what the "a leg that never got a token
-// registration still gets its pushes" rule means.
-func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) int {
-	if !t.active() {
-		t.logger.Debug("trip activity start skipped",
-			slog.String("leg_id", tc.LegID),
-			slog.Bool("push_enabled", t.cfg.Enabled),
-			slog.Bool("apns_configured", t.sender != nil),
-		)
-		return 0
-	}
-
-	tokens, err := t.store.PushToStartTokensForTrip(ctx, tc.TripID)
-	if err != nil {
-		t.logger.Error("trip activity: push-to-start registry lookup failed",
-			slog.String("trip_id", tc.TripID),
-			slog.String("error", err.Error()),
-		)
-		return 0
-	}
-	if len(tokens) == 0 {
-		return 0
-	}
-
-	now := t.now()
-	state := tripContentState(tc, now)
-	// The LEG is REQUIRED in the attributes: without it the created card has no
-	// anchor to register its own update token against and can never be updated
-	// or ended — and the iOS struct declares it non-optional, so a payload
-	// missing it fails the decode and raises no card at all.
-	start := &TripActivityStart{
-		TripID:      tc.TripID,
-		LegID:       tc.LegID,
-		VehicleID:   tc.VehicleID,
-		VehicleName: tc.VehicleName,
-	}
-
-	var started int
-	for _, tok := range tokens {
-		if !t.allowed(ctx, tok.UserID, tc.LegID) {
-			continue
-		}
-		err := t.sender.SendActivity(ctx, ActivityNotification{
-			ActivityToken: tok.Token,
-			Sandbox:       tok.Sandbox,
-			Event:         ActivityEventStart,
-			ContentState:  state,
-			Timestamp:     now,
-			Start:         start,
-			// No Alert. The card APPEARING is the announcement, and the
-			// `trip_leg_started` banner is already on its way; a third
-			// interruption for one fact is what MYR-413 exists to stop.
-		})
-		switch {
-		case err == nil:
-			started++
-		case errors.Is(err, ErrUnregistered):
-			// THE APP is gone, not a card — this token addresses an
-			// installation. The row goes from go_trip_activity_tokens, which is
-			// a DIFFERENT table from the one dropActivity touches; see the
-			// store file's header for why pointing the ride path at this
-			// verdict would delete nothing and retry forever.
-			t.dropPushToStartToken(ctx, tok.Token)
-		default:
-			t.logger.Warn("trip activity: push-to-start failed",
-				slog.String("leg_id", tc.LegID),
-				slog.String("push_to_start_token_prefix", tokenPrefix(tok.Token)),
-				slog.String("error", err.Error()),
-			)
-		}
-	}
-
-	t.logger.Info("trip activity started",
-		slog.String("trip_id", tc.TripID),
-		slog.String("leg_id", tc.LegID),
-		slog.Int("tokens", len(tokens)),
-		slog.Int("started", started),
-		slog.Bool("has_eta", state.ETA != nil),
-	)
-	return started
 }
 
 // UpdateLeg replaces the content-state on every card already running for a leg.

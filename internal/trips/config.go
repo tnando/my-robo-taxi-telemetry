@@ -47,10 +47,77 @@ type Config struct {
 	StillnessMeters     float64
 	MaxStillnessGap     time.Duration
 
-	// Timeout bounds every store call the sweeper or the detector makes, so
-	// neither a stalled claim nor a stalled candidate read can wedge the frame
-	// path or hold a pass past its own interval.
+	// LegClearGrace is how long a car may report an EMPTY destination name,
+	// while still driving and still reporting an arrival estimate, before the
+	// detector believes the route was actually cancelled (MYR-612).
+	//
+	// Zero is not a legitimate value here and withDefaults replaces it: a zero
+	// grace is the pre-MYR-612 behaviour, which closed a leg on one delta that
+	// happened to carry an empty name and re-opened it two seconds later.
+	LegClearGrace time.Duration
+
+	// LegMergeWindow is how soon after a leg closed WITHOUT ARRIVING the same
+	// car may resume it, rather than start a second one, when it sets off again
+	// for the same place.
+	//
+	// It is the second line of defence behind LegClearGrace, for the closes
+	// that debouncing cannot prevent — a process restart between the two
+	// frames, two servers during a rolling deploy, a grace that expired one
+	// frame before the name came back. What it buys is that the journey stays
+	// ONE leg: one `trip_leg_started` banner, one card, one row in the trip's
+	// history.
+	LegMergeWindow time.Duration
+
+	// LegBannerWindow is how long a leg banner about ONE trip going to ONE
+	// place silences its own repeat (MYR-620).
+	//
+	// ⚠ IT IS NOT A CLAIM ON A LEG, and that is the whole point. Every one of
+	// the ten "Tesla is on the move — Heading to Element by Marriott Sedona."
+	// banners on the client's 2026-09-08 lock screen was a correctly-claimed,
+	// once-per-leg push; the LEG flapped, and `started_notified_at` is a stamp
+	// on a ROW that each reopen replaced. The debounce and the resume make that
+	// flap far rarer, and this makes the banner bounded whatever the detector
+	// does — which is the property the person holding the phone cares about.
+	LegBannerWindow time.Duration
+
+	// LegReadTTL is how long the detector serves a car's open-leg answer from
+	// memory before re-reading it (MYR-612).
+	//
+	// It exists because that read was the last per-frame statement on the bus
+	// goroutine, and the fact it reads changes at most twice per journey. The
+	// cost of the cache is a few seconds of latency on a leg edge, against a
+	// twenty-second arrival dwell and a twenty-second card floor; the cost of
+	// NOT having it was a sustained query per second per car in an open window,
+	// which is how one road trip starved the pool an unrelated JWT existence
+	// probe then timed out against.
+	LegReadTTL time.Duration
+
+	// Timeout bounds every store call the SWEEPER makes, so a stalled claim
+	// cannot hold a pass past its own interval.
+	//
+	// The frame path does not use it — see FrameTimeout.
 	Timeout time.Duration
+
+	// FrameTimeout bounds ONE FRAME's whole journey through the detector, and
+	// it is the only deadline the per-frame path has (MYR-612 review).
+	//
+	// ⚠ ONE PLACE, AT THE CHOKEPOINT, because the property that matters is
+	// about the BUS GOROUTINE and not about any one statement: every frame is
+	// handled on the single goroutine the event bus delivers on, so anything
+	// that blocks in here blocks every other subscriber of every other car.
+	// The budget used to be applied at each store call instead — six of them —
+	// and the seventh, the VIN→vehicle resolution, had no budget at all: on a
+	// cache miss it was an unbounded query on that goroutine, which is exactly
+	// the shape the architecture doc claims cannot exist. A wrapper per call
+	// site is a rule the next call site can forget; a wrapper at the entrance
+	// is a rule it cannot.
+	//
+	// Sized for the most expensive legitimate frame — a candidate refresh, a
+	// VIN resolution, an open-leg read AND a leg edge with its APNs pushes —
+	// because a frame carrying an edge is the one frame that must not be cut
+	// short. It is a CEILING on damage, not a target: an ordinary frame
+	// touches nothing at all.
+	FrameTimeout time.Duration
 
 	// EdgeTimeout bounds ONE claimed trip's post-claim work in a sweeper pass
 	// — its audience read, its open legs' endings, its card pushes and its
@@ -67,109 +134,4 @@ type Config struct {
 	// longer than any one query, and that must still not be able to hold the
 	// single-flight latch shut across a whole sweeper tick.
 	RevalidateTimeout time.Duration
-}
-
-const (
-	defaultSweepInterval  = 60 * time.Second
-	defaultSweepLimit     = 200
-	defaultCandidateTTL   = 15 * time.Second
-	defaultCandidateLimit = 200
-
-	// The arrival thresholds, copied from internal/arrival's defaults with
-	// their reasoning intact:
-	//
-	//   80 m   about a city block's kerb frontage — absorbs a consumer GPS fix
-	//          and the honest gap between a pin and where a car can stop.
-	//   20 s   continuous stillness, the whole defence against a car that
-	//          merely PASSES the destination: stopped at the lights outside it,
-	//          queued behind a bus, waiting to turn.
-	//   1 mph  not zero, because a stationary car's GPS-derived speed jitters
-	//          around zero and demanding an exact 0.0 would restart the dwell
-	//          at random.
-	//   15 m   how far two consecutive fixes may be apart and still count as
-	//          the car not having moved, when the frames report neither speed
-	//          nor gear (the MYR-563 positional rung).
-	//   90 s   the longest interval positional stillness may be inferred
-	//          across; past it two identical fixes prove nothing.
-	defaultArrivalRadiusMeters = 80.0
-	defaultDwell               = 20 * time.Second
-	defaultStoppedSpeedMPH     = 1.0
-	defaultStillnessMeters     = 15.0
-	defaultMaxStillnessGap     = 90 * time.Second
-
-	defaultTimeout = 5 * time.Second
-
-	// One trip's whole closing or opening edge, pushes included. Twenty
-	// seconds is three times the budget its longest single statement gets and
-	// a third of the interval, so a stalled edge is abandoned well before the
-	// next pass and the 199 trips behind it still get theirs.
-	defaultEdgeTimeout = 20 * time.Second
-
-	// A whole sweep, not a statement — see Config.RevalidateTimeout. Half the
-	// 60-second sweeper interval, so a pass that hangs is abandoned before the
-	// next tick's edges arrive rather than making them queue behind it.
-	defaultRevalidateTimeout = 30 * time.Second
-)
-
-// DefaultConfig returns the production settings with the feature ON.
-func DefaultConfig() Config {
-	return Config{
-		Enabled:             true,
-		SweepInterval:       defaultSweepInterval,
-		SweepLimit:          defaultSweepLimit,
-		CandidateTTL:        defaultCandidateTTL,
-		CandidateLimit:      defaultCandidateLimit,
-		ArrivalRadiusMeters: defaultArrivalRadiusMeters,
-		Dwell:               defaultDwell,
-		StoppedSpeedMPH:     defaultStoppedSpeedMPH,
-		StillnessMeters:     defaultStillnessMeters,
-		MaxStillnessGap:     defaultMaxStillnessGap,
-		Timeout:             defaultTimeout,
-		EdgeTimeout:         defaultEdgeTimeout,
-		RevalidateTimeout:   defaultRevalidateTimeout,
-	}
-}
-
-// withDefaults replaces zero-valued knobs with their defaults.
-//
-// Dwell is the one field where zero is a LEGITIMATE value — tests use it to
-// fire on the first qualifying frame — so it is left alone, exactly as
-// arrival.Config does for the same field and for the same reason. Every other
-// zero would be a misconfiguration rather than a choice.
-func (c Config) withDefaults() Config {
-	d := DefaultConfig()
-	if c.SweepInterval <= 0 {
-		c.SweepInterval = d.SweepInterval
-	}
-	if c.SweepLimit <= 0 {
-		c.SweepLimit = d.SweepLimit
-	}
-	if c.CandidateTTL <= 0 {
-		c.CandidateTTL = d.CandidateTTL
-	}
-	if c.CandidateLimit <= 0 {
-		c.CandidateLimit = d.CandidateLimit
-	}
-	if c.ArrivalRadiusMeters <= 0 {
-		c.ArrivalRadiusMeters = d.ArrivalRadiusMeters
-	}
-	if c.StoppedSpeedMPH <= 0 {
-		c.StoppedSpeedMPH = d.StoppedSpeedMPH
-	}
-	if c.StillnessMeters <= 0 {
-		c.StillnessMeters = d.StillnessMeters
-	}
-	if c.MaxStillnessGap <= 0 {
-		c.MaxStillnessGap = d.MaxStillnessGap
-	}
-	if c.EdgeTimeout <= 0 {
-		c.EdgeTimeout = d.EdgeTimeout
-	}
-	if c.RevalidateTimeout <= 0 {
-		c.RevalidateTimeout = d.RevalidateTimeout
-	}
-	if c.Timeout <= 0 {
-		c.Timeout = d.Timeout
-	}
-	return c
 }

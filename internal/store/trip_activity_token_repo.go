@@ -64,44 +64,6 @@ const queryDeleteTripActivityTokenByValue = `
 DELETE FROM go_trip_activity_tokens
 WHERE push_to_start_token = $1`
 
-// queryTripActivityTokens lists a trip's registrations — the push-to-start
-// fan-out for one leg.
-//
-// IT RE-JOINS THE MEMBERSHIP AND THE SHARE, and that is an access predicate
-// rather than tidiness. A registration is a standing CAPABILITY on a phone: the
-// row survives a participant leaving the trip and survives the owner suspending
-// their share, because nothing in either path deletes it. Listed unconditionally
-// by trip id, the next leg would push a Live Activity naming the car and its
-// destination to somebody whose access ended — the precise thing "trip access
-// cannot outlive the share" promises cannot happen. So the fan-out asks the
-// same question every other trips surface asks, with the same two predicates
-// (`left_at IS NULL`, `status = 'accepted' AND suspended_at IS NULL`) that
-// queryTripAudience and auth.queryActiveTripParticipation carry.
-//
-// THE OWNER IS ADMITTED UNCONDITIONALLY. They hold no share on their own car —
-// there is no grant to check — and they are on the leg card by explicit product
-// decision.
-// #nosec G101 -- column/predicate SQL over the push-to-start registry, not a
-// credential literal (gosec greps the identifier 'token' in a string).
-const queryTripActivityTokens = `
-SELECT tok.trip_id, tok.user_id, tok.push_to_start_token, tok.sandbox
-FROM go_trip_activity_tokens tok
-JOIN go_trips t ON t.id = tok.trip_id
-WHERE tok.trip_id = $1
-  AND (
-        tok.user_id = t.owner_user_id
-     OR EXISTS (
-            SELECT 1
-            FROM go_trip_participants p
-            JOIN go_vehicle_shares s
-              ON s.vehicle_id = t.vehicle_id
-             AND s.accepted_by_user_id = p.user_id
-             AND s.status = 'accepted'
-             AND s.suspended_at IS NULL
-            WHERE p.trip_id = t.id AND p.user_id = tok.user_id AND p.left_at IS NULL
-        )
-  )`
-
 // TripActivityTokenRepo is the go_trip_activity_tokens repository.
 type TripActivityTokenRepo struct {
 	pool   *pgxpool.Pool
@@ -130,29 +92,4 @@ func (r *TripActivityTokenRepo) DeleteRejectedPushToStartToken(ctx context.Conte
 		return fmt.Errorf("store.DeleteRejectedPushToStartToken: %w", err)
 	}
 	return nil
-}
-
-// PushToStartTokensForTrip lists the trip's registrations. An empty result is
-// the ordinary case — a trip whose participants are all on the web, or one
-// nobody has opened yet — and the leg detector treats it as "no cards to
-// raise", never as a failure.
-func (r *TripActivityTokenRepo) PushToStartTokensForTrip(ctx context.Context, tripID string) ([]TripActivityToken, error) {
-	rows, err := r.pool.Query(ctx, queryTripActivityTokens, tripID)
-	if err != nil {
-		return nil, fmt.Errorf("store.PushToStartTokensForTrip(trip=%s): %w", tripID, err)
-	}
-	defer rows.Close()
-
-	var out []TripActivityToken
-	for rows.Next() {
-		var tok TripActivityToken
-		if err := rows.Scan(&tok.TripID, &tok.UserID, &tok.PushToStartToken, &tok.Sandbox); err != nil {
-			return nil, fmt.Errorf("store.PushToStartTokensForTrip(trip=%s): scan: %w", tripID, err)
-		}
-		out = append(out, tok)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store.PushToStartTokensForTrip(trip=%s): iterate: %w", tripID, err)
-	}
-	return out, nil
 }

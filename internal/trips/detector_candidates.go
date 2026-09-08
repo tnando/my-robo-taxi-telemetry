@@ -69,10 +69,9 @@ func (c *legCandidates) ensure(ctx context.Context, now time.Time) (map[string]T
 		return c.byVehicle, false
 	}
 
-	readCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
-	defer cancel()
-
-	rows, err := c.store.ActiveTripVehicles(readCtx, c.cfg.CandidateLimit)
+	// NO DEADLINE OF ITS OWN: the frame that reached here already carries one,
+	// set once at Detector.handleFrame — see the note there.
+	rows, err := c.store.ActiveTripVehicles(ctx, c.cfg.CandidateLimit)
 	c.attemptedAt = now
 	if err != nil {
 		return c.serveStale(now, err), false

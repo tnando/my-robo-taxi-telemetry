@@ -2,10 +2,9 @@ package trips
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/myrobotaxi/telemetry/internal/push"
 )
 
 // The leg lifecycle: what HAPPENS when a leg opens and closes, as against what
@@ -31,7 +30,7 @@ func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination strin
 	if !s.windowStillOpen(ctx, tv) {
 		return
 	}
-	leg, err := s.legs.StartLeg(ctx, tv.TripID, tv.VehicleID, destination, at)
+	leg, resumed, err := s.startOrResumeLeg(ctx, tv, destination, at)
 	if err != nil {
 		s.logger.Error("trips: opening a leg failed",
 			slog.String("trip_id", tv.TripID),
@@ -51,10 +50,17 @@ func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination strin
 		return
 	}
 
+	// BOTH PATHS RUN THE SAME TWO DELIVERIES, and that is what makes a resume
+	// safe rather than a special case. Each is CLAIMED first, so a resumed leg
+	// re-sends only what its ending actually undid: the start banner's stamp
+	// survives a resume and the banner is not repeated, while a card that was
+	// ENDED had its push-to-start claim released and is raised again — which is
+	// exactly right, because that card is gone from the lock screen.
 	s.announceLegStarted(ctx, leg, audience)
 	s.startLegActivity(ctx, leg, audience)
 
 	s.logger.Info("trip leg opened",
+		slog.Bool("resumed", resumed),
 		slog.String("trip_id", leg.TripID),
 		slog.String("leg_id", leg.ID),
 		slog.String("vehicle_id", leg.VehicleID),
@@ -64,6 +70,50 @@ func (s *Service) openLeg(ctx context.Context, tv TripVehicle, destination strin
 		slog.Bool("has_destination", leg.DestinationName != ""),
 		slog.Int("audience", len(audience.everyone())),
 	)
+}
+
+// startOrResumeLeg gets the leg this journey belongs to.
+//
+// IT ASKS "IS THIS THE SAME JOURNEY?" BEFORE IT ASKS FOR A NEW ONE (MYR-612).
+// A car that has just closed a leg WITHOUT ARRIVING and is now setting off
+// again, within LegMergeWindow, for the SAME destination has not started a
+// second journey — it has had one interrupted by something the detector could
+// not see: a restart between two frames, two servers during a rolling deploy, a
+// destination-clear debounce that expired one frame before the name came back.
+// Inserting a second row for it produces a second `trip_leg_started` banner, a
+// second card, and a trip history claiming the car drove to one hotel twice.
+//
+// THE PROBE IS SCOPED TO THIS TRIP (MYR-612 review). The merge window is a
+// couple of minutes and a car very often begins its next trip inside one — the
+// owner ends a road trip on the drive and starts the next before setting off
+// again, to the same place, on the same car. A cross-trip resume attaches the
+// row to the trip it already belonged to while every delivery addresses THIS
+// trip's audience: a card for the wrong people, no leg at all in the right
+// trip's history, and nothing this trip's detector could ever close.
+//
+// A RESUME FAILURE IS NOT FATAL and is deliberately swallowed into the ordinary
+// path: the repair is an improvement on inserting a row, never a precondition
+// for it, and a leg that opens as a second row is a cosmetic fault where a leg
+// that never opens is a silent one.
+func (s *Service) startOrResumeLeg(
+	ctx context.Context, tv TripVehicle, destination string, at time.Time,
+) (Leg, bool, error) {
+	notBefore := at.Add(-s.cfg.LegMergeWindow)
+	leg, resumed, err := s.legs.ResumeRecentLeg(ctx, tv.TripID, tv.VehicleID, destination, notBefore)
+	switch {
+	case err != nil:
+		s.logger.Warn("trips: leg resume probe failed; opening a new leg",
+			slog.String("vehicle_id", tv.VehicleID),
+			slog.String("error", err.Error()))
+	case resumed:
+		return leg, true, nil
+	}
+
+	leg, err = s.legs.StartLeg(ctx, tv.TripID, tv.VehicleID, destination, at)
+	if err != nil {
+		return Leg{}, false, fmt.Errorf("trips.startOrResumeLeg(trip=%s): %w", tv.TripID, err)
+	}
+	return leg, false, nil
 }
 
 // windowStillOpen re-asks the database whether this car is inside THIS trip's
@@ -113,56 +163,6 @@ func (s *Service) windowStillOpen(ctx context.Context, tv TripVehicle) bool {
 	return false
 }
 
-// announceLegStarted fires `trip_leg_started` once per leg.
-//
-// TO EVERYONE, owner included — unlike the three lifecycle pushes, which go to
-// participants only. The owner is on the leg card by explicit product decision,
-// and a card with no banner behind it would make the driving party the one
-// person in the feature who is never told anything.
-func (s *Service) announceLegStarted(ctx context.Context, leg Leg, audience TripAudience) {
-	claimed, err := s.legs.ClaimLegStartedPush(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg-start push claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.notify(ctx, push.TripPush{
-		TripID:          leg.TripID,
-		VehicleID:       leg.VehicleID,
-		Event:           push.TripEventLegStarted,
-		LegID:           leg.ID,
-		DestinationName: leg.DestinationName,
-		UserIDs:         audience.everyone(),
-	})
-}
-
-// startLegActivity push-to-starts the card on every registered phone.
-//
-// A LEG WITH NO REGISTRATIONS IS NOT A FAILURE and is not retried: the claim is
-// taken whatever the fan-out finds. That is the "a leg that never got a token
-// registration still gets its pushes" rule from the other side — the banner has
-// already gone out, and re-attempting a push-to-start every frame for a trip
-// whose participants are all on the web would be an unbounded loop over an
-// empty set.
-func (s *Service) startLegActivity(ctx context.Context, leg Leg, audience TripAudience) {
-	if s.activities == nil {
-		return
-	}
-	claimed, err := s.legs.ClaimLegActivityStart(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg activity-start claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.activities.StartLeg(ctx, s.legContext(ctx, leg, audience, tripStatusEnroute, nil))
-}
-
 // closeLeg ends a leg: records the verdict, fires `trip_leg_arrived` when there
 // was evidence, and ends the card.
 //
@@ -175,12 +175,15 @@ func (s *Service) startLegActivity(ctx context.Context, leg Leg, audience TripAu
 // else, its route was cleared, or the window closed underneath it — and they
 // are deliberately not distinguished. What the surfaces need to know is whether
 // the car REACHED the place it said it was going, and all three answers are no.
-func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, arrived bool) {
+//
+// IT REPORTS WHETHER THE ROW ACTUALLY CLOSED, because the detector's per-car
+// memory of this ending must not be written until it did — see closeLegNow.
+func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, arrived bool) bool {
 	at := s.now()
 	if err := s.legs.EndLeg(ctx, leg.ID, at, arrived); err != nil {
 		s.logger.Error("trips: closing a leg failed; its card may be stranded",
 			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
+		return false
 	}
 
 	status := tripStatusCompleted
@@ -199,74 +202,7 @@ func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, 
 		slog.String("status", status),
 		slog.Duration("duration", at.Sub(leg.StartedAt)),
 	)
-}
-
-// endLegActivity delivers the alerting update and the `end`.
-func (s *Service) endLegActivity(ctx context.Context, leg Leg, audience TripAudience, status string, at time.Time) {
-	if s.activities == nil {
-		return
-	}
-	claimed, err := s.legs.ClaimLegActivityEnd(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg activity-end claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.activities.EndLeg(ctx, s.legContext(ctx, leg, audience, status, &at))
-}
-
-// announceLegArrived fires `trip_leg_arrived`, ONLY on evidence.
-func (s *Service) announceLegArrived(ctx context.Context, leg Leg, audience TripAudience) {
-	claimed, err := s.legs.ClaimLegArrivedPush(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg-arrival push claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.notify(ctx, push.TripPush{
-		TripID:          leg.TripID,
-		VehicleID:       leg.VehicleID,
-		Event:           push.TripEventLegArrived,
-		LegID:           leg.ID,
-		DestinationName: leg.DestinationName,
-		UserIDs:         audience.everyone(),
-	})
-}
-
-// legContext assembles the card's content-state inputs.
-//
-// The ETA is NOT carried here and is nil on every call. The card gets its
-// arrival time from the ticker path (updateLeg), which reads it from the frame
-// that prompted the update; a start or an end is triggered by a TRANSITION, and
-// the honest answer at either instant is that we have not computed one — an
-// absent `eta` renders a card with no time rather than one with a wrong time,
-// which is MYR-194's rule about never inventing a number.
-func (s *Service) legContext(
-	ctx context.Context,
-	leg Leg,
-	audience TripAudience,
-	status string,
-	asOf *time.Time,
-) push.TripLegContext {
-	tc := push.TripLegContext{
-		LegID:       leg.ID,
-		TripID:      leg.TripID,
-		VehicleID:   leg.VehicleID,
-		TripName:    s.tripName(ctx, leg.TripID),
-		VehicleName: s.vehicleName(ctx, audience.VehicleID),
-		Destination: leg.DestinationName,
-		Status:      status,
-	}
-	if asOf != nil {
-		tc.AsOf = *asOf
-	}
-	return tc
+	return true
 }
 
 // The three status values a leg's card carries. Mirrors the unexported

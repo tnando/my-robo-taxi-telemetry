@@ -129,7 +129,8 @@ func (h *TripHandler) begin(w http.ResponseWriter, r *http.Request) (context.Con
 	userID, err := h.auth.ValidateToken(ctx, token)
 	if err != nil {
 		h.logger.Warn("trips: invalid token", slog.String("error", err.Error()))
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := wserrors.AuthFailure(err)
+		h.writeError(w, status, code, message)
 		return nil, "", false
 	}
 	return ctx, userID, true

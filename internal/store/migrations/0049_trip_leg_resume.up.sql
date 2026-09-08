@@ -1,0 +1,46 @@
+-- MYR-612: resuming a leg that was closed by a transient destination clear.
+--
+-- ── WHAT HAPPENED ───────────────────────────────────────────────────────────
+--
+-- Tesla streams DELTAS. On 2026-09-08 a car four minutes into a leg to a hotel
+-- in Sedona sent a frame whose destination name was present-but-EMPTY while its
+-- `minutesToArrival` still read 98 and the dash still showed the place. The leg
+-- detector read that as "the driver cancelled navigation", closed leg A at
+-- 03:40:22, and opened leg B for the same journey at 03:40:24 — two rows, two
+-- `trip_leg_started` banners, two push-to-start fan-outs, and any Live Activity
+-- raised for leg A ended as `completed` on a lock screen while the car drove on.
+--
+-- The primary fix is a DEBOUNCE in internal/trips (Config.LegClearGrace): an
+-- empty name while the car is still driving and still reporting an estimate no
+-- longer closes anything. This index serves the SECOND line of defence, for the
+-- closes debouncing cannot prevent — a restart between the two frames, two
+-- servers during a rolling deploy, a grace that expired one frame early. The
+-- detector looks for the leg this car just closed WITHOUT ARRIVING, and if the
+-- destination matches it RESUMES that row rather than inserting another.
+--
+-- ── THE INDEX ───────────────────────────────────────────────────────────────
+--
+-- The lookup is "the most recently ended leg of THIS TRIP for this car, if it
+-- ended in the last couple of minutes". The two existing leg indexes are both
+-- partial on `ended_at IS NULL` (the OPEN leg) and answer nothing about closed
+-- ones, so without this the probe is a sequential scan of every leg ever
+-- recorded, on the leg-open edge. Partial in the complementary direction —
+-- closed legs only — so it stays small and never has to hold the row every
+-- other leg query is about.
+--
+-- `trip_id` LEADS because it is the resume probe's first predicate and not
+-- merely a filter: the merge window is a couple of minutes and a car very often
+-- starts its next trip inside one, so a leg may only ever be resumed into the
+-- trip it already belongs to. Resuming across trips attaches the row to the old
+-- trip while the fan-out addresses the new one's audience — a card for the
+-- wrong people, an empty history for the right ones, and no open leg the new
+-- trip's detector could ever close.
+--
+-- CG-DL-9: go_trip_legs is Go-owned; no Prisma-owned relation is named here.
+--
+-- P0 throughout: this migration adds no column and therefore no new data. It
+-- indexes an opaque cuid and an instant that already exist.
+
+CREATE INDEX IF NOT EXISTS idx_go_trip_legs_trip_vehicle_ended
+    ON go_trip_legs (trip_id, vehicle_id, ended_at DESC)
+    WHERE ended_at IS NOT NULL;

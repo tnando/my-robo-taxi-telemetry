@@ -163,6 +163,17 @@ func (n *Notifier) WithRequesterNames(r RequesterNamer) *Notifier {
 	return n
 }
 
+// WithTripActivityPresence wires the push-to-start registry so a leg banner can
+// stand down for a phone that is getting the leg's card instead (MYR-620).
+//
+// Optional, on the same wither precedent and with the same fail-open meaning:
+// never calling it leaves the pre-MYR-620 behaviour, where every recipient gets
+// both the card and the banner.
+func (n *Notifier) WithTripActivityPresence(s TripActivityPresenceStore) *Notifier {
+	n.stores.tripActivities = s
+	return n
+}
+
 // active reports whether a send would actually reach Apple.
 func (n *Notifier) active() bool { return n.cfg.Enabled && n.sender != nil }
 

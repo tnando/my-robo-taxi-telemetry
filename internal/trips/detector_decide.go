@@ -2,7 +2,9 @@ package trips
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"time"
 )
 
 // THE EDGES one frame produced, and what each of them does.
@@ -27,19 +29,15 @@ import (
 func (d *Detector) decide(
 	ctx context.Context, tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string,
 ) {
-	leg, err := d.svc.legs.OpenLegForVehicle(ctx, tv.VehicleID)
+	leg, err := d.openLegFor(ctx, state, tv.VehicleID, f.at)
 	if err != nil {
 		d.logger.Warn("trips: open-leg lookup failed",
 			slog.String("vehicle_id", tv.VehicleID), slog.String("error", err.Error()))
 		return
 	}
 
-	underway := state.driving && state.destination != ""
 	if !leg.Open() {
-		state.endLeg()
-		if underway && (!drivingBefore || destBefore == "") {
-			d.svc.openLeg(ctx, tv, state.destination, f.at)
-		}
+		d.decideIdle(ctx, tv, state, f, drivingBefore, destBefore)
 		return
 	}
 	// The per-leg fields (the arrival latch, the dwell, the card throttle)
@@ -48,15 +46,61 @@ func (d *Detector) decide(
 	// vehicleState.beginLeg.
 	state.beginLeg(leg.ID)
 
-	// A leg IS open. Three things can close it, and they are checked in the
-	// order of how much they assert.
-	audience, audErr := d.svc.trips.TripAudienceFor(ctx, tv.TripID)
-	if audErr != nil {
-		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
-			slog.String("leg_id", leg.ID), slog.String("error", audErr.Error()))
+	if d.settleLeg(ctx, tv, state, leg, f) {
 		return
 	}
 
+	// Still under way. Refresh the card only when this frame's arrival estimate
+	// has earned a push — see vehicleState.dueForCard.
+	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
+		d.svc.updateLeg(ctx, leg, f, minutes)
+	}
+}
+
+// decideIdle is the half of the decision that runs with NO leg open: the car is
+// between journeys, and the only edge available is the one that starts one.
+func (d *Detector) decideIdle(
+	ctx context.Context, tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string,
+) {
+	state.endLeg()
+	// A PENDING CLEAR WITH NO OPEN LEG IS ALREADY SETTLED (MYR-612).
+	//
+	// The debounce exists to protect an OPEN leg from one delta that happened
+	// to omit the destination name; with no leg open there is nothing to
+	// protect and nothing left to confirm it either — settleLeg is the only
+	// place that calls confirmClear, and it is unreachable from here. Left
+	// pending, `destination` keeps naming a place the driver cancelled while
+	// parked, and the next time the car pulls out it reads as "driving with a
+	// destination" although no route is set: a PHANTOM leg, with a banner and a
+	// card, for a journey nobody planned.
+	if state.clearPending() {
+		state.confirmClear()
+		return
+	}
+	if state.driving && state.destination != "" && (!drivingBefore || destBefore == "") {
+		d.svc.openLeg(ctx, tv, state.destination, f.at)
+		state.forgetLegRead()
+	}
+}
+
+// settleLeg asks the three closing questions of an OPEN leg and reports whether
+// this frame settled its fate — closed it, or deliberately held it.
+//
+// ⚠ THE AUDIENCE IS NO LONGER READ ON EVERY FRAME (MYR-612). It used to be
+// fetched before these checks, on EVERY FRAME of every car inside an open
+// window — up to one query per second per car, on the single bus goroutine,
+// with no timeout of its own — and it is used by exactly one outcome in several
+// hundred: a leg EDGE. Together with the open-leg read next to it that was two
+// unbounded statements per frame; one car on one road trip held two pool
+// connections busy for four minutes, which is how a JWT existence probe on an
+// unrelated request came to time out and answer 401 (see
+// internal/auth/user_existence_cache.go). It is read inside closeLegNow
+// instead, at the edge that actually needs it.
+//
+// The three are checked in the order of how much they assert.
+func (d *Detector) settleLeg(
+	ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, f fix,
+) bool {
 	// Computed BEFORE the dwell is folded in, because `arrivedAt` mutates the
 	// track and this is a pure question about this frame alone.
 	atDestination := state.inRadius(f, d.cfg)
@@ -64,18 +108,52 @@ func (d *Detector) decide(
 	// 1. ARRIVAL — the strongest claim, and the only one that fires
 	//    `trip_leg_arrived`. Latched so the twenty further qualifying frames
 	//    that arrive while the car sits there do nothing.
+	//
+	//    THE LATCH IS SET ONLY IF THE LEG ACTUALLY CLOSED (MYR-612 review). It
+	//    used to be set first, and a failed audience read then destroyed the
+	//    evidence: `arrivalLatched` disabled this branch for the rest of the
+	//    leg, so the arrival could never be re-observed and the leg could only
+	//    ever end as `completed`. Every closing condition here is a STATE the
+	//    next frame re-observes, and that property is only worth having if the
+	//    memory of having acted on it is written after the act.
 	if !state.arrivalLatched && state.arrivedAt(f, d.cfg) {
-		state.arrivalLatched = true
-		d.svc.closeLeg(ctx, leg, audience, true)
-		return
+		if d.closeLegNow(ctx, tv, state, leg, true) {
+			state.arrivalLatched = true
+		}
+		return true
 	}
 
-	// 2. THE ROUTE WAS CLEARED. The driver cancelled navigation; the car may
-	//    still be moving. The leg is over as a leg — there is no longer a place
-	//    it is going — and it ended without evidence.
-	if state.destination == "" {
-		d.svc.closeLeg(ctx, leg, audience, false)
-		return
+	// 2. THE ROUTE WAS CLEARED — ONCE THE CLEAR IS CONFIRMED (MYR-612).
+	//
+	//    THIS BRANCH USED TO FIRE ON THE FIRST FRAME WITH AN EMPTY NAME, and
+	//    that is the bug the issue was raised for. Tesla streams deltas, and a
+	//    car four minutes into a leg to "Element by Marriott Sedona" sent a
+	//    frame whose destination name was present-but-empty while its
+	//    `minutesToArrival` still read 98 and the dash still showed the place.
+	//    The leg closed at 03:40:22 and re-opened at 03:40:24 — two legs for
+	//    one journey, two start banners, two push-to-start fan-outs, and any
+	//    card raised for the first ended as `completed` while the car drove on.
+	//
+	//    The clear is now PENDING until park, a sustained absence of both the
+	//    name and any arrival estimate, or arrival evidence (branch 1, above)
+	//    settles it. See vehicleState.clearConfirmed.
+	if state.clearPending() {
+		if !state.clearConfirmed(f, d.cfg, atDestination) {
+			// Held open. The card is deliberately NOT refreshed while the
+			// route is in doubt: the honest content-state is the one already
+			// on the lock screen, and its stale-date keeps it honest.
+			return true
+		}
+		// AND THE ROUTE IS FORGOTTEN ONLY IF THE LEG ACTUALLY CLOSED, for the
+		// same reason the arrival latch is (MYR-612 review). confirmClear wipes
+		// `destination`, `destClearedAt` and the arrival state, which is the
+		// entire evidence this clear was ever pending: run before a failed
+		// EndLeg, it left an open leg with nothing left that could ever close
+		// it again.
+		if d.closeLegNow(ctx, tv, state, leg, false) {
+			state.confirmClear()
+		}
+		return true
 	}
 
 	// 3. THE CAR PARKED SHORT of its destination. `completed`, not `arrived`:
@@ -89,58 +167,96 @@ func (d *Detector) decide(
 	//    the beginning of an arrival, not the end of a leg; the dwell decides
 	//    which, and until it does the leg stays open.
 	//
+	//    PARKED IS NOT "STOPPED ON THIS FRAME" (MYR-612 review). `!driving`
+	//    alone says only that the last frame reported a speed at or under 1
+	//    mph, which a car waiting at a junction reports for twenty seconds at a
+	//    time — so this branch used to close a leg at the first red light away
+	//    from the destination, mid-route, as `completed`. vehicleState.parked
+	//    is the claim this branch was always making in prose: the driver put it
+	//    in P, or it has not moved for a whole LegClearGrace.
+	//
 	//    The residual case is a car that parks at its destination and then goes
 	//    completely silent, with not even a MYR-394 REST poll frame to satisfy
 	//    the dwell. Its leg stays open until the window closes and is then
 	//    settled as `completed`. That is the honest answer — nothing ever
 	//    proved it stayed — and it is the same dependency internal/arrival has
 	//    on the same poller for the same reason.
-	if !state.driving && drivingBefore && !atDestination {
-		d.svc.closeLeg(ctx, leg, audience, false)
-		return
+	//    `drivingBefore` IS NOT PART OF THE TEST any more, and could not be:
+	//    it is true on exactly the FIRST stopped frame, so pairing it with a
+	//    stop that has to be SUSTAINED asks for two things that can never hold
+	//    at once. A park is a state the detector re-observes on every frame
+	//    until it acts on it, which is the same shape every other closing
+	//    condition here has.
+	if !atDestination && state.parked(f, d.cfg) {
+		d.closeLegNow(ctx, tv, state, leg, false)
+		return true
 	}
-
-	// Still under way. Refresh the card only when this frame's arrival estimate
-	// has earned a push — see vehicleState.dueForCard.
-	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
-		d.svc.updateLeg(ctx, leg, audience, f, minutes)
-	}
+	return false
 }
 
-// updateLeg refreshes a running card mid-leg.
+// openLegFor answers "does this car have an open leg", from a SHORT-LIVED CACHE
+// rather than from a statement per frame.
 //
-// THE THROTTLE IS THE CALLER'S (vehicleState.dueForCard) rather than this
-// function's, because it is per-VIN state and this is a stateless projection.
-// What matters is that it exists: Apple throttles high-frequency Activity
-// pushes by budget and a car streams up to once per second, so a refresh has to
-// earn its push — the arrival minute must have moved, and a floor interval must
-// have passed. The card's 3-minute stale-date is what keeps it honest between
-// pushes.
+// MYR-612. This read is the detector's only per-frame database call now that
+// the audience has moved to the edges, and at one frame per second per car it
+// was still a sustained query stream on the bus goroutine with no timeout of
+// its own. The answer changes at most twice per journey, so serving it from
+// memory for LegReadTTL costs a few seconds of latency on an edge — against a
+// twenty-second dwell and a twenty-second card floor, invisible — and takes the
+// steady-state cost to roughly one query per car per TTL.
 //
-// It lives on Service rather than Detector because the leg lifecycle belongs
-// together, and because a future ticker could call it on the same terms.
-func (s *Service) updateLeg(ctx context.Context, leg Leg, audience TripAudience, f fix, minutes *int) {
-	if s.activities == nil || minutes == nil {
-		return
+// EVERY WRITE INVALIDATES IT (forgetLegRead), so the frame after an open or a
+// close reads the truth rather than the picture that prompted the write.
+//
+// THE CLOCK IS THE FRAME'S, and the window is checked from BOTH sides. A frame
+// older than the cached read — which the MYR-394 REST poller legitimately
+// produces — falls through to a fresh read rather than being treated as
+// arbitrarily recent, so a burst of backlogged frames cannot hold a stale
+// answer past its TTL. Failing towards "read it again" is the cheap direction.
+func (d *Detector) openLegFor(ctx context.Context, state *vehicleState, vehicleID string, at time.Time) (Leg, error) {
+	if fresh := at.Sub(state.legReadAt); !state.legReadAt.IsZero() && fresh >= 0 && fresh < d.cfg.LegReadTTL {
+		return state.legRead, nil
 	}
-	tc := s.legContext(ctx, leg, audience, tripStatusEnroute, &f.at)
-	tc.ETAMinutes = minutes
-	s.activities.UpdateLeg(ctx, tc)
+	leg, err := d.svc.legs.OpenLegForVehicle(ctx, vehicleID)
+	if err != nil {
+		return Leg{}, fmt.Errorf("trips.openLegFor(vehicle=%s): %w", vehicleID, err)
+	}
+	state.legRead, state.legReadAt = leg, at
+	return leg, nil
 }
 
-// etaMinutesFrom reads the car's own arrival estimate off a frame.
+// closeLegNow reads the audience and ends the leg, REPORTING WHETHER THE ROW
+// ACTUALLY CLOSED.
 //
-// NIL WHEN THE CAR DOES NOT SAY, never a computed guess. There is no route
-// solver in this service, and MYR-194 rules out inventing a number in as many
-// words: an absent `eta` renders a card with no time, which is a first-class
-// state the client already handles.
-func etaMinutesFrom(f fix) *int {
-	if f.minutesToGo == nil {
-		return nil
+// THE AUDIENCE READ LIVES HERE, at the one outcome that uses it, rather than on
+// every frame — see the note in decide. A failed read DEFERS the edge exactly as
+// it did before: the leg stays open and the next qualifying frame tries again,
+// because every closing condition is a STATE the detector can re-observe rather
+// than an edge it sees once.
+//
+// ⚠ THE RETURN VALUE IS THE HALF THAT MAKES THAT TRUE (MYR-612 review). Both
+// callers hold per-car memory that says "this edge has been acted on" — the
+// arrival latch, the confirmed clear — and both used to write it BEFORE getting
+// here. A deferred edge then found its own evidence deleted: the latch disabled
+// the arrival branch, confirmClear wiped the pending clear, and the leg the
+// deferral was supposed to protect could never be closed by anything. Deferring
+// only works if nothing was forgotten, so the memory is written by the caller
+// on `true` and not at all on `false`.
+func (d *Detector) closeLegNow(
+	ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, arrived bool,
+) bool {
+	audience, err := d.svc.trips.TripAudienceFor(ctx, tv.TripID)
+	if err != nil {
+		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
+			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
+		return false
 	}
-	m := int(*f.minutesToGo + 0.5)
-	if m < 0 {
-		return nil
+
+	if !d.svc.closeLeg(ctx, leg, audience, arrived) {
+		// EndLeg failed. The row is still open, so the next qualifying frame
+		// must be allowed to try again — see the note above.
+		return false
 	}
-	return &m
+	state.forgetLegRead()
+	return true
 }

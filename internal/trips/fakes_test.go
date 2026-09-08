@@ -31,6 +31,9 @@ type fakeTripStore struct {
 	// vehicleCalls counts candidate reads, so a test can assert the frame path
 	// is not querying per frame.
 	vehicleCalls int
+	// audienceCalls counts audience reads. MYR-612: this read used to happen on
+	// EVERY frame of a car with an open leg; it now happens only at an edge.
+	audienceCalls int
 }
 
 func newFakeTripStore() *fakeTripStore {
@@ -45,6 +48,7 @@ func newFakeTripStore() *fakeTripStore {
 func (f *fakeTripStore) TripAudienceFor(_ context.Context, tripID string) (TripAudience, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.audienceCalls++
 	if f.audErr != nil {
 		return TripAudience{}, f.audErr
 	}
@@ -148,13 +152,25 @@ func (f *fakeTripStore) ActiveTripVehicles(_ context.Context, _ int) ([]TripVehi
 type fakeLegStore struct {
 	mu sync.Mutex
 
-	byID       map[string]*Leg
-	openByVeh  map[string]string
-	nextID     int
-	claimed    map[string]bool
-	startErr   error
-	openErr    error
-	startCalls int
+	byID      map[string]*Leg
+	openByVeh map[string]string
+	nextID    int
+	claimed   map[string]bool
+	// arrived models go_trip_legs.arrived, which trips.Leg does not carry: the
+	// resume probe refuses a leg that ARRIVED, so the fake has to remember it.
+	arrived     map[string]bool
+	startErr    error
+	openErr     error
+	resumeErr   error
+	startCalls  int
+	resumeCalls int
+	// openCalls counts OpenLegForVehicle reads. MYR-612: one per frame before
+	// the LegReadTTL cache, roughly one per TTL after it.
+	openCalls int
+	// bannerSlots is the MYR-620 suppression window's state: when each
+	// (trip, event, destination) banner last actually went out.
+	bannerSlots map[string]time.Time
+	bannerErr   error
 }
 
 func newFakeLegStore() *fakeLegStore {
@@ -162,6 +178,7 @@ func newFakeLegStore() *fakeLegStore {
 		byID:      map[string]*Leg{},
 		openByVeh: map[string]string{},
 		claimed:   map[string]bool{},
+		arrived:   map[string]bool{},
 	}
 }
 
@@ -188,7 +205,52 @@ func (f *fakeLegStore) StartLeg(_ context.Context, tripID, vehicleID, destinatio
 	return *leg, nil
 }
 
-func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time, _ bool) error {
+// ResumeRecentLeg models the store's merge: the leg this car closed most
+// recently WITHIN THIS TRIP and WITHOUT ARRIVING, if it closed since notBefore
+// and was going to the same place, is re-opened rather than replaced.
+func (f *fakeLegStore) ResumeRecentLeg(
+	_ context.Context, tripID, vehicleID, destination string, notBefore time.Time,
+) (Leg, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumeCalls++
+	if f.resumeErr != nil {
+		return Leg{}, false, f.resumeErr
+	}
+	if destination == "" {
+		return Leg{}, false, nil
+	}
+	if _, open := f.openByVeh[vehicleID]; open {
+		return Leg{}, false, nil
+	}
+	var best *Leg
+	for _, leg := range f.byID {
+		if leg.TripID != tripID || leg.VehicleID != vehicleID || leg.EndedAt == nil || f.arrived[leg.ID] {
+			continue
+		}
+		if leg.EndedAt.Before(notBefore) || leg.DestinationName != destination {
+			continue
+		}
+		if best == nil || leg.EndedAt.After(*best.EndedAt) {
+			best = leg
+		}
+	}
+	if best == nil {
+		return Leg{}, false, nil
+	}
+	best.EndedAt = nil
+	if f.claimed["act_end:"+best.ID] {
+		// A card that was ENDED is gone from the lock screen, so the resumed
+		// leg may raise a new one: its push-to-start claim is released. A card
+		// still running keeps its claim and is not started twice.
+		delete(f.claimed, "act_start:"+best.ID)
+	}
+	delete(f.claimed, "act_end:"+best.ID)
+	f.openByVeh[vehicleID] = best.ID
+	return *best, true, nil
+}
+
+func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time, arrived bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	leg, ok := f.byID[legID]
@@ -197,6 +259,7 @@ func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time
 	}
 	end := endedAt
 	leg.EndedAt = &end
+	f.arrived[legID] = f.arrived[legID] || arrived
 	delete(f.openByVeh, leg.VehicleID)
 	return nil
 }
@@ -204,6 +267,7 @@ func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time
 func (f *fakeLegStore) OpenLegForVehicle(_ context.Context, vehicleID string) (Leg, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.openCalls++
 	if f.openErr != nil {
 		return Leg{}, f.openErr
 	}
@@ -252,6 +316,31 @@ func (f *fakeLegStore) ClaimLegActivityEnd(_ context.Context, legID string) (boo
 	return f.claim("act_end:" + legID)
 }
 
+// ClaimLegBannerSlot models the MYR-620 (trip, event, destination) window. It
+// remembers WHEN each slot last sent, because the rule under test is a
+// duration and a boolean claim would assert the test's own opinion of it.
+func (f *fakeLegStore) ClaimLegBannerSlot(
+	_ context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bannerErr != nil {
+		return false, f.bannerErr
+	}
+	if tripID == "" || event == "" || destinationKey == "" {
+		return true, nil
+	}
+	if f.bannerSlots == nil {
+		f.bannerSlots = map[string]time.Time{}
+	}
+	key := tripID + "|" + event + "|" + destinationKey
+	if last, ok := f.bannerSlots[key]; ok && now.Sub(last) < window {
+		return false, nil
+	}
+	f.bannerSlots[key] = now
+	return true, nil
+}
+
 // idFor mints a readable leg id. strconv rather than rune arithmetic so gosec's
 // integer-conversion check has nothing to flag and the ids stay legible past
 // twenty-six legs.
@@ -283,12 +372,24 @@ type fakeActivityPusher struct {
 	starts  []push.TripLegContext
 	updates []push.TripLegContext
 	ends    []push.TripLegContext
+	// catchUps records the MYR-612 per-device sends, as "userID/legID", and
+	// catchUpContexts the content-state inputs each one carried.
+	catchUps        []string
+	catchUpContexts []push.TripLegContext
 }
 
 func (f *fakeActivityPusher) StartLeg(_ context.Context, tc push.TripLegContext) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, tc)
+	return 1
+}
+
+func (f *fakeActivityPusher) StartLegForUser(_ context.Context, tc push.TripLegContext, userID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.catchUps = append(f.catchUps, userID+"/"+tc.LegID)
+	f.catchUpContexts = append(f.catchUpContexts, tc)
 	return 1
 }
 
@@ -323,8 +424,21 @@ func (f *fakeRevalidator) count() int {
 	return f.calls
 }
 
-type fakeVINResolver struct{ byVIN map[string]string }
+type fakeVINResolver struct {
+	byVIN map[string]string
+	// deadline records whether the context this resolution ran under carried
+	// one. On a VIN-cache miss this is a real query on the single bus
+	// goroutine, and it had no budget at all until MYR-612's review.
+	deadline  bool
+	sawCtx    bool
+	remaining time.Duration
+}
 
-func (f *fakeVINResolver) ResolveID(_ context.Context, vin string) (string, error) {
+func (f *fakeVINResolver) ResolveID(ctx context.Context, vin string) (string, error) {
+	f.sawCtx = true
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadline = true
+		f.remaining = time.Until(dl)
+	}
 	return f.byVIN[vin], nil
 }

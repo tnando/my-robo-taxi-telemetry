@@ -136,9 +136,14 @@ Client                                       Server
   |                                            |
   |   <-- vehicle_update / drive_* / heartbeat |   (live stream begins)
   |                                            |
-  |  -- failure path --                        |
-  |<-- {"type":"error","payload":{"code":"auth_failed",...}}
+  |  -- failure path (credential refused) --   |
+  |<-- {"type":"error","payload":{"code":"auth_failed",...}}   (ONE frame, static message)
   |<-- WebSocket close frame (code 1008, "authentication failed")
+  |                                            |
+  |  -- failure path (probe unanswerable) --   |
+  |<-- WebSocket close frame (code 1013, "authentication temporarily unavailable")
+  |      NO error frame: `service_unavailable` is not a member of
+  |      ErrorPayload.code — the WS analogue of a 503 is a close code (§6.2)
 ```
 
 Implementation: [`internal/ws/handler.go:handleUpgrade`](../../internal/ws/handler.go) -> `authenticateClient`.
@@ -182,6 +187,10 @@ SDK handling:
 
 The server **also** sends an explicit error frame on failure (§6.1) followed by a close frame with code 1008. Failure and success paths are mutually exclusive -- the client either sees `auth_ok` (success) or an `error` frame followed by close 1008 (failure) or the SDK pre-`auth_ok` timer expires (silent failure), never more than one.
 
+> **ONE frame, and its `message` is a static string ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612)).** The server used to write TWO error frames on some refusals — one from `authenticateClient` and a second from `handleUpgrade` carrying the whole wrapped Go error chain, resolved user id included, which §6.3 and Rule CG-DC-2 forbid. Refusals are emitted from exactly one place now (`handler.go:refuseHandshake`) with the fixed messages `"invalid token"` and `"auth frame not received"`.
+>
+> **THE ONE REFUSAL THAT CARRIES NO FRAME AT ALL** is an existence probe that could not be ANSWERED (§2.4). `service_unavailable` is deliberately absent from `ErrorPayload.code`, so the server closes with **`1013` Try Again Later** and writes nothing (§6.2). An SDK MUST therefore treat a 1013 close during `connecting` as a transient refusal in its own right and not wait for a frame that is never coming.
+
 > **Note on DV-07:** `auth_ok` is v1-required (pulled out of DV-07 in MYR-33). The control-frame portion of DV-07 — `subscribe` / `unsubscribe` / `ping` / `pong` plus the typed `vehicle_not_owned` error and close code 4002 — is RESOLVED by MYR-46. The `sinceSeq` snapshot-resume sub-row remains open under DV-02 (envelope sequence numbers).
 
 ### 2.4 Connection state mapping
@@ -194,6 +203,7 @@ The handshake drives the following [`state-machine.md`](state-machine.md) §1.3 
 | Receipt of `auth_ok` frame | `connecting -> connected` (C-3) | Canonical trigger. Reset retry counter; start SDK liveness watchdog (§7.4.1). DV-15 RESOLVED: [`state-machine.md`](state-machine.md) §1.3 C-3 now reads `AUTH_OK_RECEIVED`, aligned by MYR-31. |
 | SDK pre-`auth_ok` timer expires (6 s, §2.3 rule 4) | `connecting -> disconnected` (C-4) | Bounds the "Connecting..." UI state on degraded paths (post-upgrade stall, dropped `auth_ok` in flight). Surface as typed `auth_timeout`; auto-retry with backoff. Independent of the post-`auth_ok` liveness watchdog (§7.4.1). |
 | `Authenticator.ValidateToken` returns error | `connecting -> error` (C-5 terminal if `auth_failed`) | Surface `auth_failed` typed error; no auto-retry |
+| `Authenticator.ValidateToken` could not ANSWER the fail-closed user-existence probe (pool wait, statement timeout, a cancelled peer sharing the coalesced lookup) | `connecting -> disconnected` (C-4) | **Close code `1013` Try Again Later, with NO error frame ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612)).** The handshake is still refused — the check stays fail-closed — but the credential is not implicated, so a client must **auto-retry with backoff rather than burn its refresh and fall back to a sign-in screen.** `auth_failed` is the one close a client is entitled to act on destructively, and a database hiccup is not grounds for it. **There is deliberately no typed frame:** `service_unavailable` is not a member of `ErrorPayload.code` (§6.1.1, [`rest-api.md`](rest-api.md) §4.1.1.a) because the WS analogue of a 503 is a close code, and adding the member would be a breaking decode on every shipped SDK. Mirrors [`rest-api.md`](rest-api.md) §3.2.1, which maps the same condition to `503` |
 | Auth deadline exceeded (`ErrAuthTimeout`) | `connecting -> disconnected` (C-4) | Surface `auth_timeout`; auto-retry with backoff. See DV-06. |
 | Per-user cap breach (close code 4003) | `connecting -> disconnected` (C-4) | Surface `rate_limited`; auto-retry with extended backoff. See DV-08. |
 | HTTP 429 on upgrade (per-IP cap) | `connecting -> disconnected` (C-4) | Surface `rate_limited`; apply reconnect backoff. See DV-08. |
@@ -965,6 +975,8 @@ Per FR-7.1, consumer SDKs MUST map `code` to typed error values and branch on th
 
 The PLANNED codes are reserved in the AsyncAPI spec and JSON Schemas today so SDKs can match against them once the server emits them. The schema enum is the canonical list -- when a new code is added, the enum, this table, and the contract-guard rules MUST all be updated in the same PR.
 
+> **`service_unavailable` is NOT in this catalog and MUST NOT be added to it.** It is a REST-only member of the shared `ErrorPayload.code` enum's sibling catalog ([`rest-api.md`](rest-api.md) §4.1.1) and is deliberately excluded from `ErrorPayload.code` itself: the WebSocket analogue of a 503 is a **close code**, not a typed frame. [MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) made the REST surfaces emit `503 service_unavailable` for an unanswerable user-existence probe and gave the WS handshake close code `1013` for the same condition (§2.4, §6.2), precisely so no shipped SDK's generated union had to decode a member it does not carry.
+
 ##### `rate_limited` reconnect pseudocode
 
 ```
@@ -1006,7 +1018,8 @@ The Go server uses [`coder/websocket`](https://github.com/coder/websocket) statu
 | Code | Name | Today | Source (Go) | When | SDK reconnect policy |
 |------|------|-------|-------------|------|----------------------|
 | `1001` | Going Away | **Implemented** | [`client.go:writePump`](../../internal/ws/client.go) line 56 (`websocket.StatusGoingAway`) | Hub closed the client's send channel (server shutdown) | Auto-reconnect with backoff (C-6 + D-4) |
-| `1008` | Policy Violation | **Implemented** | [`handler.go:handleUpgrade`](../../internal/ws/handler.go) line 93 (`websocket.StatusPolicyViolation`) | Authentication failed (sent immediately after the `error` frame) | Branches on the preceding `error.code` -- see below |
+| `1008` | Policy Violation | **Implemented** | [`handler.go:refuseHandshake`](../../internal/ws/handler.go) (`websocket.StatusPolicyViolation`) | Authentication failed (sent immediately after the one `error` frame) | Branches on the preceding `error.code` -- see below |
+| `1013` | Try Again Later | **Implemented** ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612)) | [`handler.go:refuseHandshake`](../../internal/ws/handler.go) (`websocket.StatusTryAgainLater`) | The fail-closed user-existence probe behind `ValidateToken` could not be ANSWERED — a pool wait, a statement timeout, a cancelled peer sharing the coalesced lookup. **NO error frame precedes it**, deliberately: `service_unavailable` is not a member of `ErrorPayload.code`, and this close code IS the WS analogue of the REST `503` ([`rest-api.md`](rest-api.md) §3.2.1). | **Auto-retry with backoff, keeping the credential.** A client MUST NOT treat this as an auth failure: it must not discard the session, burn its refresh token, or route the user to a sign-in screen. |
 | `1000` | Normal Closure | Tolerated | n/a | Client closed the socket cleanly | n/a (client-initiated) |
 
 > **Divergence (DV-06):** Close code 1008 is emitted for BOTH `auth_failed` (terminal, do-not-retry) and `auth_timeout` (transient, auto-retry). The SDK has to disambiguate by reading the preceding `error.code`, which is fragile if the error frame fails to arrive. Target: map `auth_timeout` to its own close code (proposal: 4001 "Auth Token Expired" or a dedicated 40xx value once DV-06 is resolved).
@@ -1026,6 +1039,7 @@ The mapping between `error.payload.code` and the close code, when both are emitt
 | `error.code` | Following close code today | Target close code |
 |--------------|---------------------------|-------------------|
 | `auth_failed` | `1008` Policy Violation | `1008` (no change) |
+| *(none — the probe was unanswerable)* | `1013` Try Again Later | `1013` (no change) — the close code IS the signal; see the row above |
 | `auth_timeout` | `1008` Policy Violation | `4001` Auth Token Expired (DV-06) |
 | `permission_denied` | n/a today | `4002` Permission Revoked (DV-07) |
 | `vehicle_not_owned` | **none, deliberately** (MYR-373) | **none** — the error frame is the whole answer |
