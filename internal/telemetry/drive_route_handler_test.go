@@ -27,6 +27,9 @@ func (s *stubDriveRouteFetcher) GetDriveRoute(_ context.Context, _ string) (Driv
 	return s.data, nil
 }
 
+// routeFixtureDriveID is the drive every case in this file asks for.
+const routeFixtureDriveID = "clmno9876543210zyxw0001"
+
 // fixtureRouteFacts builds the access identity a real drive row carries.
 //
 // A HELPER RATHER THAN A LITERAL IN EACH CASE, so no test in this file can
@@ -34,9 +37,9 @@ func (s *stubDriveRouteFetcher) GetDriveRoute(_ context.Context, _ string) (Driv
 // production adapter doing exactly that, and it stayed invisible because every
 // test here filled the field by hand; a fixture that always fills it keeps the
 // stubs honest to what the wiring actually produces.
-func fixtureRouteFacts(driveID, vehicleID string) DriveAccessFacts {
+func fixtureRouteFacts(vehicleID string) DriveAccessFacts {
 	return DriveAccessFacts{
-		DriveID:   driveID,
+		DriveID:   routeFixtureDriveID,
 		VehicleID: vehicleID,
 		StartTime: "2026-06-06T18:22:00Z",
 	}
@@ -44,7 +47,7 @@ func fixtureRouteFacts(driveID, vehicleID string) DriveAccessFacts {
 
 func TestDriveRouteHandler_ServeHTTP(t *testing.T) {
 	const (
-		driveID = "clmno9876543210zyxw0001"
+		driveID = routeFixtureDriveID
 		userID  = "user-123"
 		authOK  = "Bearer valid-token"
 	)
@@ -104,7 +107,7 @@ func TestDriveRouteHandler_ServeHTTP(t *testing.T) {
 			tokenValidator: &stubTokenValidator{userID: userID},
 			reader:         &stubVehicleSnapshotReader{row: fixtureSnapshotRow("other-user")},
 			fetcher: &stubDriveRouteFetcher{data: DriveRouteData{
-				DriveAccessFacts: fixtureRouteFacts(driveID, fixtureSnapshotRowID),
+				DriveAccessFacts: fixtureRouteFacts(fixtureSnapshotRowID),
 				RoutePoints:      routeJSON,
 			}},
 			wantStatus:  http.StatusForbidden,
@@ -116,7 +119,7 @@ func TestDriveRouteHandler_ServeHTTP(t *testing.T) {
 			tokenValidator: &stubTokenValidator{userID: userID},
 			reader:         &stubVehicleSnapshotReader{err: fmt.Errorf("get vehicle by id: %w", sdk.ErrNotFound)},
 			fetcher: &stubDriveRouteFetcher{data: DriveRouteData{
-				DriveAccessFacts: fixtureRouteFacts(driveID, "missing"),
+				DriveAccessFacts: fixtureRouteFacts("missing"),
 				RoutePoints:      routeJSON,
 			}},
 			wantStatus:  http.StatusInternalServerError,
@@ -128,7 +131,7 @@ func TestDriveRouteHandler_ServeHTTP(t *testing.T) {
 			tokenValidator: &stubTokenValidator{userID: userID},
 			reader:         &stubVehicleSnapshotReader{row: fixtureSnapshotRow(userID)},
 			fetcher: &stubDriveRouteFetcher{data: DriveRouteData{
-				DriveAccessFacts: fixtureRouteFacts(driveID, fixtureSnapshotRowID),
+				DriveAccessFacts: fixtureRouteFacts(fixtureSnapshotRowID),
 				RoutePoints:      routeJSON,
 			}},
 			wantStatus:      http.StatusOK,
@@ -140,7 +143,7 @@ func TestDriveRouteHandler_ServeHTTP(t *testing.T) {
 			tokenValidator: &stubTokenValidator{userID: userID},
 			reader:         &stubVehicleSnapshotReader{row: fixtureSnapshotRow(userID)},
 			fetcher: &stubDriveRouteFetcher{data: DriveRouteData{
-				DriveAccessFacts: fixtureRouteFacts(driveID, fixtureSnapshotRowID),
+				DriveAccessFacts: fixtureRouteFacts(fixtureSnapshotRowID),
 				RoutePoints:      nil,
 			}},
 			wantStatus:      http.StatusOK,
