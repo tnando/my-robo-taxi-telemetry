@@ -31,6 +31,9 @@ type fakeTripStore struct {
 	// vehicleCalls counts candidate reads, so a test can assert the frame path
 	// is not querying per frame.
 	vehicleCalls int
+	// audienceCalls counts audience reads. MYR-612: this read used to happen on
+	// EVERY frame of a car with an open leg; it now happens only at an edge.
+	audienceCalls int
 }
 
 func newFakeTripStore() *fakeTripStore {
@@ -45,6 +48,7 @@ func newFakeTripStore() *fakeTripStore {
 func (f *fakeTripStore) TripAudienceFor(_ context.Context, tripID string) (TripAudience, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.audienceCalls++
 	if f.audErr != nil {
 		return TripAudience{}, f.audErr
 	}
@@ -155,6 +159,9 @@ type fakeLegStore struct {
 	startErr   error
 	openErr    error
 	startCalls int
+	// openCalls counts OpenLegForVehicle reads. MYR-612: one per frame before
+	// the LegReadTTL cache, roughly one per TTL after it.
+	openCalls int
 }
 
 func newFakeLegStore() *fakeLegStore {
@@ -204,6 +211,7 @@ func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time
 func (f *fakeLegStore) OpenLegForVehicle(_ context.Context, vehicleID string) (Leg, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.openCalls++
 	if f.openErr != nil {
 		return Leg{}, f.openErr
 	}

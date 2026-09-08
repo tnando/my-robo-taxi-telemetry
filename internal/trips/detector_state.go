@@ -70,6 +70,26 @@ type vehicleState struct {
 	// failure on this surface.
 	lastCardETA  *int
 	lastCardPush time.Time
+
+	// legRead and legReadAt are the SHORT-LIVED ANSWER to "does this car have
+	// an open leg" — the detector's last remaining per-frame database read,
+	// held for Config.LegReadTTL (MYR-612).
+	//
+	// The fact changes at most twice per journey while the question is asked up
+	// to once per second per car, on the single bus goroutine. Serving it from
+	// memory is what takes the steady state from a sustained query stream to
+	// roughly one read per car per TTL; forgetLegRead is called after every
+	// write so the frame after an edge sees the truth rather than the picture
+	// that prompted it.
+	legRead   Leg
+	legReadAt time.Time
+}
+
+// forgetLegRead invalidates the cached open-leg answer. Called after every leg
+// write, so a write is never followed by a decision taken from the state that
+// preceded it.
+func (v *vehicleState) forgetLegRead() {
+	v.legRead, v.legReadAt = Leg{}, time.Time{}
 }
 
 // cardMinInterval is the floor between two card refreshes for one car. Chosen

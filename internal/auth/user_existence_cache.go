@@ -142,7 +142,11 @@ func (c *userExistenceCache) Exists(ctx context.Context, userID string) (bool, e
 		return exists, nil
 	})
 	if err != nil {
-		return false, err
+		// Already carries the userExistenceCache.Exists frame from inside the
+		// closure — singleflight passes the function's error through verbatim,
+		// so wrapping again would repeat the frame, which is exactly the
+		// double-wrap MYR-612 removed.
+		return false, err //nolint:wrapcheck // wrapped once, inside the singleflight closure
 	}
 	return val.(bool), nil //nolint:forcetypeassert // singleflight cache only stores bool
 }

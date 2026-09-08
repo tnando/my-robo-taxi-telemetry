@@ -2,7 +2,9 @@ package trips
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"time"
 )
 
 // THE EDGES one frame produced, and what each of them does.
@@ -27,7 +29,7 @@ import (
 func (d *Detector) decide(
 	ctx context.Context, tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string,
 ) {
-	leg, err := d.svc.legs.OpenLegForVehicle(ctx, tv.VehicleID)
+	leg, err := d.openLegFor(ctx, state, tv.VehicleID, f.at)
 	if err != nil {
 		d.logger.Warn("trips: open-leg lookup failed",
 			slog.String("vehicle_id", tv.VehicleID), slog.String("error", err.Error()))
@@ -38,7 +40,10 @@ func (d *Detector) decide(
 	if !leg.Open() {
 		state.endLeg()
 		if underway && (!drivingBefore || destBefore == "") {
-			d.svc.openLeg(ctx, tv, state.destination, f.at)
+			edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
+			defer cancel()
+			d.svc.openLeg(edgeCtx, tv, state.destination, f.at)
+			state.forgetLegRead()
 		}
 		return
 	}
@@ -50,13 +55,18 @@ func (d *Detector) decide(
 
 	// A leg IS open. Three things can close it, and they are checked in the
 	// order of how much they assert.
-	audience, audErr := d.svc.trips.TripAudienceFor(ctx, tv.TripID)
-	if audErr != nil {
-		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
-			slog.String("leg_id", leg.ID), slog.String("error", audErr.Error()))
-		return
-	}
-
+	//
+	// ⚠ THE AUDIENCE IS NO LONGER READ HERE (MYR-612). It used to be fetched
+	// before the three checks, on EVERY FRAME of every car inside an open
+	// window — up to one query per second per car, on the single bus goroutine,
+	// with no timeout of its own — and it is used by exactly one outcome in
+	// several hundred: a leg EDGE. Together with the open-leg read next to it
+	// that was two unbounded statements per frame; one car on one road trip
+	// held two pool connections busy for four minutes, which is how a JWT
+	// existence probe on an unrelated request came to time out and answer 401
+	// (see internal/auth/user_existence_cache.go). It is read inside
+	// closeLegNow instead, at the edge that actually needs it.
+	//
 	// Computed BEFORE the dwell is folded in, because `arrivedAt` mutates the
 	// track and this is a pure question about this frame alone.
 	atDestination := state.inRadius(f, d.cfg)
@@ -66,7 +76,7 @@ func (d *Detector) decide(
 	//    that arrive while the car sits there do nothing.
 	if !state.arrivalLatched && state.arrivedAt(f, d.cfg) {
 		state.arrivalLatched = true
-		d.svc.closeLeg(ctx, leg, audience, true)
+		d.closeLegNow(ctx, tv, state, leg, true)
 		return
 	}
 
@@ -74,7 +84,7 @@ func (d *Detector) decide(
 	//    still be moving. The leg is over as a leg — there is no longer a place
 	//    it is going — and it ended without evidence.
 	if state.destination == "" {
-		d.svc.closeLeg(ctx, leg, audience, false)
+		d.closeLegNow(ctx, tv, state, leg, false)
 		return
 	}
 
@@ -96,15 +106,74 @@ func (d *Detector) decide(
 	//    proved it stayed — and it is the same dependency internal/arrival has
 	//    on the same poller for the same reason.
 	if !state.driving && drivingBefore && !atDestination {
-		d.svc.closeLeg(ctx, leg, audience, false)
+		d.closeLegNow(ctx, tv, state, leg, false)
 		return
 	}
 
 	// Still under way. Refresh the card only when this frame's arrival estimate
 	// has earned a push — see vehicleState.dueForCard.
 	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
-		d.svc.updateLeg(ctx, leg, audience, f, minutes)
+		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
+		defer cancel()
+		d.svc.updateLeg(edgeCtx, leg, f, minutes)
 	}
+}
+
+// openLegFor answers "does this car have an open leg", from a SHORT-LIVED CACHE
+// rather than from a statement per frame.
+//
+// MYR-612. This read is the detector's only per-frame database call now that
+// the audience has moved to the edges, and at one frame per second per car it
+// was still a sustained query stream on the bus goroutine with no timeout of
+// its own. The answer changes at most twice per journey, so serving it from
+// memory for LegReadTTL costs a few seconds of latency on an edge — against a
+// twenty-second dwell and a twenty-second card floor, invisible — and takes the
+// steady-state cost to roughly one query per car per TTL.
+//
+// EVERY WRITE INVALIDATES IT (forgetLegRead), so the frame after an open or a
+// close reads the truth rather than the picture that prompted the write.
+//
+// THE CLOCK IS THE FRAME'S, and the window is checked from BOTH sides. A frame
+// older than the cached read — which the MYR-394 REST poller legitimately
+// produces — falls through to a fresh read rather than being treated as
+// arbitrarily recent, so a burst of backlogged frames cannot hold a stale
+// answer past its TTL. Failing towards "read it again" is the cheap direction.
+func (d *Detector) openLegFor(ctx context.Context, state *vehicleState, vehicleID string, at time.Time) (Leg, error) {
+	if fresh := at.Sub(state.legReadAt); !state.legReadAt.IsZero() && fresh >= 0 && fresh < d.cfg.LegReadTTL {
+		return state.legRead, nil
+	}
+	readCtx, cancel := context.WithTimeout(ctx, d.cfg.Timeout)
+	defer cancel()
+
+	leg, err := d.svc.legs.OpenLegForVehicle(readCtx, vehicleID)
+	if err != nil {
+		return Leg{}, fmt.Errorf("trips.openLegFor(vehicle=%s): %w", vehicleID, err)
+	}
+	state.legRead, state.legReadAt = leg, at
+	return leg, nil
+}
+
+// closeLegNow reads the audience and ends the leg.
+//
+// THE AUDIENCE READ LIVES HERE, at the one outcome that uses it, rather than on
+// every frame — see the note in decide. A failed read DEFERS the edge exactly as
+// it did before: the leg stays open and the next qualifying frame tries again,
+// because every closing condition is a STATE the detector can re-observe rather
+// than an edge it sees once.
+func (d *Detector) closeLegNow(ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, arrived bool) {
+	readCtx, cancelRead := context.WithTimeout(ctx, d.cfg.Timeout)
+	audience, err := d.svc.trips.TripAudienceFor(readCtx, tv.TripID)
+	cancelRead()
+	if err != nil {
+		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
+			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
+		return
+	}
+
+	edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
+	defer cancel()
+	d.svc.closeLeg(edgeCtx, leg, audience, arrived)
+	state.forgetLegRead()
 }
 
 // updateLeg refreshes a running card mid-leg.
@@ -119,11 +188,16 @@ func (d *Detector) decide(
 //
 // It lives on Service rather than Detector because the leg lifecycle belongs
 // together, and because a future ticker could call it on the same terms.
-func (s *Service) updateLeg(ctx context.Context, leg Leg, audience TripAudience, f fix, minutes *int) {
+func (s *Service) updateLeg(ctx context.Context, leg Leg, f fix, minutes *int) {
 	if s.activities == nil || minutes == nil {
 		return
 	}
-	tc := s.legContext(ctx, leg, audience, tripStatusEnroute, &f.at)
+	// NO AUDIENCE ARGUMENT (MYR-612). The only thing legContext ever read from
+	// it here was the vehicle id, which the LEG already carries — the leg row's
+	// `vehicle_id` and the audience's are the same column by construction — so
+	// requiring one meant a per-frame audience query for a projection that
+	// never used the rest of it.
+	tc := s.legContext(ctx, leg, TripAudience{VehicleID: leg.VehicleID}, tripStatusEnroute, &f.at)
 	tc.ETAMinutes = minutes
 	s.activities.UpdateLeg(ctx, tc)
 }

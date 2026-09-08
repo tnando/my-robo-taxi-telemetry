@@ -47,6 +47,18 @@ type Config struct {
 	StillnessMeters     float64
 	MaxStillnessGap     time.Duration
 
+	// LegReadTTL is how long the detector serves a car's open-leg answer from
+	// memory before re-reading it (MYR-612).
+	//
+	// It exists because that read was the last per-frame statement on the bus
+	// goroutine, and the fact it reads changes at most twice per journey. The
+	// cost of the cache is a few seconds of latency on a leg edge, against a
+	// twenty-second arrival dwell and a twenty-second card floor; the cost of
+	// NOT having it was a sustained query per second per car in an open window,
+	// which is how one road trip starved the pool an unrelated JWT existence
+	// probe then timed out against.
+	LegReadTTL time.Duration
+
 	// Timeout bounds every store call the sweeper or the detector makes, so
 	// neither a stalled claim nor a stalled candidate read can wedge the frame
 	// path or hold a pass past its own interval.
@@ -97,6 +109,11 @@ const (
 	defaultStillnessMeters     = 15.0
 	defaultMaxStillnessGap     = 90 * time.Second
 
+	// Five seconds: a third of the candidate TTL, so a car entering or leaving
+	// a leg is noticed within the same order of latency the candidate snapshot
+	// already imposes, and far inside the dwell that decides an arrival.
+	defaultLegReadTTL = 5 * time.Second
+
 	defaultTimeout = 5 * time.Second
 
 	// One trip's whole closing or opening edge, pushes included. Twenty
@@ -119,6 +136,7 @@ func DefaultConfig() Config {
 		SweepLimit:          defaultSweepLimit,
 		CandidateTTL:        defaultCandidateTTL,
 		CandidateLimit:      defaultCandidateLimit,
+		LegReadTTL:          defaultLegReadTTL,
 		ArrivalRadiusMeters: defaultArrivalRadiusMeters,
 		Dwell:               defaultDwell,
 		StoppedSpeedMPH:     defaultStoppedSpeedMPH,
@@ -149,6 +167,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CandidateLimit <= 0 {
 		c.CandidateLimit = d.CandidateLimit
+	}
+	if c.LegReadTTL <= 0 {
+		c.LegReadTTL = d.LegReadTTL
 	}
 	if c.ArrivalRadiusMeters <= 0 {
 		c.ArrivalRadiusMeters = d.ArrivalRadiusMeters

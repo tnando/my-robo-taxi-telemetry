@@ -17,7 +17,7 @@ import (
 // only the answer's meaning is honest about whether retrying will help. The
 // full reasoning is in internal/telemetry/auth_failure.go, which carries the
 // same three-line classifier for the REST surfaces there.
-func authFailure(err error) (int, wserrors.ErrorCode, string) {
+func authFailure(err error) (status int, code wserrors.ErrorCode, message string) {
 	if auth.IsLookupFailure(err) {
 		return http.StatusServiceUnavailable,
 			wserrors.ErrCodeServiceUnavailable,

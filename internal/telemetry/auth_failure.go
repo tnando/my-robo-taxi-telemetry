@@ -41,7 +41,7 @@ import (
 // because every handler has its own `writeError` — the envelope is the
 // handler's, the CLASSIFICATION is shared, and that is the only part that must
 // not drift between thirty surfaces.
-func authFailure(err error) (int, wserrors.ErrorCode, string) {
+func authFailure(err error) (status int, code wserrors.ErrorCode, message string) {
 	if auth.IsLookupFailure(err) {
 		return http.StatusServiceUnavailable,
 			wserrors.ErrCodeServiceUnavailable,
