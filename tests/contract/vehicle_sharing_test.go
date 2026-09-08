@@ -395,3 +395,87 @@ func shareInviteRequiredFields(t *testing.T) []string {
 	}
 	return doc.Defs.ShareInvite.Required
 }
+
+// TestExtendShareRequestSchema pins the MYR-609 extend body (§7.5.8). The
+// endpoint is the only one on this surface that produces an ACCEPTED grant
+// without a redemption, and the body is the whole of what a caller may say
+// about it — so what the schema has to hold is mostly what it REFUSES.
+func TestExtendShareRequestSchema(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c, sharingSchemaID+"#/$defs/ExtendShareRequest")
+
+	t.Run("the one-field body validates", func(t *testing.T) {
+		if err := schema.Validate(map[string]any{
+			"shareId": "csh0123456789abcdef0123456789abcd",
+		}); err != nil {
+			t.Fatalf("valid body rejected: %v", err)
+		}
+	})
+
+	t.Run("shareId is required", func(t *testing.T) {
+		if err := schema.Validate(map[string]any{}); err == nil {
+			t.Fatal("an empty object was accepted; the endpoint would name no share at all")
+		}
+	})
+
+	t.Run("a blank shareId is rejected", func(t *testing.T) {
+		if err := schema.Validate(map[string]any{"shareId": ""}); err == nil {
+			t.Fatal("a blank shareId was accepted (minLength: 1)")
+		}
+	})
+
+	t.Run("a non-string shareId is rejected", func(t *testing.T) {
+		for _, bad := range []any{42, true, nil, []any{"a"}} {
+			if err := schema.Validate(map[string]any{"shareId": bad}); err == nil {
+				t.Errorf("shareId %v (%T) was accepted; it is an opaque cuid string", bad, bad)
+			}
+		}
+	})
+
+	// THE COPY RULE, expressed as a closed object. `label`, `permission`,
+	// `allowRides` and the suspended state all come from the SOURCE grant, and
+	// letting a caller supply them here would let them create a grant that
+	// disagrees with the one it claims to extend. The server enforces this too
+	// (DisallowUnknownFields), unlike PatchShareInviteRequest where unknown
+	// keys are deliberately ignored.
+	t.Run("no grant field may be supplied alongside shareId", func(t *testing.T) {
+		for _, key := range []string{"label", "permission", "allowRides", "suspended", "vehicleId"} {
+			row := map[string]any{"shareId": "csh0123456789abcdef0123456789abcd", key: "x"}
+			if err := schema.Validate(row); err == nil {
+				t.Errorf("%q was accepted; the extend is a COPY, not a composition", key)
+			}
+		}
+	})
+}
+
+// TestErrorSubCodeEnum_CarriesAlreadyShared pins the MYR-609 sub-code onto the
+// SHARED sub-code union — the one enum both transports type against
+// (ws-messages.schema.json ErrorPayload.subCode, rest-api.md §4.1). A REST-only
+// member still has to live there, exactly as `reauth_required`,
+// `reservation_expired` and `time_conflict` do, or an SDK generated from the
+// schema cannot decode the 409 §7.5.8 emits.
+func TestErrorSubCodeEnum_CarriesAlreadyShared(t *testing.T) {
+	root := repoRoot(t)
+	c := newCompiler(t, root)
+	schema := compileSchema(t, c,
+		"https://myrobotaxi.com/schemas/ws-messages.schema.json#/$defs/ErrorPayload")
+
+	valid := map[string]any{
+		"code":    "conflict",
+		"message": "that person already has access to this car",
+		"subCode": "already_shared",
+	}
+	if err := schema.Validate(valid); err != nil {
+		t.Fatalf("the §7.5.8 error envelope was rejected by the shared ErrorPayload schema: %v", err)
+	}
+
+	invalid := map[string]any{
+		"code":    "conflict",
+		"message": "no",
+		"subCode": "already-shared",
+	}
+	if err := schema.Validate(invalid); err == nil {
+		t.Fatal("a hyphenated sub-code was accepted; the enum is closed and snake_case")
+	}
+}

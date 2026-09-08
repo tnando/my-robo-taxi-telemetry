@@ -15,9 +15,12 @@ import (
 // DurationMinutes is the Prisma-stored unit; buildDriveDetail converts
 // it to the durationSeconds wire field per rest-api.md §7.3.
 type DriveDetailData struct {
-	ID               string
-	VehicleID        string
-	StartTime        string // ISO 8601 — Prisma string column
+	// The §7.3/§7.4 access identity, shared with DriveRouteData and produced
+	// by ONE function at the composition root (MYR-614). `id` and `startTime`
+	// are wire fields here as well as gate inputs — buildDriveDetail reads
+	// them off the embedded shape.
+	DriveAccessFacts
+
 	EndTime          string
 	Date             string // "2026-04-13" — Prisma string column
 	DistanceMiles    float64
@@ -127,7 +130,7 @@ func (d driveDetail) toMaskMap() map[string]any {
 // CreatedAt is rendered RFC3339 in UTC.
 func buildDriveDetail(d DriveDetailData) driveDetail {
 	return driveDetail{
-		ID:               d.ID,
+		ID:               d.DriveID,
 		VehicleID:        d.VehicleID,
 		StartTime:        d.StartTime,
 		EndTime:          d.EndTime,

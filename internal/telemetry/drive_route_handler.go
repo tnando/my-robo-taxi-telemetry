@@ -18,15 +18,17 @@ import (
 // store.DriveRecord into it). RoutePoints is the already-decrypted JSONB
 // breadcrumb array — the store's GetByID resolves the routePointsEnc
 // shadow before the handler ever sees it.
+//
+// The access identity is EMBEDDED rather than respelled (MYR-614): DriveID,
+// VehicleID and StartTime are the same three facts §7.3 feeds the same gate,
+// so they live in one shared type with one producer. See DriveAccessFacts for
+// why — a `StartTime` this shape declared but its adapter never filled is what
+// refused every trip participant every route.
 type DriveRouteData struct {
-	DriveID   string
-	VehicleID string
-	// StartTime is the drive's RFC 3339 start instant. Carried on this shape
-	// since MYR-602 purely as an INPUT TO THE ACCESS CHECK — a trip
-	// participant is admitted only to drives that began inside one of their
-	// windows, and this endpoint's own response has never carried it. Not on
-	// the wire; see driveRouteResponse.
-	StartTime   string
+	DriveAccessFacts
+
+	// RoutePoints is the breadcrumb polyline, plaintext JSON. The ONLY field
+	// on this shape that reaches the wire; see driveRouteResponse.
 	RoutePoints json.RawMessage
 }
 
@@ -135,19 +137,15 @@ func (h *DriveRouteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
+	// ONE GATE FOR BOTH DRIVE READS (MYR-614): §7.3 and §7.4 resolve the
+	// same access question over the same embedded facts, in one function.
+	if !verifyDriveAccess(ctx, w, h.vehicles, h.trips, h.logger, "drive route", data.DriveAccessFacts, userID) {
 		return
 	}
 
 	h.writeMaskedRoute(r, w, userID, data)
 }
 
-// verifyOwnership resolves the caller's access to the drive's vehicle: the
-// OWNER, and nobody else (MYR-369 — no share of any shape opens the drives
-// surfaces). Returns true on success; on failure writes an HTTP error and
-// returns false.
-// A drive that points at a missing vehicle is a data-integrity fault
-// (500), distinct from an ownership mismatch (403, vehicle_not_owned).
 // writeMaskedRoute resolves the caller's role, projects the route through
 // the DriveRoute mask, and writes the response. When no roleResolver is
 // configured the projection runs against auth.RoleOwner.

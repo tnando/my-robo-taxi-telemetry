@@ -246,6 +246,16 @@ const (
 	// tell the two apart, and the message is not something it may branch on
 	// (§4.1 rule 1).
 	SubCodeTimeConflict SubCode = "time_conflict"
+	// SubCodeAlreadyShared qualifies conflict on §7.5.8 when an owner
+	// extends a share onto a car the same person already has a live grant
+	// on (MYR-609). It exists because `conflict` is otherwise the code for
+	// an illegal LIFECYCLE TRANSITION, and a client cannot tell that from
+	// "this one is already done" — which is not an error the owner made and
+	// not one to retry. With the sub-code the picker marks that person as
+	// already having the car and moves on, which is also what makes "Add
+	// all" safe: the ones that come back already_shared are successes the
+	// client renders as such, and every other 409 is not.
+	SubCodeAlreadyShared SubCode = "already_shared"
 )
 
 // WriteErrorEnvelopeSub is WriteErrorEnvelope with a typed sub-code, for

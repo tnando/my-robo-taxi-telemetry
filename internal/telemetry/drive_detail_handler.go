@@ -142,19 +142,15 @@ func (h *DriveDetailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
+	// ONE GATE FOR BOTH DRIVE READS (MYR-614): §7.3 and §7.4 resolve the
+	// same access question over the same embedded facts, in one function.
+	if !verifyDriveAccess(ctx, w, h.vehicles, h.trips, h.logger, "drive detail", data.DriveAccessFacts, userID) {
 		return
 	}
 
 	h.writeMaskedDetail(r, w, userID, data)
 }
 
-// verifyOwnership resolves the caller's access to the drive's vehicle: the
-// OWNER, and nobody else (MYR-369 — no share of any shape opens the drives
-// surfaces). Returns
-// true on success; on failure writes an HTTP error and returns false.
-// A drive that points at a missing vehicle is a data-integrity fault
-// (500), distinct from an ownership mismatch (403, vehicle_not_owned).
 // writeMaskedDetail resolves the caller's role, projects the detail
 // through the DriveDetail mask, and writes the response. When no
 // roleResolver is configured the projection runs against auth.RoleOwner.

@@ -251,6 +251,14 @@ type httpRouteDeps struct {
 	// one. Nil leaves an open socket streaming until it reconnects or the
 	// revalidation backstop catches it.
 	shareAccessNotifier telemetry.ShareAccessNotifier
+	// shareAccessWidener makes a grantee's LIVE WebSocket sessions
+	// re-handshake when a §7.5.8 extend GROWS their access (MYR-609). The
+	// exact mirror of shareAccessNotifier and needed for the exact mirror of
+	// the reason — the access set is frozen on the Client at handshake, so it
+	// is stale in both directions. Nil leaves the extended car missing from an
+	// already-open socket until it reconnects or the revalidation backstop
+	// catches it.
+	shareAccessWidener telemetry.ShareAccessWidener
 	// sessionInvalidator drops BOTH auth caches for a user whose account has
 	// just been deleted (MYR-355) — the user-existence cache as well as the
 	// access set, so an unexpired access token stops validating immediately
