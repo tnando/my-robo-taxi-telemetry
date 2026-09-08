@@ -11,8 +11,15 @@ import (
 //
 // Split out of setupHTTPHandlers so that function stays inside the length cap.
 // The pair belongs together: both resolve the drive first, take the vehicleId
-// off the drive record, and then run the SAME access gate as the drives list —
-// owner, or a viewer holding at least `live_history` (MYR-184).
+// off the drive record, and then run the SAME access gate as the drives list.
+//
+// THAT GATE IS OWNER-ONLY (MYR-369), plus exactly one exception: a TRIP
+// PARTICIPANT, for drives inside a window they were part of (MYR-602). This
+// comment used to say "owner, or a viewer holding at least `live_history`
+// (MYR-184)" — a capability MYR-369 removed from the product — while every
+// other comment in this file already described the narrowed gate. Corrected
+// alongside MYR-614, whose entire subject is a stale statement about a drive
+// read quietly disagreeing with what the code does.
 func setupDriveReadEndpoints(deps httpRouteDeps, snapshotAdapter telemetry.VehicleSnapshotReader, trips telemetry.TripDriveAdmitter) {
 	deps.srv.HandleFunc("GET /api/drives/{driveId}/route",
 		newDriveRouteHandler(deps, snapshotAdapter, trips, &driveRouteAdapter{repo: deps.driveRepo}).ServeHTTP)
