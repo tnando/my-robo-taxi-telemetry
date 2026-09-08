@@ -170,6 +170,19 @@ The entire REST auth middleware is PLANNED; no REST auth middleware exists in th
 
 Both carry `iss=myrobotaxi`, `aud=telemetry`, `sub=<user CUID>`, so issuer/audience/expiry checks are identical across algorithms. The key callback is type-driven — an HMAC-typed token only ever receives the shared secret, an ECDSA-typed token only ever receives an EC public key — so algorithm-confusion attacks (e.g. signing an HS256 token with the published ES256 public key as the HMAC key) are rejected. The fail-closed user-existence check (§3.2 step 4, FR-10.1) now accepts a `sub` present in EITHER the Prisma `"User"` table OR the Go-owned `go_users` table (Apple-native users have no legacy Prisma row).
 
+#### 3.2.1 An existence check that could not be ANSWERED is `503`, never `401` ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612))
+
+**The fail-closed existence check above has two failure modes, and they are NOT the same answer to a client:**
+
+| What happened | Status | Code | What a client should do |
+|---------------|--------|------|--------------------------|
+| Signature, issuer, audience or expiry rejected the token; or the account genuinely has no row in either relation | `401` | `auth_failed` | §3.3 — one refresh, then surface to the sign-in flow |
+| The existence probe itself could not be answered: a pool wait, a statement timeout, a cancelled peer sharing the coalesced lookup | `503` | `service_unavailable` | Retry. **The credential is not implicated** |
+
+**COLLAPSING THE SECOND ONTO THE FIRST IS A USER-VISIBLE BUG, not an internal detail.** `401` is the one answer a client is entitled to act on destructively — §3.3 says so in as many words: it means this credential is dead, and an app's response is to discard the session and send the person to a sign-in screen. On 2026-09-08 a participant's §7.30.8 registration was refused `401` on a database hiccup while his requests a minute later were served; the log said *"user not found"* for an account that plainly existed, and the incident was diagnosed for hours as a missing table in the existence ladder that has never been missing.
+
+**THE REFUSAL IS UNCHANGED — an unanswerable probe still refuses the request, and authentication still may not survive a database outage.** What changes is only which refusal the client is told, and therefore whether retrying is the right response. **The same mapping applies to the WebSocket handshake** ([`websocket-protocol.md`](websocket-protocol.md) §2.3): an unanswerable probe closes with `service_unavailable` rather than `auth_failed`, so a client does not burn its refresh on a pool wait.
+
 ### 3.3 Auth failure and retry (FR-6.2)
 
 When the SDK receives an HTTP response whose status code is `401`:
@@ -6177,6 +6190,8 @@ An accepted **share** ([MYR-184](https://linear.app/myrobotaxi/issue/MYR-184)) b
 
 **IT FLIPS ON ITS OWN, on BOTH edges, with no user action** — the window opens and closes on the clock. A client MUST re-read the catalog on the `trip_started` / `trip_ended` pushes rather than trusting a cached row. **REST-read-time only:** no `vehicle_update` frame carries it.
 
+> **⚠ THE OWNER'S OWN ROW CARRIES IT, and until [MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) the server did not emit it there.** The catalog's trip leg answers two questions that look alike and are not: *which cars does a trip ADD to this response* (participant rows only — an owner's cars arrive through the FIRST merge leg) and *which of the cars already in it have a window open right now*. An owner's own car is in the second set and **never** in the first, and one statement served both. The consequence was not cosmetic: the iOS client registers its ActivityKit push-to-start token (§7.30.8) for the trips the **catalog** names, so the owner of the car on the trip registered no token at all and could not have received a leg card on their own trip whatever the leg detector did. A client reading this field for that purpose **must include owner rows**.
+
 ##### Kill switch `TRIPS_ENABLED`
 
 Unset is ON. `TRIPS_ENABLED=false` makes **every one of the ten routes — and the two §7.21.7 leg-token routes** — answer `503 service_unavailable`, reads included: a feature that can be switched off has to be switched off whole, and leaving `GET` alive would show an owner a live trip card whose every button returns an error. Anything `ParseBool` rejects **stops the process at boot** rather than being read as "off" — a typo that silently disabled a feature would be indistinguishable from an intentional shutdown.
@@ -6437,6 +6452,22 @@ Content-Type: application/json
 **THE MEMBERSHIP READ IS THE GATE.** Registering a token is granting the server permission to write to this phone's lock screen about this trip, so it has to be a trip the caller is actually on. The read answers `404` for everybody else, so the endpoint is not an oracle for trip ids either.
 
 **THE TOKEN IS P1 AND A CAPABILITY.** Whoever holds it together with the team's APNs signing key can start a Live Activity on that phone. It is **never echoed in a response, never placed in an error message, and not logged on this path at all**. The `204` carries **no body**, which is the strongest form of *"the caller already knows what they sent"* — echoing it would only put it in every client log and proxy trace.
+
+##### ⚠ REGISTERING DURING AN OPEN LEG RAISES THE CARD IMMEDIATELY ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612))
+
+**A SERVER-SIDE BEHAVIOUR THE CLIENT MUST KNOW ABOUT, because it can produce a Live Activity out of a call that answers `204` with no body.** If the trip has an **open leg** at the moment the registration commits, the server sends **this device** that leg's push-to-start at once, before answering.
+
+**It is why anybody gets a card on a first leg at all.** The leg-open fan-out runs **once**, at the instant the leg opens, over whatever tokens are registered then — and registering is what a phone does when the `trip_leg_started` push **wakes** it, which is necessarily afterwards. In production on 2026-09-08 the only participant's token was written **three seconds** after the leg it was for opened; nothing looked again, and the trip ran an entire evening with no card for anybody.
+
+**IDEMPOTENT PER (DEVICE, LEG), STRUCTURALLY.** Both senders — the fan-out and this catch-up — claim `go_trip_activity_tokens.started_leg_id` before sending, so:
+
+- **Re-POSTing the SAME token sends nothing.** An app that registers on every foreground gets one card per leg, not one per foreground.
+- **Rotating the token DOES send again**, because the new token addresses a phone that holds no card for this leg. That is the intended behaviour and not a duplicate.
+- A new leg claims again: the stamp is per **leg**, and a trip may contain a dozen.
+
+**THE CONTENT STATE CARRIES NO `eta`**, exactly as the fan-out's does. A registration is not a telemetry frame, and the honest answer at this instant is that no arrival estimate has been computed; the next frame that earns a refresh puts a time on the card. Inventing one is forbidden by MYR-194's rule, and an absent `eta` is a first-class state the client already renders.
+
+**A REFUSED REGISTRATION RAISES NOTHING.** The catch-up is a consequence of a **stored** token: a caller who fails the membership read gets `404` and no card, which is the direction that matters — a card names the car and where it is going.
 
 #### 7.30.9 `DELETE /api/trips/{tripId}/activity-start-token` — clear it
 

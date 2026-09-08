@@ -266,6 +266,52 @@ the dwell — keeps its leg open until the window closes, and is then settled as
 `completed`. That is the honest answer, since nothing ever proved it stayed, and
 it is the same dependency `internal/arrival` has on the same poller.
 
+### An empty destination name is not a cleared route (MYR-612)
+
+**Tesla streams DELTAS, and one of them can carry an EMPTY destination name while
+the car is plainly still navigating.** Production, 2026-09-08: a car four minutes
+into a leg to a hotel in Sedona sent exactly that — an empty name, `status =
+driving`, `minutesToArrival = 98`, and the dash still showing the place. The
+detector read it as *"the driver cancelled navigation"*, closed leg A at
+03:40:22, and opened leg B for the same journey at 03:40:24. **Two rows, two
+`trip_leg_started` banners, two push-to-start fan-outs, and leg A's card ended as
+`completed` on a lock screen while the car drove on.**
+
+**A clear is now PENDING until something confirms it.** While it is pending the
+remembered destination, its coordinate, the arrival latch and the dwell all
+survive, and the card is deliberately not refreshed — the honest content-state is
+the one already showing, and its stale-date keeps it honest. Three things
+confirm:
+
+| Confirmation | Why it needs no debounce |
+|--------------|--------------------------|
+| **Park** | A stopped car with no route is not on its way anywhere. The park-short branch would reach the same verdict a frame later regardless. |
+| **Sustained** | `LegClearGrace` (60 s) has passed with **no name AND no arrival estimate**. Both, not either: a car still reporting how long it has to go still has somewhere to be, whatever a delta left out of one frame. On a genuine cancellation Tesla stops sending both, so the two go stale together. |
+| **Arrival** | The strongest claim, checked first, and the only one that fires `trip_leg_arrived`. |
+
+### Resuming a leg, and why it is a SECOND line rather than the first
+
+Debouncing cannot prevent every wrong close: a process restart between the two
+frames, two servers during a rolling deploy, a grace that expired one frame
+before the name came back. So when a car sets off again for the **same place**
+within `LegMergeWindow` (120 s) of closing a leg **without arriving**, that leg is
+**RESUMED** rather than replaced — `store.ResumeRecentLeg`, served by
+`idx_go_trip_legs_vehicle_ended` (migration 0049).
+
+The three columns it touches are exactly the ones that describe an ending:
+
+| Column | On resume | Why |
+|--------|-----------|-----|
+| `ended_at` | cleared | The leg is under way again. |
+| `activity_ended_at` | cleared | Whatever ending was delivered is undone, so the leg's real ending can claim and send. |
+| `activity_started_at` | cleared **only if a card was actually ENDED** | A card that was ended is gone from the lock screen and the resumed leg needs a new one; a card still running must not be started twice. |
+| `started_notified_at` | **untouched** | The banner already went out for this journey and this is the same journey. The duplicate banner is what the incident was about. |
+| `arrived` | n/a | `arrived = false` is a precondition of being resumable at all. *"Your car arrived"* cannot be taken back. |
+
+**The destination is compared on the PLAINTEXT, in Go.** `destination_name_enc` is
+sealed with a random nonce, so two seals of one name are different bytes and no
+SQL predicate can match them.
+
 ### The four endings, and what each one sends
 
 | Ending | `arrived` | `trip_leg_arrived` push | Final card status |
@@ -316,6 +362,64 @@ a courtesy on top of the banners, not a precondition for them: a trip whose
 participants are all on the web produces zero cards and five perfectly good
 notifications.
 
+**TWO SENDERS RAISE THE CARD, AND THE SECOND ONE IS WHY ANYBODY GETS ONE
+(MYR-612).** The leg-open fan-out runs **once**, at the instant the leg opens,
+over whatever tokens are registered then — while registering is what a phone does
+when the `trip_leg_started` push **wakes** it, necessarily afterwards. Production,
+2026-09-08: the only participant's token was written at 03:40:27 for a leg that
+opened at 03:40:24. Nothing looked again, `go_live_activities` stayed empty, and
+the trip ran the whole evening with no card for anybody.
+
+So `POST /api/trips/{tripId}/activity-start-token` is itself an occasion to send:
+if the trip has an open leg, that device gets its push-to-start before the `204`.
+The two senders cannot double-send because both **claim** first:
+
+```
+go_trip_activity_tokens.started_leg_id      (migration 0050)
+    the leg whose push-to-start was last sent TO THIS DEVICE
+
+    UPDATE … SET started_leg_id = $leg
+    WHERE (trip_id, user_id) = (…) AND started_leg_id IS DISTINCT FROM $leg
+    RETURNING push_to_start_token, sandbox
+```
+
+`IS DISTINCT FROM` rather than `<>` because the column is NULL until the first
+claim, and `NULL <> 'leg-x'` is NULL — which is not TRUE and would claim nothing
+at all on the very first send. The statement RETURNS the token so the sender
+pushes exactly the bytes it claimed; a rotation between a list and a send would
+otherwise push a dead token and stamp the row as done.
+
+**Why not `activity_started_at`?** That is a LEG-level claim — *"the fan-out has
+run"* — and cannot answer the per-DEVICE question the catch-up asks. **A token
+ROTATION resets the stamp** (the new token addresses a phone holding no card);
+an idempotent re-POST of the same value, which an app does on every foreground,
+does not. A send that fails for a reason that might not repeat **releases** its
+claim, so a later attempt can retry; a `410` does not, because that verdict
+deletes the row.
+
+### What one frame costs
+
+The detector subscribes to the busiest topic in the service, so what the frame
+path does per frame is a design constraint rather than a detail. MYR-612 is the
+standing evidence: a car with a leg under way ran **two** unbounded statements
+per frame on the single bus goroutine — the open-leg read and the trip audience —
+at up to one per second for four minutes, and a JWT existence probe belonging to
+an unrelated HTTP request timed out against the starved pool and answered `401`.
+
+- The **audience** is read at a leg EDGE, never on the frame path. `updateLeg`
+  never needed it: the only field it read was the vehicle id, which the leg row
+  already carries.
+- The **open-leg read** is served from a per-car cache for `LegReadTTL` (5 s),
+  invalidated by every write and keyed on the FRAME clock, checked from both
+  sides so a backdated MYR-394 poll frame forces a re-read rather than extending
+  the window.
+- Every remaining read is bounded by `Config.Timeout` and every edge by
+  `Config.EdgeTimeout`, which is what that field's documentation always claimed
+  and did not deliver on this path.
+
+`TestUnderwayFramesDoNotQueryPerFrame` pins the cost, because the property is
+invisible to every functional test — which is how it regressed.
+
 ### The four claims
 
 A leg has four independent deliveries, and each carries its own durable stamp on
@@ -329,6 +433,10 @@ be retryable without re-sending the other:
 | `activity_started_at` | the push-to-start fan-out |
 | `arrived_notified_at` | the `trip_leg_arrived` banner |
 | `activity_ended_at` | the alerting-update-then-end pair |
+
+A fifth stamp lives on the OTHER table, because it answers a per-DEVICE question
+these four cannot: `go_trip_activity_tokens.started_leg_id` (MYR-612), claimed by
+both push-to-start senders. See The Live Activity, above.
 
 ### The window sweeper
 
