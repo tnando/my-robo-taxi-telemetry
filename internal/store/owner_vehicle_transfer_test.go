@@ -101,6 +101,16 @@ func TestOwnerProvisioner_OwnerWinsTransfer(t *testing.T) {
 			t.Errorf("vehicle id = %q, want the EXISTING row %q — a transfer moves a row, "+
 				"it does not create a second one", out.VehicleID, vehicleID)
 		}
+		// MYR-601: the transfer is TWO access-set changes, and the second one is
+		// only actionable if the caller is told whose it was. The former driver's
+		// cached set has to be busted and their live sockets closed — the same
+		// account this transaction just revoked every share of — and this is the
+		// only place that id is known.
+		if out.PreviousUserID != transferDriver {
+			t.Errorf("previous user = %q, want the FORMER DRIVER %q — without it their cached "+
+				"access set stays warm for the TTL and their open socket keeps streaming the "+
+				"car's live GPS", out.PreviousUserID, transferDriver)
+		}
 
 		var owner, name string
 		if err := testPool.QueryRow(ctx,
@@ -169,6 +179,12 @@ func TestOwnerProvisioner_OwnerWinsTransfer(t *testing.T) {
 			t.Fatalf("outcome = %q, want skipped_cross_user — OWNER WINS BOTH WAYS; a driver "+
 				"may not take an owner's row, and the owner sharing the car back is the "+
 				"documented path", out.Outcome)
+		}
+		// And a SKIP names nobody (MYR-601). A previous holder reported here
+		// would have the hub close an untouched owner's sessions over a link
+		// that changed nothing.
+		if out.PreviousUserID != "" {
+			t.Errorf("previous user = %q on a skip, want empty", out.PreviousUserID)
 		}
 		var owner string
 		if err := testPool.QueryRow(ctx,
