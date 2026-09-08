@@ -130,5 +130,12 @@ EXCEPTION
 END;
 $$;
 
+-- ⚠ THE COMMENT NAMES NO TABLE, AND THAT IS CG-DL-9 RATHER THAN STYLE. The
+-- guard strips SQL comment lines and then greps the rest of the file for a
+-- Prisma-owned table name — so a name inside a STRING LITERAL is a violation
+-- even though a reader would call it documentation. The first version of this
+-- COMMENT named that table and column outright, and failed the build on it.
+-- The table this function is for is named in the prose above, where the rule
+-- permits it.
 COMMENT ON FUNCTION go_try_timestamptz(text) IS
-    'MYR-608: try-cast for the Prisma-owned Drive."startTime" TEXT column. Returns NULL where a bare ::timestamptz would fail the whole statement.';
+    'MYR-608: try-cast for the RFC 3339 TEXT start-instant column read by the trip window statements. Returns NULL where a bare ::timestamptz would fail the whole statement.';
