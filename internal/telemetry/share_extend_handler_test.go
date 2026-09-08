@@ -24,6 +24,11 @@ import (
 
 const shareExtendPath = "/api/vehicles/" + shareFixtureVeh + "/share/extend"
 
+// shareExtendBody is a well-formed request naming an accepted grant. Every test
+// that is not ABOUT the body sends this one, so a case that fails does so for
+// the reason it is named after.
+const shareExtendBody = `{"shareId":"csh0123456789abcdef0123456789abcd"}`
+
 // extendedGrantRow is the row the store returns from a successful extend: an
 // ACCEPTED grant on the path vehicle, carrying the source's label and flags and
 // no code (the store blanks it in SQL for any non-pending row).
@@ -106,13 +111,11 @@ func TestShareExtendHandler_OwnerExtendsAnAcceptedGrant(t *testing.T) {
 }
 
 func TestShareExtendHandler_Refusals(t *testing.T) {
-	const validBody = `{"shareId":"csh0123456789abcdef0123456789abcd"}`
-
 	t.Run("a person who already has the car is 409 already_shared", func(t *testing.T) {
 		store := &fakeShareInviteStore{extendErr: ErrShareAlreadyGranted}
 		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
-		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
@@ -144,7 +147,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 				store := &fakeShareInviteStore{extendErr: sdk.ErrNotFound}
 				mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
-				rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+				rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 				if rec.Code != http.StatusNotFound {
 					t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
@@ -160,7 +163,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 		store := &fakeShareInviteStore{extended: extendedGrantRow()}
 		mux := newShareInviteMux(t, shareViewerUser, store, shareOwnerUser, nil)
 
-		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403 vehicle_not_owned (body %s)", rec.Code, rec.Body.String())
@@ -175,7 +178,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
 		req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, shareExtendPath,
-			bytes.NewReader([]byte(validBody)))
+			bytes.NewReader([]byte(shareExtendBody)))
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
 
@@ -193,7 +196,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 		store := &fakeShareInviteStore{extendErr: ErrShareVehicleNotOwned}
 		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, nil)
 
-		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
@@ -225,7 +228,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 				invalidator := &fakeAccessInvalidator{}
 				mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, invalidator)
 
-				rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+				rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 				if rec.Code != http.StatusConflict {
 					t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
@@ -257,7 +260,7 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 		invalidator := &fakeAccessInvalidator{}
 		mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, invalidator)
 
-		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+		rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusInternalServerError {
 			t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
@@ -323,12 +326,11 @@ func TestShareExtendHandler_RefusesUnacknowledgedDriverCar(t *testing.T) {
 		mux.HandleFunc("POST /api/vehicles/{vehicleId}/share/extend", h.ServeExtend)
 		return mux
 	}
-	const body = `{"shareId":"csh0123456789abcdef0123456789abcd"}`
 
 	t.Run("refused with a 409 and nothing written", func(t *testing.T) {
 		store := &fakeShareInviteStore{extended: extendedGrantRow()}
 		rec := doShareRequest(t, newMux(t, VehicleDriverAccess{Present: true}, store),
-			http.MethodPost, shareExtendPath, body)
+			http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusConflict {
 			t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
@@ -341,7 +343,7 @@ func TestShareExtendHandler_RefusesUnacknowledgedDriverCar(t *testing.T) {
 	t.Run("an acknowledged driver car may extend", func(t *testing.T) {
 		store := &fakeShareInviteStore{extended: extendedGrantRow(), extendee: shareViewerUser}
 		acked := VehicleDriverAccess{Present: true, AcknowledgedAt: time.Now().Add(-time.Hour)}
-		rec := doShareRequest(t, newMux(t, acked, store), http.MethodPost, shareExtendPath, body)
+		rec := doShareRequest(t, newMux(t, acked, store), http.MethodPost, shareExtendPath, shareExtendBody)
 
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("status = %d, want 201 — the gate is the acknowledgment, not the access type (body %s)",

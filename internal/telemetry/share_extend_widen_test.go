@@ -55,8 +55,6 @@ func newWidenMux(t *testing.T, store ShareInviteStore, inv *fakeAccessInvalidato
 	return mux
 }
 
-const widenBody = `{"shareId":"csh0123456789abcdef0123456789abcd"}`
-
 // A successful extend must re-handshake the GRANTEE's live sessions. Without
 // it, `Client.vehicleIDs` stays frozen at whatever the handshake read, so the
 // person the car was just shared with does not get it until they happen to
@@ -68,7 +66,7 @@ func TestExtendWidensTheGranteesLiveSocket(t *testing.T) {
 	widener := &recordingWidener{inv: inv}
 
 	rec := doShareRequest(t, newWidenMux(t, store, inv, widener),
-		http.MethodPost, shareExtendPath, widenBody)
+		http.MethodPost, shareExtendPath, shareExtendBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -118,7 +116,7 @@ func TestExtendDoesNotWidenOnRefusal(t *testing.T) {
 			widener := &recordingWidener{inv: inv}
 
 			doShareRequest(t, newWidenMux(t, store, inv, widener),
-				http.MethodPost, shareExtendPath, widenBody)
+				http.MethodPost, shareExtendPath, shareExtendBody)
 
 			if len(widener.calls) != 0 {
 				t.Errorf("widener called %+v on a refused extend, want not at all", widener.calls)
@@ -135,7 +133,7 @@ func TestExtendSucceedsWithNoWidenerConfigured(t *testing.T) {
 	inv := &fakeAccessInvalidator{}
 	mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, inv)
 
-	rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, widenBody)
+	rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, shareExtendBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -154,7 +152,7 @@ func TestExtendWithNoGranteeWidensNobody(t *testing.T) {
 	widener := &recordingWidener{inv: inv}
 
 	rec := doShareRequest(t, newWidenMux(t, store, inv, widener),
-		http.MethodPost, shareExtendPath, widenBody)
+		http.MethodPost, shareExtendPath, shareExtendBody)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
 	}
