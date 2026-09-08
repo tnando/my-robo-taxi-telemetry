@@ -233,6 +233,13 @@ func (g *accessGain) record(vehicleID, reason string) {
 // somebody ELSE — the accounts the transfer cut — and the one fact about the
 // caller travels in `gain`, to be announced once by flushGain when the pass is
 // over.
+//
+// WHICH ALSO SETTLES THE ONE OVERLAPPING CASE. The arriving owner can
+// themselves be a revoked grantee — the driver may have shared the car BACK to
+// its real owner before they linked — so one person can appear in both halves.
+// Losses first, gain last is what makes that land correctly: they are cut and
+// then re-handshaked, and the reconnect resolves them as the owner. The
+// reverse order would have left them cut.
 func (h *ownerStreamHook) announceProvisioned(res store.VehicleUpsertResult, gain *accessGain) {
 	switch {
 	case res.Outcome == store.VehicleOwnedByTransfer:
