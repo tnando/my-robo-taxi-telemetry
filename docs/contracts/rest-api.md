@@ -1285,7 +1285,7 @@ This is explicitly NOT an OOM concern -- a single drive's polyline fits in any v
 |------|--------------|------|
 | 401 | `auth_failed` | Missing/malformed/invalid token |
 | 403 | `vehicle_not_owned` | Caller has no access to the drive's vehicle |
-| 404 | `not_found` | `driveId` does not exist (or is not visible) -- **including a drive pruned by the 365-day retention job**; a drive OUTSIDE the trip window of a `trip_participant` caller (§5.2.4); and, for that same role, a drive whose stored `startTime` cannot be read at all (§7.4, *A data fault is logged, never told to a participant*) |
+| 404 | `not_found` | `driveId` does not exist (or is not visible) -- **including a drive pruned by the 365-day retention job**; a drive OUTSIDE the trip window of a `trip_participant` caller (§5.2.4); and, for that same role, a drive whose stored `startTime` cannot be read at all (see *A data fault is logged, never told to a participant*, below) |
 | 429 | `rate_limited` | REST rate limit breached |
 | 500 | `internal_error` | Store-layer error, decryption failure |
 
