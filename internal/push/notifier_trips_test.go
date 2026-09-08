@@ -217,3 +217,51 @@ func TestTripPayload_OmitsRideID(t *testing.T) {
 		t.Errorf("ride payload lost rideId: %v", ride)
 	}
 }
+
+// TestTripPayload_DeletedIsABooleanAndOnlyPresentOnADeletion pins the MYR-607
+// flag at the JSON level.
+//
+// TWO PROPERTIES, and both were choices. It is a JSON **boolean**, not the
+// string "true" — a flag a client has to string-compare is wrong in a different
+// way in every language that decodes this payload — and it is **absent** on an
+// ordinary end rather than sent as `false`, so every push that existed before
+// MYR-607 marshals byte-identically.
+func TestTripPayload_DeletedIsABooleanAndOnlyPresentOnADeletion(t *testing.T) {
+	decode := func(t *testing.T, p TripPush) map[string]any {
+		t.Helper()
+		body, err := buildPayload(Notification{Title: "t", Body: "b", UserInfo: p.userInfo()})
+		if err != nil {
+			t.Fatalf("buildPayload: %v", err)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(body, &out); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		return out
+	}
+
+	t.Run("a deletion carries deleted: true", func(t *testing.T) {
+		payload := decode(t, TripPush{
+			TripID: "trip-1", VehicleID: "veh-1", Event: TripEventEnded, Deleted: true,
+		})
+		deleted, present := payload["deleted"]
+		if !present {
+			t.Fatalf("payload has no deleted key: %v", payload)
+		}
+		if deleted != true {
+			t.Errorf("deleted = %#v, want the boolean true (not a string)", deleted)
+		}
+		// It still reads as an ordinary end to a build that has never heard of
+		// the flag, which is why it is not a sixth event.
+		if payload["event"] != string(TripEventEnded) {
+			t.Errorf("event = %v, want trip_ended", payload["event"])
+		}
+	})
+
+	t.Run("an ordinary end omits the key entirely", func(t *testing.T) {
+		payload := decode(t, TripPush{TripID: "trip-1", VehicleID: "veh-1", Event: TripEventEnded})
+		if v, present := payload["deleted"]; present {
+			t.Errorf("an ordinary end carries deleted = %#v; absent is the contract", v)
+		}
+	})
+}
