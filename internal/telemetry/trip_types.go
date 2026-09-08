@@ -167,6 +167,15 @@ type TripStore interface {
 	// — it reports nothing about whether the trip exists.
 	LeaveTrip(ctx context.Context, tripID, userID string) error
 
+	// DeleteTrip removes the trip and its three children in one transaction,
+	// and writes the `trip.deleted` audit row inside it (MYR-607, §7.30.10).
+	// OWNER-ONLY: ErrTripNotFound for a participant, a stranger and an unknown
+	// id alike, so the most destructive route on this surface tells a caller
+	// nothing the read routes would not.
+	//
+	// The vehicle's DRIVES are untouched — a trip never owned one.
+	DeleteTrip(ctx context.Context, tripID, ownerUserID string) error
+
 	// TripDrives lists the window's drives for a caller who owns the trip or
 	// is a live participant.
 	TripDrives(ctx context.Context, tripID, userID string, cursor DriveListCursor, limit int) (DriveListPage, error)

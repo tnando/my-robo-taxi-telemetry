@@ -29,11 +29,19 @@ type Notification struct {
 	//
 	// It exists because the trips fan-out addresses a subject the ride-shaped
 	// payload cannot name: {tripId, vehicleId, event, destinationName?} plus
-	// the deep link the app routes on. Values are strings only — the app reads
-	// them to pick a screen, never to render numbers — and every key put here
-	// is subject to the same payload policy as the alert body (copy.go): this
-	// is a lock screen, and userInfo travels to it whether or not it is drawn.
-	UserInfo map[string]string
+	// the deep link the app routes on. Every key put here is subject to the
+	// same payload policy as the alert body (copy.go): this is a lock screen,
+	// and userInfo travels to it whether or not it is drawn.
+	//
+	// VALUES ARE `any` RATHER THAN `string` SINCE MYR-607, and the widening
+	// bought exactly one thing: `deleted` is a JSON BOOLEAN on the trips
+	// fan-out. Every other value on this surface is and stays a string — the
+	// app reads them to pick a screen, never to render numbers — so every push
+	// that existed before MYR-607 marshals byte-identically. A flag is the one
+	// shape where the string spelling would cost something real: `"true"` is a
+	// value a client has to compare rather than test, and the comparison is
+	// wrong in a different way in every language that decodes this payload.
+	UserInfo map[string]any
 	// CollapseSubject overrides the subject half of the `apns-collapse-id`
 	// (MYR-554) for a notification that is not about a ride. Empty means "use
 	// RideID", which is every ride push and therefore leaves their headers

@@ -19,6 +19,7 @@ import (
 //	GET    /api/trips
 //	GET    /api/trips/{tripId}
 //	PATCH  /api/trips/{tripId}
+//	DELETE /api/trips/{tripId}
 //	POST   /api/trips/{tripId}/end
 //	DELETE /api/trips/{tripId}/participants/me
 //	GET    /api/trips/{tripId}/drives
@@ -82,6 +83,7 @@ func setupTripEndpoints(
 	deps.srv.HandleFunc("GET /api/trips", handler.ServeList)
 	deps.srv.HandleFunc("GET /api/trips/{tripId}", handler.ServeGet)
 	deps.srv.HandleFunc("PATCH /api/trips/{tripId}", handler.ServePatch)
+	deps.srv.HandleFunc("DELETE /api/trips/{tripId}", handler.ServeDelete)
 	deps.srv.HandleFunc("POST /api/trips/{tripId}/end", handler.ServeEnd)
 	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/participants/me", handler.ServeLeave)
 	deps.srv.HandleFunc("GET /api/trips/{tripId}/drives", handler.ServeDrives)
@@ -91,7 +93,7 @@ func setupTripEndpoints(
 	deps.srv.HandleFunc("DELETE /api/trip-legs/{legId}/activity-token", handler.ServeEndLegActivityToken)
 
 	logger.Info("trip endpoints enabled (§7.30)",
-		slog.Int("routes", 11),
+		slog.Int("routes", 12),
 		slog.Bool("feature_enabled", deps.cfg.TripsEnabled()))
 
 	// RETURNED, not discarded: the same repository is the drives handlers'
@@ -164,6 +166,10 @@ func (a *tripStoreAdapter) EndTrip(ctx context.Context, tripID, ownerUserID stri
 func (a *tripStoreAdapter) LeaveTrip(ctx context.Context, tripID, userID string) error {
 	_, err := a.repo.Leave(ctx, tripID, userID)
 	return translateTripError(err)
+}
+
+func (a *tripStoreAdapter) DeleteTrip(ctx context.Context, tripID, ownerUserID string) error {
+	return translateTripError(a.repo.Delete(ctx, tripID, ownerUserID))
 }
 
 func (a *tripStoreAdapter) TripDrives(

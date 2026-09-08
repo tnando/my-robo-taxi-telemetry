@@ -75,6 +75,24 @@ type TripPush struct {
 	// UserIDs is the resolved audience — participants, and the owner on the leg
 	// events. Duplicates and empties are tolerated and skipped.
 	UserIDs []string
+	// Deleted marks a `trip_ended` that is really a DELETION (MYR-607,
+	// rest-api.md §7.30.10). It reaches the payload as `deleted: true` and is
+	// omitted entirely when false.
+	//
+	// IT RIDES `trip_ended` RATHER THAN BEING A SIXTH EVENT, and that is a
+	// contract decision rather than an economy. Every installed build switches
+	// on `event`, and a value they have never seen would route to their default
+	// arm — which for a lifecycle push is "do nothing" — so a deleted trip
+	// would silently stay on the phone of exactly the people it was deleted
+	// out from under. `trip_ended` is already the sentence they act on: the
+	// window is over, drop the live card. `deleted` only tells a build that
+	// KNOWS about it to go one step further and take the trip out of the list
+	// as well, instead of leaving an ended one behind.
+	//
+	// Set only on the lifecycle end. A leg push never carries it; a leg belongs
+	// to a trip that is being deleted whole, and its card is ended by the
+	// settlement before this banner goes out.
+	Deleted bool
 }
 
 // deepLink is the `myrobotaxi://trips/{tripId}` route the app opens when the
@@ -101,8 +119,13 @@ func (t TripPush) topic() string { return "trip." + string(t.Event) }
 // `destinationName` is present ONLY on the two leg events and only when it is
 // known, following the same absent-means-unknown discipline the content-state
 // uses: an empty string would be a value the client has to special-case.
-func (t TripPush) userInfo() map[string]string {
-	info := map[string]string{
+//
+// `deleted` follows the same discipline for the same reason: it is written as
+// the boolean `true` on a deletion (MYR-607) and OMITTED otherwise, never sent
+// as `false`. Absent means "an ordinary end", which is what every push before
+// MYR-607 was, so their payloads are unchanged to the byte.
+func (t TripPush) userInfo() map[string]any {
+	info := map[string]any{
 		"tripId":    t.TripID,
 		"vehicleId": t.VehicleID,
 		"event":     string(t.Event),
@@ -110,6 +133,9 @@ func (t TripPush) userInfo() map[string]string {
 	}
 	if t.DestinationName != "" {
 		info["destinationName"] = t.DestinationName
+	}
+	if t.Deleted {
+		info["deleted"] = true
 	}
 	return info
 }

@@ -62,6 +62,25 @@ type TripNotifier interface {
 	// TripEnded announces that a window has CLOSED EARLY, at the owner's
 	// request. The natural expiry is likewise the sweeper's.
 	TripEnded(ctx context.Context, trip TripData, userIDs []string)
+
+	// TripDeleted settles a trip the owner is about to DELETE (MYR-607,
+	// §7.30.10): it ends every open leg and its Live Activities, then announces
+	// `trip_ended` carrying `deleted: true`.
+	//
+	// ⚠ IT IS CALLED BEFORE THE ROWS ARE GONE, and that ordering is normative
+	// rather than incidental. Everything it does reads the trip: who is on it,
+	// which legs are open, which device holds which card. After the delete
+	// there is nothing left in the database that could name any of them, so a
+	// settlement that ran afterwards would end no card and tell nobody, and
+	// every participant's lock screen would keep a live Activity for a trip
+	// that no longer exists until ActivityKit's own staleness ceiling retired
+	// it.
+	//
+	// It is the FOURTH REST-caused event and still not a fourth push event:
+	// `deleted` rides `trip_ended` rather than becoming a sixth member of the
+	// `trips` category — see push.TripPush.Deleted for why an unknown `event`
+	// would be worse than a flag an old build ignores.
+	TripDeleted(ctx context.Context, trip TripData, userIDs []string)
 }
 
 // noopTripNotifier is what a handler uses when no notifier is wired. Named and
@@ -72,6 +91,7 @@ type noopTripNotifier struct{}
 func (noopTripNotifier) TripAdded(context.Context, TripData, []string)   {}
 func (noopTripNotifier) TripStarted(context.Context, TripData, []string) {}
 func (noopTripNotifier) TripEnded(context.Context, TripData, []string)   {}
+func (noopTripNotifier) TripDeleted(context.Context, TripData, []string) {}
 
 // participantUserIDs is the fan-out list for a trip: every live participant.
 //
