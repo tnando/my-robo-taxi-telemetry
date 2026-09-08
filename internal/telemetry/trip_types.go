@@ -48,6 +48,21 @@ type TripData struct {
 
 	DriveCount int
 
+	// TotalDistanceMiles and TotalDurationMinutes are the window's drives
+	// summed (MYR-608), or nil when the window holds none. Same window, same
+	// read and same statement as DriveCount, so the three numbers on a card
+	// cannot describe three different sets of drives.
+	//
+	// RUNNING TOTALS: an active trip reports what it has driven so far, and the
+	// numbers climb between reads. The client decides how to render that; the
+	// server does not withhold a total for being provisional.
+	//
+	// MINUTES HERE, SECONDS ON THE WIRE — converted at the same boundary
+	// `DriveSummary.durationSeconds` is converted at, because the underlying
+	// column is minutes and the contract is seconds.
+	TotalDistanceMiles   *float64
+	TotalDurationMinutes *int64
+
 	// CurrentLeg is the driving leg underway, or nil. INFORMATIONAL, NEVER A
 	// GATE — a consumer must not condition its map, its live screen or its
 	// socket subscription on this being present. An active trip with no leg is

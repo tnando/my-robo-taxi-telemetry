@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Paginated drive list from GET /api/vehicles/{vehicleId}/drives. Each item is a DriveSummary (subset of FR-3.4 for list rendering). Ordered startTime DESC, id DESC. Includes startLocation/startAddress/endLocation/endAddress (MYR-145) so the SDK can render origin/destination labels without per-row drive-detail fetches; the second item demonstrates the nullable-on-the-wire convention (all four location keys omitted when the underlying Drive row is empty). Deliberately omits energyUsedKwh/fsdMiles/routePoints -- those are in DriveDetail and DriveRoute. The SDK pairs this REST fetch with the WebSocket drive_ended subscription for FR-9.1/FR-9.2.",
+    "description": "Paginated drive list from GET /api/vehicles/{vehicleId}/drives. Each item is a DriveSummary (subset of FR-3.4 for list rendering). Ordered startTime DESC, id DESC. THE TWO ITEMS DEMONSTRATE THE TWO NULLABILITY CONVENTIONS THIS SHAPE USES, AND THEY ARE NOT THE SAME CONVENTION. (1) OMIT-WHEN-EMPTY: the four location keys (startLocation/startAddress/endLocation/endAddress, MYR-145) are ABSENT on the second item, because the server may still have something to say about them later — a reverse-geocode can arrive after the drive ends. (2) REQUIRED-AND-NULLABLE: tripId (MYR-608, contracts v0.44.0) is PRESENT ON BOTH ITEMS — a cuid on the first, the JSON literal null on the second — because it is a DECIDED answer. It names the trip window the caller's own role places the drive in; null means no window of theirs covers it. An absent key would be indistinguishable from a server that does not send the field at all, and grouping drives under trips is exactly the feature that must not silently fall back to ungrouped. validateDrivesList asserts tripId as a KEY for that reason. fsdMiles/fsdPercentage are present on every item (MYR-152 promoted them to DriveSummary and marked them required; this fixture predated that and omitted them until MYR-608's review round). Deliberately omits energyUsedKwh/routePoints — those are in DriveDetail and DriveRoute. The SDK pairs this REST fetch with the WebSocket drive_ended subscription for FR-9.1/FR-9.2.",
     "anchoredFRs": ["FR-3.2", "FR-9.1", "FR-9.2"],
     "scenario": "happy-path"
   },
@@ -21,6 +21,9 @@
       "maxSpeedMph": 65.2,
       "startChargeLevel": 82,
       "endChargeLevel": 76,
+      "fsdMiles": 9.8,
+      "fsdPercentage": 79.0,
+      "tripId": "cltrp1234567890abcdef",
       "createdAt": "2026-04-13T18:46:19Z"
     },
     {
@@ -35,6 +38,9 @@
       "maxSpeedMph": 42.0,
       "startChargeLevel": 85,
       "endChargeLevel": 82,
+      "fsdMiles": 0.0,
+      "fsdPercentage": 0.0,
+      "tripId": null,
       "createdAt": "2026-04-13T08:29:08Z"
     }
   ],

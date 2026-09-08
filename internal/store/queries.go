@@ -463,6 +463,15 @@ WHERE d."endTime" IS NULL OR d."endTime" = ''`
 //
 // Cost is a wash: ciphertext is base64 and runs ~40 bytes longer than the
 // address it replaces, which keeps the page well inside the ~5 KB budget.
+//
+// MYR-608 ADDED NO COLUMN HERE, and that is the design rather than an
+// economy. `tripId` is a WINDOW JOIN, not a stored fact: a drive is never
+// tagged with a trip at write time — which is exactly what lets a
+// back-dated window pick up legs already driven, with nothing to backfill —
+// so each statement using this projection appends its OWN trip-id
+// expression after it. The three spellings live in trip_queries.go beside
+// the window predicate they restate; `ownerTripIDForDriveExpr` there argues
+// why they are three and not one.
 const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
 	"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
@@ -472,25 +481,69 @@ const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endT
 // newest `limit + 1` drives for the given vehicle, ordered per
 // rest-api.md §4.2.2. The +1 is the "is there more?" probe the
 // handler trims back to `limit` before encoding.
-const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+//
+// ⚠ $2 IS THE CALLER (MYR-608), in this statement and in the cursor form
+// below alike. `ownerTripIDForDriveExpr` hard-codes that placeholder so both
+// statements can stay `const` — see its own comment for why that matters
+// more than the parameter order does. §7.2's gate is owner-only, so the
+// caller bound at $2 is the vehicle's owner and the expression answers
+// "which of YOUR windows covers this drive".
+//
+// ⚠ THE `d` ALIAS IS LOAD-BEARING: the trip-id expression correlates on
+// `d."startTime"`, and it has to name something the sub-select's own FROM
+// clause does not shadow.
+//
+// ── WHAT THE CORRELATED SUB-SELECT ACTUALLY COSTS (MYR-608 review round) ────
+//
+// IT IS NOT PAID PER DRIVE IN THE CAR'S HISTORY, WHICH IS THE ONLY REASON THIS
+// SHAPE IS AFFORDABLE. Postgres postpones the `SubPlan` past the `Sort`, so it
+// is evaluated on the ~21 rows the `LIMIT` returns rather than on all 60 000 a
+// well-driven car has. Measured on Postgres 16 against a synthetic
+// 60 000-drive vehicle, `EXPLAIN (ANALYZE)`, median of three:
+//
+//	§7.2 WITHOUT the trip-id expression (pre-MYR-608)   21.9 ms
+//	§7.2 WITH it (this statement)                       21.6 ms
+//
+// So `tripId` and the totals add no measurable time to this list. A projection
+// that could not be postponed — a join, or a lateral producing one row per
+// drive — would have been paid 60 000 times instead of 21.
+//
+// ⚠ WHAT DOES COST 21 ms IS THE `Sort` THIS STATEMENT CANNOT AVOID, and it is
+// pre-existing rather than anything MYR-608 introduced. `"Drive"` carries a
+// plain `("vehicleId")` index, so the planner reads every drive on the car and
+// top-N heapsorts it to find the newest page. An ORDERED index matching the
+// `ORDER BY` — `("vehicleId", "startTime" DESC, "id" DESC)` — lets it walk the
+// LIMIT straight out of the index and skip the sort entirely:
+//
+//	§7.2 with the composite index                        0.59 ms   (37× faster)
+//
+// IT CANNOT BE ADDED FROM THIS REPO. `"Drive"` is Prisma-owned and CG-DL-9
+// forbids a Go migration from naming it, so the index belongs in
+// react-frontend's Prisma schema — filed as a follow-up rather than smuggled
+// in here. The same index also serves this statement's cursor form and
+// §7.30.7, which page the identical `(startTime, id)` tuple.
+const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `,` + ownerTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $2`
+LIMIT $3`
 
 // queryDriveListByVehicleCursor is the resume path: returns the next
 // `limit + 1` drives whose (startTime, id) sorts strictly below the
 // cursor anchor. The (startTime, id) tuple comparison is the
 // PostgreSQL row-compare operator — it expands to the same
-// `startTime < $2 OR (startTime = $2 AND id < $3)` predicate but is
+// `startTime < $3 OR (startTime = $3 AND id < $4)` predicate but is
 // more index-friendly when a composite (startTime DESC, id DESC)
 // index exists.
-const queryDriveListByVehicleCursor = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+//
+// The anchor pair moved from ($2, $3) to ($3, $4) when MYR-608 put the
+// CALLER at $2 — see the first-page statement above.
+const queryDriveListByVehicleCursor = `SELECT ` + driveSummarySelectColumns + `,` + ownerTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
-  AND ("startTime", "id") < ($2, $3)
+  AND ("startTime", "id") < ($3, $4)
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $4`
+LIMIT $5`
 
 // queryDriveMissingAddresses is the MYR-240 backfill read path: every
 // Drive row still missing a start address, or missing an end address on

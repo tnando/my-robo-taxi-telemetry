@@ -145,6 +145,22 @@ func tripWire(t TripData, callerID string) map[string]any {
 		},
 		"participants": participants,
 		"driveCount":   t.DriveCount,
+		// MYR-608. ALWAYS PRESENT, NULL WHEN THE WINDOW HOLDS NO DRIVES — the
+		// platform's nullable convention, and the same one `endedAt` above
+		// follows. Null is `SUM` over zero rows, deliberately not coalesced to
+		// `0`: zero miles is a real total for a window whose drives went
+		// nowhere, and a client that could not tell the two apart would print
+		// "0 mi" on a trip that has not begun.
+		//
+		// SENT WHILE THE TRIP IS ACTIVE, not withheld until it ends. They are
+		// RUNNING totals — read at read time like `driveCount`, climbing
+		// between reads — and the surface that most wants a total is a road
+		// trip in progress. This is what deletes the client's own window
+		// arithmetic and its "withhold when the page is partial" rule: the
+		// server sums the WHOLE window, so a client holding one page of it can
+		// state the total anyway.
+		"totalDistanceMiles":   derefOrNil(t.TotalDistanceMiles),
+		"totalDurationSeconds": tripTotalDurationSeconds(t.TotalDurationMinutes),
 	}
 
 	// `currentLeg` is OPTIONAL on the contract and ABSENT rather than null when
@@ -161,6 +177,25 @@ func tripWire(t TripData, callerID string) map[string]any {
 		}
 	}
 	return out
+}
+
+// tripTotalDurationSeconds converts the stored MINUTES sum to the contract's
+// SECONDS, preserving null (MYR-608).
+//
+// THE CONVERSION HAPPENS HERE, at the same boundary `buildDriveSummary` turns
+// `durationMinutes` into `durationSeconds`, and for the same reason: the Prisma
+// column is minutes and the wire contract is seconds, so exactly one place in
+// the process may know that. A total in minutes and a per-drive figure in
+// seconds on the same response would be the arithmetic trap this whole issue
+// exists to remove.
+//
+// int64 throughout: the sum is a Postgres bigint, and a window is capped at 30
+// days but the SUM is over rows, not over the window.
+func tripTotalDurationSeconds(minutes *int64) any {
+	if minutes == nil {
+		return nil
+	}
+	return *minutes * 60
 }
 
 // derefIntOrNil is derefOrNil for an int pointer: an untyped nil rather than a

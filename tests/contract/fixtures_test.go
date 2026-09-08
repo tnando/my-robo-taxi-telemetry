@@ -570,10 +570,25 @@ func validateDrivesList(t *testing.T, m map[string]any) {
 	}
 
 	// Required DriveSummary fields per OpenAPI spec.
+	//
+	// `tripId` is in this list, not in an "optional" one, and that is the whole
+	// point of it (MYR-608): it is `required` with type ["string","null"], so a
+	// row that OMITS it is invalid even though `null` is a legal value. The
+	// distinction is what stops a consumer confusing "no window covers this
+	// drive" with "this server does not send the field", and a presence check
+	// is the only assertion that can tell them apart.
+	//
+	// `fsdMiles` / `fsdPercentage` are in this list too, as of MYR-608's review
+	// round. MYR-152 promoted them to `DriveSummary` and marked them `required`
+	// in the OpenAPI schema; the fixture predated that, carried neither, and
+	// nothing noticed because this list did not name them — the PR that found
+	// it recorded it as "found, not fixed" rather than closing it. Naming them
+	// here is what makes the fixture and the spec check each other.
 	driveSummaryRequired := []string{
 		"id", "vehicleId", "startTime", "endTime", "date",
 		"distanceMiles", "durationSeconds", "avgSpeedMph", "maxSpeedMph",
-		"startChargeLevel", "endChargeLevel", "createdAt",
+		"startChargeLevel", "endChargeLevel", "fsdMiles", "fsdPercentage",
+		"createdAt", "tripId",
 	}
 
 	for i, item := range items {

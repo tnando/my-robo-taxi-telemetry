@@ -64,6 +64,19 @@ type DriveSummaryRow struct {
 	FsdMiles         float64
 	FsdPercentage    float64
 	CreatedAt        time.Time
+
+	// TripID is the trip whose window contains this drive's start instant, as
+	// far as the CALLER who asked for it is concerned, or nil (MYR-608).
+	//
+	// RESOLVED PER STATEMENT, NOT PER ROW-TYPE. Each of the six statements over
+	// driveSummarySelectColumns appends its own trip-id expression — an owner's
+	// windows, a participant's admitted windows, or §7.30.7's path trip — so
+	// this one field carries three role-scoped answers and the row cannot leak
+	// a trip its reader is not on. See trip_queries.go's "THE THREE tripId
+	// EXPRESSIONS" block.
+	//
+	// Nil is the ordinary answer: most drives fall in no window at all.
+	TripID *string
 }
 
 // DriveListPage is the paginated result returned by ListByVehicleID.
@@ -94,16 +107,26 @@ type DriveListCursor struct {
 // rejected at this layer — the SQL LIMIT clause handles it directly.
 // The probe size is `limit + 1`: the extra row drives the HasMore
 // flag without a separate COUNT.
-func (r *DriveRepo) ListByVehicleID(ctx context.Context, vehicleID string, cursor DriveListCursor, limit int) (DriveListPage, error) {
+//
+// `viewerUserID` IS THE CALLER, AND IT DECIDES ONE FIELD ONLY (MYR-608):
+// `DriveSummaryRow.TripID`. It is NOT an access check and must not be
+// mistaken for one — §7.2's gate runs in the handler and admits only the
+// vehicle's owner to this path. What it does is keep the decoration
+// role-scoped: the trip ids on these rows are the caller's OWN windows, so a
+// car that changed hands cannot report the previous owner's trip to the new
+// one. Passing an empty string yields nil trip ids on every row, which is the
+// correct answer for a caller with no windows and the safe one for a caller
+// this layer cannot name.
+func (r *DriveRepo) ListByVehicleID(ctx context.Context, vehicleID, viewerUserID string, cursor DriveListCursor, limit int) (DriveListPage, error) {
 	start := time.Now()
 	probe := limit + 1
 
 	var rows pgx.Rows
 	var err error
 	if cursor.StartTime == "" || cursor.ID == "" {
-		rows, err = r.pool.Query(ctx, queryDriveListByVehicle, vehicleID, probe)
+		rows, err = r.pool.Query(ctx, queryDriveListByVehicle, vehicleID, viewerUserID, probe)
 	} else {
-		rows, err = r.pool.Query(ctx, queryDriveListByVehicleCursor, vehicleID, cursor.StartTime, cursor.ID, probe)
+		rows, err = r.pool.Query(ctx, queryDriveListByVehicleCursor, vehicleID, viewerUserID, cursor.StartTime, cursor.ID, probe)
 	}
 	if err != nil {
 		r.metrics.IncQueryError("drive.list_by_vehicle")
@@ -180,6 +203,11 @@ func scanDriveSummary(row rowScanner, enc cryptox.Encryptor, logger *slog.Logger
 		&d.FsdMiles,
 		&d.FsdPercentage,
 		&d.CreatedAt,
+		// MYR-608. LAST, AND EVERY STATEMENT OVER driveSummarySelectColumns
+		// MUST PROJECT IT — there is one scanner for all six, so a statement
+		// that forgot the column would fail its very first scan rather than
+		// silently return nil trip ids on one surface.
+		&d.TripID,
 	); err != nil {
 		return DriveSummaryRow{}, fmt.Errorf("scan drive summary: %w", err)
 	}

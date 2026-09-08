@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Happy-path response for GET /api/trips — the caller's trips, newest first (rest-api.md §7.30.2, contracts v0.41.0, MYR-602). ONE LIST FOR BOTH ROLES and one shape on every surface: the same Trip object is what POST /api/vehicles/{vehicleId}/trips, GET /api/trips/{tripId}, PATCH and POST .../end all return, so a client decodes one type and adopts every answer including a mutation's echo. The three rows are the three members of TripStatus, deliberately, because each one is the only place a different rule is observable. Row 1 is ACTIVE and the caller OWNS it: `endedAt` is null (a window that is merely open has not ended), `currentLeg` is present because the car is driving to a named place inside the window, and `role` is 'owner' — which is why `ownerFirstName` names the reader; an owner reading their own trip is the subject, not a disclosure. Row 2 is ACTIVE and the caller is a PARTICIPANT: same shape, same list, and `role` is the ONLY thing that distinguishes it — note `userIsSelf` marks which roster entry is the reader, and the roster never carries anybody's user id. Row 3 is ENDED and carries a NON-NULL `endedAt`, which is the terminal fact this surface is built on: `endedAt` records that an action already happened and its only writer is `SET ended_at = NOW()`, so a consumer reads a non-nil value as terminal and NEVER compares it against a clock — cross-machine skew makes the comparison wrong for as long as the skew lasts. It also carries NO `currentLeg`, because a closed window has no open leg, and a `driveCount` of 0 alongside a real window, which is legal: a trip SELECTS drives, it does not own them, and a window nobody drove in is an ordinary outcome rather than an error. `currentLeg` IS INFORMATIONAL AND NEVER A GATE — access is purely the window (client ruling, 2026-09-05), so a consumer must not condition a map or a live subscription on its presence; an active trip with no leg is the ordinary overnight state and row 2 shows it. `ownerFirstName` is nullable and row 3 carries null: an Apple-native account Apple was never asked to name, the same three-source ladder MYR-581 put on VehicleSummary. `trimLabel` is nullable on TripVehicle for the same reason it is on the catalog — null means 'no trim known', never the empty string, and a descriptor builder drops the fragment rather than emitting a stray separator. MYR-618 adds `addedByName` to every roster row: row 1's first participant carries null (the owner put her on at create time, and a trip's initial roster records no adder — nobody observed an act that was part of creating the trip) while the second carries 'Mira', a PARTICIPANT who added him afterwards. The key is ALWAYS PRESENT and nullable, never absent, so a decoder reads one shape; null means 'there is no attribution to show' and a client renders nothing rather than a placeholder.",
+    "description": "Happy-path response for GET /api/trips — the caller's trips, newest first (rest-api.md §7.30.2, contracts v0.41.0, MYR-602). ONE LIST FOR BOTH ROLES and one shape on every surface: the same Trip object is what POST /api/vehicles/{vehicleId}/trips, GET /api/trips/{tripId}, PATCH and POST .../end all return, so a client decodes one type and adopts every answer including a mutation's echo. MYR-608 (contracts v0.44.0) adds `totalDistanceMiles` / `totalDurationSeconds` to every row: the window's drives SUMMED, always present and nullable, and RUNNING rather than final — rows 1 and 2 are ACTIVE and still carry totals, because the surface that most wants one is a road trip in progress. Row 3 shows the null spelling and it is deliberately NOT 0: null is SUM over zero rows (the window holds no drives, matching its driveCount of 0), while 0 would be a real total for a window whose drives went nowhere, and a consumer that collapsed the two would print '0 mi' on a trip that never began. A consumer MUST NOT re-derive these by summing a page of DriveSummary rows, and MUST NOT withhold a total because its page is smaller than driveCount — the server sums the WHOLE window. The three rows are the three members of TripStatus, deliberately, because each one is the only place a different rule is observable. Row 1 is ACTIVE and the caller OWNS it: `endedAt` is null (a window that is merely open has not ended), `currentLeg` is present because the car is driving to a named place inside the window, and `role` is 'owner' — which is why `ownerFirstName` names the reader; an owner reading their own trip is the subject, not a disclosure. Row 2 is ACTIVE and the caller is a PARTICIPANT: same shape, same list, and `role` is the ONLY thing that distinguishes it — note `userIsSelf` marks which roster entry is the reader, and the roster never carries anybody's user id. Row 3 is ENDED and carries a NON-NULL `endedAt`, which is the terminal fact this surface is built on: `endedAt` records that an action already happened and its only writer is `SET ended_at = NOW()`, so a consumer reads a non-nil value as terminal and NEVER compares it against a clock — cross-machine skew makes the comparison wrong for as long as the skew lasts. It also carries NO `currentLeg`, because a closed window has no open leg, and a `driveCount` of 0 alongside a real window, which is legal: a trip SELECTS drives, it does not own them, and a window nobody drove in is an ordinary outcome rather than an error. `currentLeg` IS INFORMATIONAL AND NEVER A GATE — access is purely the window (client ruling, 2026-09-05), so a consumer must not condition a map or a live subscription on its presence; an active trip with no leg is the ordinary overnight state and row 2 shows it. `ownerFirstName` is nullable and row 3 carries null: an Apple-native account Apple was never asked to name, the same three-source ladder MYR-581 put on VehicleSummary. `trimLabel` is nullable on TripVehicle for the same reason it is on the catalog — null means 'no trim known', never the empty string, and a descriptor builder drops the fragment rather than emitting a stray separator. MYR-618 adds `addedByName` to every roster row: row 1's first participant carries null (the owner put her on at create time, and a trip's initial roster records no adder — nobody observed an act that was part of creating the trip) while the second carries 'Mira', a PARTICIPANT who added him afterwards. The key is ALWAYS PRESENT and nullable, never absent, so a decoder reads one shape; null means 'there is no attribution to show' and a client renders nothing rather than a placeholder.",
     "anchoredFRs": [
       "NFR-3.9",
       "NFR-3.21",
@@ -45,6 +45,8 @@
         }
       ],
       "driveCount": 14,
+      "totalDistanceMiles": 612.4,
+      "totalDurationSeconds": 34920,
       "currentLeg": {
         "destinationName": "Grand Canyon Village",
         "etaMinutes": 42,
@@ -79,7 +81,9 @@
           "addedByName": null
         }
       ],
-      "driveCount": 3
+      "driveCount": 3,
+      "totalDistanceMiles": 58.2,
+      "totalDurationSeconds": 5040
     },
     {
       "id": "cltrp3234567890abcdef",
@@ -102,7 +106,9 @@
         "trimLabel": "Performance"
       },
       "participants": [],
-      "driveCount": 0
+      "driveCount": 0,
+      "totalDistanceMiles": null,
+      "totalDurationSeconds": null
     }
   ]
 }

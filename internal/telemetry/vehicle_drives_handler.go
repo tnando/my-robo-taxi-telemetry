@@ -101,7 +101,11 @@ func (h *VehicleDrivesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if admission.participant() {
 		page, err = h.trips.VehicleDrivesInTripWindows(ctx, userID, vehicleID, cursor, limit)
 	} else {
-		page, err = h.drives.ListByVehicleID(ctx, vehicleID, cursor, limit)
+		// The caller is carried into the OWNER path too (MYR-608): it decides
+		// which windows `DriveSummary.tripId` may name, and an owner reading
+		// a car they just acquired must not be told about the previous
+		// owner's trips.
+		page, err = h.drives.ListByVehicleID(ctx, vehicleID, userID, cursor, limit)
 	}
 	if err != nil {
 		h.logger.Error("vehicle drives: list failed",

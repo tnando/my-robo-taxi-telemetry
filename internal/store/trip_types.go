@@ -199,32 +199,6 @@ type TripActivityToken struct {
 	Sandbox bool
 }
 
-// TripDrivesWindow is the (vehicle, window) pair a trip's drive list resolves
-// to. Carried as a type so the drive queries cannot be handed a window from one
-// trip and a vehicle from another.
-type TripDrivesWindow struct {
-	VehicleID string
-	From      time.Time
-	To        time.Time
-}
-
-// Window returns the drive-selection window for a trip: drives whose startedAt
-// falls in [startsAt, effectiveEnd]. WINDOW-BASED, NOT TAG-BASED — no write
-// happens at drive time, so a trip created after the fact picks up the legs
-// already driven, and extending a window backfills automatically.
-//
-// The upper bound is INCLUSIVE here where the access predicate's is exclusive,
-// and the asymmetry is deliberate: access is about a live socket at an instant,
-// whereas a drive that began exactly at the closing instant is a drive of this
-// trip and excluding it would lose it from the only list it belongs to.
-func (t Trip) Window() TripDrivesWindow {
-	return TripDrivesWindow{
-		VehicleID: t.VehicleID,
-		From:      t.StartsAt,
-		To:        t.EffectiveEnd(),
-	}
-}
-
 // MaxTripWindow is the ceiling on a trip's duration, mirrored by the
 // go_trips_window_capped CHECK constraint. A trip is a standing live-location
 // grant, so the cap is what stops a mistyped year handing out a decade of it.

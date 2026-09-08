@@ -167,7 +167,7 @@ func (r *TripRepo) decorate(ctx context.Context, v *TripView) error {
 	if err := r.loadRoster(ctx, v); err != nil {
 		return err
 	}
-	if err := r.loadDriveCount(ctx, v); err != nil {
+	if err := r.loadDriveTotals(ctx, v); err != nil {
 		return err
 	}
 	return r.loadCurrentLeg(ctx, v)
@@ -240,10 +240,24 @@ func (r *TripRepo) loadRoster(ctx context.Context, v *TripView) error {
 	return nil
 }
 
-func (r *TripRepo) loadDriveCount(ctx context.Context, v *TripView) error {
+// loadDriveTotals fills `driveCount`, `totalDistanceMiles` and
+// `totalDurationSeconds` from ONE statement over ONE window (MYR-608).
+//
+// THE THREE TRAVEL TOGETHER FOR TWO REASONS. The cheap one is cost: §7.30.2
+// decorates every row it returns, so a separate SUM would have added a round
+// trip PER TRIP to a list that already issues five, and this adds none. The
+// load-bearing one is agreement — a count and a total read by two statements
+// could straddle a drive being written and describe two different sets of
+// drives on one card, and there is no way for a reader to tell.
+//
+// The two sums are NULLABLE and stay nullable: SUM over zero rows is NULL, and
+// that is the honest spelling of "this window has no drives yet".
+func (r *TripRepo) loadDriveTotals(ctx context.Context, v *TripView) error {
 	w := v.Window()
-	if err := r.pool.QueryRow(ctx, queryTripDriveCount, w.VehicleID, w.From, w.To).Scan(&v.DriveCount); err != nil {
-		return fmt.Errorf("load trip drive count: %w", err)
+	err := r.pool.QueryRow(ctx, queryTripDriveTotals, w.VehicleID, w.From, w.To).
+		Scan(&v.DriveCount, &v.TotalDistanceMiles, &v.TotalDurationMinutes)
+	if err != nil {
+		return fmt.Errorf("load trip drive totals: %w", err)
 	}
 	return nil
 }

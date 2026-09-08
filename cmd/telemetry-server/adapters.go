@@ -297,8 +297,8 @@ type driveListerAdapter struct {
 	repo *store.DriveRepo
 }
 
-func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
-	page, err := a.repo.ListByVehicleID(ctx, vehicleID, store.DriveListCursor{
+func (a *driveListerAdapter) ListByVehicleID(ctx context.Context, vehicleID, viewerUserID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
+	page, err := a.repo.ListByVehicleID(ctx, vehicleID, viewerUserID, store.DriveListCursor{
 		StartTime: cursor.StartTime,
 		ID:        cursor.ID,
 	}, limit)
@@ -338,6 +338,9 @@ func driveListItem(d store.DriveSummaryRow) telemetry.DriveListItem {
 		FsdMiles:         d.FsdMiles,
 		FsdPercentage:    d.FsdPercentage,
 		CreatedAt:        d.CreatedAt,
+		// MYR-608. Already role-scoped by the statement that produced it; this
+		// boundary only carries it across.
+		TripID: d.TripID,
 	}
 }
 

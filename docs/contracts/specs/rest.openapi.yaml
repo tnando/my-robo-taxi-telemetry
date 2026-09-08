@@ -359,7 +359,10 @@ paths:
                 $ref: '#/components/schemas/PaginatedDrives'
               examples:
                 two-drives:
-                  summary: First page with two drives.
+                  summary: >-
+                    First page with two drives — one inside a trip window the
+                    caller is on, one outside every window, so the page shows
+                    both spellings of the required-and-nullable `tripId`.
                   value:
                     items:
                       - id: clmno9876543210zyxw0001
@@ -373,6 +376,11 @@ paths:
                         maxSpeedMph: 65.2
                         startChargeLevel: 82
                         endChargeLevel: 76
+                        fsdMiles: 9.8
+                        fsdPercentage: 79.0
+                        # On a road trip: this drive's startTime falls inside a
+                        # window the caller is on, so the server names it.
+                        tripId: cltrp1234567890abcdef
                         createdAt: '2026-04-13T18:46:19Z'
                       - id: clmno9876543210zyxw0002
                         vehicleId: clxyz1234567890abcdef
@@ -385,6 +393,14 @@ paths:
                         maxSpeedMph: 42.0
                         startChargeLevel: 85
                         endChargeLevel: 82
+                        fsdMiles: 0.0
+                        fsdPercentage: 0.0
+                        # The SAME page carries both answers. This drive is in
+                        # no window of the caller's, and `null` is the whole
+                        # answer — the key is never omitted, because an absent
+                        # key is indistinguishable from a server that does not
+                        # send the field.
+                        tripId: null
                         createdAt: '2026-04-13T08:29:08Z'
                     nextCursor: eyJzdGFydFRpbWUiOiIyMDI2LTA0LTEzVDA4OjE0OjAwWiIsImlkIjoiY2xtbm85ODc2NTQzMjEwenl4dzAwMDIifQ==
                     hasMore: true
@@ -1768,6 +1784,7 @@ components:
         - fsdMiles
         - fsdPercentage
         - createdAt
+        - tripId
       additionalProperties: false
       properties:
         id:
@@ -1777,6 +1794,48 @@ components:
         vehicleId:
           type: string
           description: Opaque DB cuid for the drive's parent vehicle.
+          x-classification: P0
+        tripId:
+          type: ["string", "null"]
+          description: |
+            The trip whose WINDOW contains this drive's start instant, as
+            far as THIS caller is concerned, or null when the drive falls
+            in no window they may see (MYR-608, contracts v0.44.0).
+
+            ALWAYS PRESENT AND NULLABLE — it is in `required` and its type
+            is ["string","null"], deliberately NOT the omit-when-empty
+            convention the four location labels on this same shape follow.
+            Those are absent because the server has nothing to say YET (a
+            geocode may still arrive); this is a DECIDED answer. A missing
+            key would be indistinguishable from a server that does not send
+            the field, and a consumer grouping drives under trips would
+            silently fall back to ungrouped against a deployed server that
+            simply had nothing to sum.
+
+            RESOLVED SERVER-SIDE, NEVER RE-DERIVED. A consumer MUST group by
+            this value and MUST NOT reconstruct it from `startTime` and a
+            trip's window: two implementations of one rule is what this
+            field exists to delete.
+
+            ROLE-SCOPED IN THE STATEMENT that produced the row. On §7.2 an
+            owner is told about the windows THEY own (a car can change
+            hands; a previous owner's trip is never named) and a trip
+            participant only about the windows that admitted them. On
+            §7.30.7 every row carries the trip in the request path.
+
+            OVERLAPPING WINDOWS: two ENDED trips may cover one drive (the
+            create probe only refuses windows that have not closed), and on
+            §7.2 the NEWEST by `startsAt` wins. §7.30.7 always answers with
+            the trip it was asked for. This is the one place two surfaces
+            may report a different `tripId` for the same drive.
+
+            AN UNREADABLE `startTime` RESOLVES null AND TAKES NOTHING DOWN.
+            `Drive.startTime` is a TEXT column, and the server compares it
+            as an instant through a guarded try-cast, so a value that will
+            not parse yields null rather than failing the page — on this
+            endpoint, on §7.30.7 and on the trip totals alike. A BARE DATE
+            IS READABLE: `2026-07-02` is midnight on that day and is placed
+            in whatever window covers it.
           x-classification: P0
         startTime:
           type: string

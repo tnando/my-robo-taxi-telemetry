@@ -962,6 +962,15 @@ var driveSummaryFields = []string{
 	"fsdMiles",
 	"fsdPercentage",
 	"createdAt",
+	// MYR-608. SAME ALLOW-LIST FOR ALL THREE ROLES, because the mask is the
+	// wrong instrument for this field: `tripId` is already role-scoped IN THE
+	// STATEMENT that produced it — an owner is told about their own windows, a
+	// participant only about the windows that admitted them — so a role that
+	// reached this projection has, by construction, been handed an id it may
+	// hold. Withholding it here would blank a value the row is entitled to
+	// while doing nothing about one it is not; a mask can hide a field and
+	// cannot decide which trip a drive belongs to.
+	"tripId",
 }
 
 // driveDetailFields is the drive-detail allow-list shared by owner and

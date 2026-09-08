@@ -154,6 +154,33 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		'driving', 'parked', 'charging', 'offline', 'in_service'
 	);
 
+	-- go_try_timestamptz: the try-cast for the Prisma-owned TEXT "startTime"
+	-- column (migration 0070, MYR-608). MIRRORED HERE RATHER THAN MIGRATED IN,
+	-- because this harness hand-writes its schema instead of calling
+	-- store.RunMigrations — every go_ table below is mirrored the same way and
+	-- for the same reason (the Prisma-owned tables are created here by hand, so
+	-- the migrations would collide with them).
+	--
+	-- IT IS NOT OPTIONAL FOR THIS HARNESS. driveStartInstantExpr names this
+	-- function, so §7.2 for both roles, §7.30.7 and the trip totals all fail
+	-- with "function go_try_timestamptz(text) does not exist" without it — the
+	-- contract tests would go red on the first drive list, not on a subtle
+	-- answer. Keep the body byte-identical to the migration's.
+	CREATE OR REPLACE FUNCTION go_try_timestamptz(value text)
+	RETURNS timestamptz
+	LANGUAGE plpgsql
+	IMMUTABLE
+	STRICT
+	SET search_path = pg_catalog, pg_temp
+	AS $$
+	BEGIN
+		RETURN value::pg_catalog.timestamptz;
+	EXCEPTION
+		WHEN others THEN
+			RETURN NULL;
+	END;
+	$$;
+
 	CREATE TABLE "User" (
 		"id"   TEXT PRIMARY KEY,
 		-- MYR-581: the TOP RUNG of the display-name ladder. Every catalog read
@@ -827,6 +854,13 @@ func setupTestServer(t *testing.T) (*httptest.Server, *seedHelpers) {
 	drivesHandler := telemetry.NewVehicleDrivesHandler(
 		authenticator, snapshotAdapter, driveAdapter, logger,
 		telemetry.WithDrivesRoleResolver(authenticator),
+		// MYR-602's window gate, wired for the reason the share reader above
+		// is: without it §7.2 is owner-only and the entire non-owner half of
+		// this surface — the narrowed page, and MYR-608's role-scoped
+		// `tripId` — is unreachable from this harness.
+		telemetry.WithDrivesTripAdmitter(&contractTripDriveAdmitter{
+			repo: store.NewTripRepo(testPool, store.NoopMetrics{}, enc, logger),
+		}),
 	)
 
 	mux := http.NewServeMux()
@@ -1005,8 +1039,8 @@ func (a *contractVehicleSnapshotReader) GetByID(ctx context.Context, vehicleID s
 
 type contractDriveLister struct{ repo *store.DriveRepo }
 
-func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
-	page, err := a.repo.ListByVehicleID(ctx, vehicleID, store.DriveListCursor{
+func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID, viewerUserID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
+	page, err := a.repo.ListByVehicleID(ctx, vehicleID, viewerUserID, store.DriveListCursor{
 		StartTime: cursor.StartTime,
 		ID:        cursor.ID,
 	}, limit)
@@ -1032,7 +1066,80 @@ func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID str
 			MaxSpeedMph:      d.MaxSpeedMph,
 			StartChargeLevel: d.StartChargeLevel,
 			EndChargeLevel:   d.EndChargeLevel,
+			// MYR-152's two FSD stats. Dropped by this harness since they
+			// landed, so every drive it served carried 0.0 for both while the
+			// store had real values — a silent wrongness that nothing catches
+			// because `validateDrivesList` does not assert them either (the
+			// canonical `drives.json` fixture predates MYR-152 as well). Copied
+			// now so a future tightening of either finds the truth here.
+			FsdMiles:      d.FsdMiles,
+			FsdPercentage: d.FsdPercentage,
+			CreatedAt:     d.CreatedAt,
+			// MYR-608. Already role-scoped by the statement that produced it.
+			TripID: d.TripID,
+		})
+	}
+	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
+}
+
+// contractTripDriveAdmitter is the MYR-602 window gate over the real TripRepo.
+//
+// WIRED SO THE NON-OWNER HALF OF §7.2 IS REACHABLE FROM THIS HARNESS AT ALL.
+// Without it the drives handler is owner-only, exactly as a deployment that
+// forgot to wire trips would be — the fail-closed default — and a
+// `trip_participant` reading a car's drives could not be exercised end to end.
+// It is the same two-method shape cmd/telemetry-server wires; the duplication
+// is the price of the package boundary, and the methods are thin enough that
+// there is nothing here to get wrong independently.
+type contractTripDriveAdmitter struct{ repo *store.TripRepo }
+
+func (a *contractTripDriveAdmitter) TripDriveWindows(
+	ctx context.Context, userID, vehicleID string,
+) ([]telemetry.TripDriveWindow, error) {
+	windows, err := a.repo.TripDriveWindows(ctx, userID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("contractTripDriveAdmitter.TripDriveWindows: %w", err)
+	}
+	out := make([]telemetry.TripDriveWindow, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, telemetry.TripDriveWindow{From: w.From, To: w.To})
+	}
+	return out, nil
+}
+
+func (a *contractTripDriveAdmitter) VehicleDrivesInTripWindows(
+	ctx context.Context, userID, vehicleID string, cursor telemetry.DriveListCursor, limit int,
+) (telemetry.DriveListPage, error) {
+	page, err := a.repo.VehicleDrivesInTripWindows(ctx, userID, vehicleID, store.DriveListCursor{
+		StartTime: cursor.StartTime,
+		ID:        cursor.ID,
+	}, limit)
+	if err != nil {
+		return telemetry.DriveListPage{}, fmt.Errorf("contractTripDriveAdmitter.VehicleDrivesInTripWindows: %w", err)
+	}
+	items := make([]telemetry.DriveListItem, 0, len(page.Items))
+	for i := range page.Items {
+		d := &page.Items[i]
+		items = append(items, telemetry.DriveListItem{
+			ID:               d.ID,
+			VehicleID:        d.VehicleID,
+			StartTime:        d.StartTime,
+			EndTime:          d.EndTime,
+			Date:             d.Date,
+			StartLocation:    d.StartLocation,
+			StartAddress:     d.StartAddress,
+			EndLocation:      d.EndLocation,
+			EndAddress:       d.EndAddress,
+			DistanceMiles:    d.DistanceMiles,
+			DurationMinutes:  d.DurationMinutes,
+			AvgSpeedMph:      d.AvgSpeedMph,
+			MaxSpeedMph:      d.MaxSpeedMph,
+			StartChargeLevel: d.StartChargeLevel,
+			EndChargeLevel:   d.EndChargeLevel,
+			FsdMiles:         d.FsdMiles,
+			FsdPercentage:    d.FsdPercentage,
 			CreatedAt:        d.CreatedAt,
+			TripID:           d.TripID,
 		})
 	}
 	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
