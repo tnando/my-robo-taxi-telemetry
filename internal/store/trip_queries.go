@@ -228,10 +228,23 @@ WHERE t.id = $2`
 // suspended grant would produce a `participant_not_shared` refusal the person
 // could not explain, having just been shown the name.
 //
-// NAMES ONLY, AND NEVER A CODE OR AN EMAIL. The projection is (share id,
-// display name) and nothing else: the caller may be a PARTICIPANT rather than
-// the owner, and §7.5's grant listing — with its invite codes, its statuses and
-// its permissions — is owner-only for reasons that have not changed.
+// NAMES ONLY. The projection is (share id, label, confirmed name) and nothing
+// else, and the first two are folded into ONE display string in Go before they
+// leave the repository. What §7.5's owner-only grant listing carries and this
+// statement never selects: the invite CODE (a credential), the invitee's email,
+// `status`, `permission`, `allow_rides`, `suspended_at` and
+// `accepted_by_user_id` — the caller may be a PARTICIPANT rather than the
+// owner, and §7.5 is owner-only for reasons that have not changed.
+//
+// ⚠ THE LABEL IS NOT WITHHELD, AND CALLING IT "THE OWNER'S PRIVATE MEMO" WOULD
+// BE FALSE (review finding 6). It is the documented FALLBACK half of the
+// display name, exactly as it is on the roster: the accepting account's
+// confirmed first name wins, and `COALESCE` reaches the label only when there
+// is none. The naming prompt (MYR-583) makes that rare, and a blank picker row
+// is worse for everybody than the nickname the owner typed. The rule is stated
+// where a reader will meet it — §7.30.11's `displayName` row and the handler's
+// own comment — rather than implied by an inaccurate claim about what is kept
+// back.
 //
 // The OWNER is excluded because an owner holds no grant on their own car and
 // therefore cannot appear here anyway; the first `NOT EXISTS` clause is what

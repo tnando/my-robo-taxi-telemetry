@@ -82,15 +82,40 @@ func (h *TripHandler) patchAsParticipant(
 //
 // IT EXISTS BECAUSE §7.5's GRANT LISTING IS OWNER-ONLY and must stay that way.
 // A participant who may add people needs to know who is addable, and the
-// owner's own share list is the wrong place to get it: it carries invite codes,
-// email addresses, pending invitations, per-grant permissions and the owner's
-// private memo about why each person has a key. This returns a name and an id,
-// for people who already hold a live grant on the car, minus the ones already
-// on the trip — the minimum a picker needs and nothing a picker does not.
+// owner's own share list is the wrong place to get it. What §7.5 carries and
+// this route WITHHOLDS, stated exactly (review finding 6):
+//
+//	invite CODES        a credential — anybody holding one can redeem the grant
+//	email addresses     the invitee's, a P1 identifier this platform never
+//	                    publishes to a third party
+//	PENDING invitations rows for people who have not accepted and may never,
+//	                    which are the owner's business alone
+//	per-grant permissions and statuses
+//	                    what each person may do with the car, and whether the
+//	                    grant is suspended — the owner's own administration
+//	user ids            durable cross-surface identifiers, absent from every
+//	                    trip surface by the same rule that keeps them off the
+//	                    roster
+//
+// ⚠ WHAT IT DOES NOT WITHHOLD IS THE OWNER'S LABEL, and that is deliberate
+// rather than an oversight. `displayName` is the roster's own ladder — the
+// accepting account's CONFIRMED first name, falling back to the label the owner
+// typed when they issued the grant — so an owner who invited somebody as "Mom"
+// before she was through the naming prompt shows "Mom" here, to a participant.
+// The label is therefore the documented fallback on this surface, exactly as it
+// is on `participants[].name` (§7.30.3), and for the same reason: a person must
+// not be called one thing in the picker and another on the trip they were added
+// to one tap later, and a blank row is worse for everybody than a nickname.
+// **The confirmed name wins whenever there is one, and the naming prompt makes
+// that the common case** — this is a fallback, not the ordinary answer. An
+// owner who wants a label kept private should not use it to name a person.
 //
 // The OWNER reads it too, through the same route. One list, built by one
 // statement, so the owner's picker and a participant's picker cannot come to
-// offer different people.
+// offer different people — WITH ONE EXCEPTION the store owns: somebody the
+// owner REMOVED from this trip is withheld from a participant's picker and
+// still offered to the owner's, because the owner is the only person who may
+// undo their own removal (migration 0061, §7.30.4).
 func (h *TripHandler) ServeAddablePeople(w http.ResponseWriter, r *http.Request) {
 	tripID, ctx, userID, ok := h.beginTrip(w, r)
 	if !ok {
