@@ -197,8 +197,16 @@ func (a *tripVehicleListerAdapter) ListTripVehiclesByUser(ctx context.Context, u
 	return out, nil
 }
 
+// ActiveTripIDsByUser resolves the ANNOTATION set — every car of the caller's
+// with a window open, owned or shared.
+//
+// ⚠ IT IS DELIBERATELY NOT ActiveTripVehicleIDs, which is the participant-only
+// MERGE set that ListTripVehiclesByUser above uses. It was, and an owner's own
+// row therefore never carried `activeTripId` (MYR-612): the iOS client
+// registers its push-to-start token for the trips the catalog names, so the
+// owner of the car on the trip registered nothing and got no leg card.
 func (a *tripVehicleListerAdapter) ActiveTripIDsByUser(ctx context.Context, userID string) (map[string]string, error) {
-	return a.repo.ActiveTripVehicleIDs(ctx, userID)
+	return a.repo.ActiveTripIDsForUser(ctx, userID)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

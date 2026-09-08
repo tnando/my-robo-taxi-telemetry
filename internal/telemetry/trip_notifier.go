@@ -104,6 +104,24 @@ type TripNotifier interface {
 	// audience for itself — this package holds no owner id (the wire never
 	// carries one) and must not start.
 	TripParticipantAdded(ctx context.Context, trip TripData, actorName string, addedNames []string)
+
+	// ActivityTokenRegistered raises the current leg's Live Activity on the
+	// phone that has just registered a push-to-start token (MYR-612).
+	//
+	// IT TAKES IDS RATHER THAN A TripData, alone among the six, because it is
+	// not an announcement about a trip — it is a repair addressed to ONE
+	// device, and the live side reads everything else it needs for itself.
+	//
+	// ⚠ IT IS WHY ANYBODY GETS A CARD AT ALL ON THE FIRST LEG. A leg's Activity
+	// is push-to-start and the fan-out runs once, when the leg opens, over
+	// whatever tokens exist then — while registering is what a phone does when
+	// the leg-start push WAKES it, necessarily afterwards. On 2026-09-08 the
+	// only participant registered three seconds late and the trip ran all
+	// evening with no card for anybody.
+	//
+	// Called on every registration, including the overwhelming majority with no
+	// leg open: the live side's per-(device, leg) claim is the idempotency.
+	ActivityTokenRegistered(ctx context.Context, tripID, userID string)
 }
 
 // noopTripNotifier is what a handler uses when no notifier is wired. Named and
@@ -116,6 +134,7 @@ func (noopTripNotifier) TripStarted(context.Context, TripData, []string)        
 func (noopTripNotifier) TripEnded(context.Context, TripData, []string)                    {}
 func (noopTripNotifier) TripDeleted(context.Context, TripData, []string)                  {}
 func (noopTripNotifier) TripParticipantAdded(context.Context, TripData, string, []string) {}
+func (noopTripNotifier) ActivityTokenRegistered(context.Context, string, string)          {}
 
 // participantUserIDs is the fan-out list for a trip: every live participant.
 //

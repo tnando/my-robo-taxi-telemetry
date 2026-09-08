@@ -30,12 +30,15 @@ type tripActivityStoreAdapter struct {
 	activities *store.LiveActivityRepo
 }
 
-func (a *tripActivityStoreAdapter) PushToStartTokensForTrip(
-	ctx context.Context, tripID string,
+// ClaimPushToStartForLegAll is the leg-open fan-out's whole database cost: one
+// statement that claims the leg on every registered device and returns what it
+// stamped (MYR-612 review).
+func (a *tripActivityStoreAdapter) ClaimPushToStartForLegAll(
+	ctx context.Context, tripID, legID string,
 ) ([]push.ActivityStartToken, error) {
-	rows, err := a.tokens.PushToStartTokensForTrip(ctx, tripID)
+	rows, err := a.tokens.ClaimPushToStartForLegAll(ctx, tripID, legID)
 	if err != nil {
-		return nil, fmt.Errorf("trips: list push-to-start tokens: %w", err)
+		return nil, fmt.Errorf("trips: claim push-to-start fan-out: %w", err)
 	}
 	out := make([]push.ActivityStartToken, 0, len(rows))
 	for _, row := range rows {
@@ -44,6 +47,30 @@ func (a *tripActivityStoreAdapter) PushToStartTokensForTrip(
 		})
 	}
 	return out, nil
+}
+
+// ClaimPushToStartForLeg is the per-(device, leg) claim both push-to-start
+// senders take before sending (MYR-612).
+func (a *tripActivityStoreAdapter) ClaimPushToStartForLeg(
+	ctx context.Context, tripID, userID, legID string,
+) (push.ActivityStartToken, bool, error) {
+	row, claimed, err := a.tokens.ClaimPushToStartForLeg(ctx, tripID, userID, legID)
+	if err != nil {
+		return push.ActivityStartToken{}, false, fmt.Errorf("trips: claim push-to-start: %w", err)
+	}
+	if !claimed {
+		return push.ActivityStartToken{}, false, nil
+	}
+	return push.ActivityStartToken{
+		UserID: row.UserID, Token: row.PushToStartToken, Sandbox: row.Sandbox,
+	}, true, nil
+}
+
+func (a *tripActivityStoreAdapter) ReleasePushToStartClaim(ctx context.Context, tripID, userID, legID string) error {
+	if err := a.tokens.ReleasePushToStartClaim(ctx, tripID, userID, legID); err != nil {
+		return fmt.Errorf("trips: release push-to-start claim: %w", err)
+	}
+	return nil
 }
 
 func (a *tripActivityStoreAdapter) DeleteRejectedPushToStartToken(ctx context.Context, token string) error {

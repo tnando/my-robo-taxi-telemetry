@@ -83,7 +83,8 @@ func (h *VehicleDrivesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		h.logger.Warn("vehicle drives: invalid token",
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := wserrors.AuthFailure(err)
+		h.writeError(w, status, code, message)
 		return
 	}
 

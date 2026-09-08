@@ -15,9 +15,31 @@ import "context"
 // needs. Declared here at the consumer site, like ActivityStore beside it, so
 // internal/push keeps its independence from internal/store.
 type TripActivityStore interface {
-	// PushToStartTokensForTrip lists the trip's push-to-start registrations —
-	// participants and the owner. An empty result is ordinary.
-	PushToStartTokensForTrip(ctx context.Context, tripID string) ([]ActivityStartToken, error)
+	// ClaimPushToStartForLegAll claims the leg's push-to-start on EVERY
+	// registered device of the trip — participants and the owner — in ONE
+	// statement, and returns what it stamped. An empty result is ordinary.
+	//
+	// ⚠ IT REPLACES A LIST-THEN-CLAIM-EACH (MYR-612 review). The fan-out used
+	// to list the registrations and then claim once per row, which re-ran the
+	// same membership predicate N further times and discarded the P1 tokens
+	// the list had already loaded — only a claim's own RETURNING is safe
+	// against a rotation between the two. The tokens this hands back are the
+	// ones it stamped.
+	ClaimPushToStartForLegAll(ctx context.Context, tripID, legID string) ([]ActivityStartToken, error)
+	// ClaimPushToStartForLeg claims ONE device's push-to-start for ONE leg and
+	// returns the token to send (MYR-612).
+	//
+	// CLAIM BEFORE SEND. There are two senders — the leg-open fan-out and the
+	// registration catch-up, which exists because a phone that registers three
+	// seconds after a leg opened would otherwise never get a card — and this is
+	// what stops them raising two Live Activities for one journey on one lock
+	// screen. false means somebody already sent it, or the caller is no longer
+	// admitted to the trip; both are ordinary and neither is an error.
+	ClaimPushToStartForLeg(ctx context.Context, tripID, userID, legID string) (ActivityStartToken, bool, error)
+	// ReleasePushToStartClaim hands a claim back after a send that failed for a
+	// reason that might not repeat, so a later attempt can retry. Not called
+	// for a 410 — that verdict deletes the row.
+	ReleasePushToStartClaim(ctx context.Context, tripID, userID, legID string) error
 	// DeleteRejectedPushToStartToken drops a push-to-start token APNs
 	// permanently rejected. NOT DeleteActivityToken: see the two tables'
 	// difference in internal/store/trip_activity_token_repo.go.

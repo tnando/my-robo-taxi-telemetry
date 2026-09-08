@@ -62,8 +62,13 @@ func (h *VehicleFleetConfigHandler) handle(w http.ResponseWriter, r *http.Reques
 
 	userID, err := h.core.auth.ValidateToken(ctx, token)
 	if err != nil {
+		// THE SHARED CLASSIFIER, like every sibling handler (MYR-612 review).
+		// This was the ONE surface still hard-coding 401: an unanswerable
+		// existence probe told a phone its credential was dead, and the app's
+		// response to that is to discard the session. See wserrors.AuthFailure.
 		h.logger.Warn("vehicle fleet config: invalid token", slog.String("error", err.Error()))
-		h.core.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := wserrors.AuthFailure(err)
+		h.core.writeError(w, status, code, message)
 		return
 	}
 

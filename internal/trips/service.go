@@ -62,6 +62,13 @@ type TripVehicle struct {
 // LegStore is the leg half.
 type LegStore interface {
 	StartLeg(ctx context.Context, tripID, vehicleID, destination string, startedAt time.Time) (Leg, error)
+	// ResumeRecentLeg re-opens the leg this car just closed WITHOUT ARRIVING,
+	// when it has set off again for the SAME place since notBefore. Reports
+	// false — never an error — for every ordinary reason not to, because the
+	// caller's next move on false is StartLeg. See openLeg.
+	ResumeRecentLeg(
+		ctx context.Context, tripID, vehicleID, destination string, notBefore time.Time,
+	) (Leg, bool, error)
 	EndLeg(ctx context.Context, legID string, endedAt time.Time, arrived bool) error
 	OpenLegForVehicle(ctx context.Context, vehicleID string) (Leg, error)
 	OpenLegsForTrip(ctx context.Context, tripID string) ([]Leg, error)
@@ -69,6 +76,13 @@ type LegStore interface {
 	ClaimLegArrivedPush(ctx context.Context, legID string) (bool, error)
 	ClaimLegActivityStart(ctx context.Context, legID string) (bool, error)
 	ClaimLegActivityEnd(ctx context.Context, legID string) (bool, error)
+	// ClaimLegBannerSlot reports whether a leg banner for this (trip, event,
+	// destination) may be sent, given that one sent inside `window` already
+	// said the same sentence (MYR-620). `destinationKey` is a DIGEST, never
+	// the P1 name.
+	ClaimLegBannerSlot(
+		ctx context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+	) (bool, error)
 }
 
 // Leg mirrors store.TripLeg, narrowed to what this package reads.
@@ -93,6 +107,11 @@ type Pusher interface {
 // ActivityPusher is the Live Activity half.
 type ActivityPusher interface {
 	StartLeg(ctx context.Context, tc push.TripLegContext) int
+	// StartLegForUser raises ONE person's card for a leg that is ALREADY OPEN
+	// — the MYR-612 catch-up for a phone whose token registered after the
+	// fan-out had already run. It shares the fan-out's per-(device, leg) claim,
+	// so the two cannot raise two cards for one journey.
+	StartLegForUser(ctx context.Context, tc push.TripLegContext, userID string) int
 	UpdateLeg(ctx context.Context, tc push.TripLegContext) int
 	EndLeg(ctx context.Context, tc push.TripLegContext)
 }

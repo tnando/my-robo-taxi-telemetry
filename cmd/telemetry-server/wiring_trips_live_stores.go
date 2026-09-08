@@ -117,6 +117,21 @@ func (a *tripLegStoreAdapter) StartLeg(
 	return legFromRow(&row), nil
 }
 
+// ResumeRecentLeg re-opens the leg this car just closed without arriving WITHIN
+// THIS TRIP, when the same journey is starting again (MYR-612).
+func (a *tripLegStoreAdapter) ResumeRecentLeg(
+	ctx context.Context, tripID, vehicleID, destination string, notBefore time.Time,
+) (trips.Leg, bool, error) {
+	row, resumed, err := a.repo.ResumeRecentLeg(ctx, tripID, vehicleID, destination, notBefore)
+	if err != nil {
+		return trips.Leg{}, false, fmt.Errorf("trips: resume leg: %w", err)
+	}
+	if !resumed {
+		return trips.Leg{}, false, nil
+	}
+	return legFromRow(&row), true, nil
+}
+
 func (a *tripLegStoreAdapter) EndLeg(ctx context.Context, legID string, endedAt time.Time, arrived bool) error {
 	if err := a.repo.EndLeg(ctx, legID, endedAt, arrived); err != nil {
 		return fmt.Errorf("trips: end leg: %w", err)
@@ -161,6 +176,14 @@ func (a *tripLegStoreAdapter) ClaimLegActivityStart(ctx context.Context, legID s
 
 func (a *tripLegStoreAdapter) ClaimLegActivityEnd(ctx context.Context, legID string) (bool, error) {
 	return wrapClaim(a.repo.ClaimLegActivityEnd(ctx, legID))
+}
+
+// ClaimLegBannerSlot arbitrates the (trip, event, destination) banner slot —
+// the MYR-620 gate that bounds a leg banner whatever the detector does.
+func (a *tripLegStoreAdapter) ClaimLegBannerSlot(
+	ctx context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+) (bool, error) {
+	return wrapClaim(a.repo.ClaimLegBannerSlot(ctx, tripID, event, destinationKey, now, window))
 }
 
 // wrapClaim adds the package prefix to a claim's error. The four claims differ

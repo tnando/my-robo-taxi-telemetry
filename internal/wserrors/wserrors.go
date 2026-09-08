@@ -3,9 +3,12 @@
 // error code the server emits across both transports (WebSocket
 // `error` frame and REST `error.code` envelope).
 //
-// Both internal/ws/ and internal/telemetry/ depend on this package; it
-// depends on no other internal package, which is what lets the WS and
-// REST layers share the catalog without forming an import cycle.
+// Both internal/ws/ and internal/telemetry/ depend on this package. Its
+// only internal dependency is internal/auth, itself a leaf, which
+// auth_failure.go needs to tell a dead credential apart from an
+// unanswerable existence probe (MYR-612); every consumer of this package
+// already imports internal/auth, so the WS and REST layers still share
+// the catalog without forming an import cycle.
 package wserrors
 
 import (
@@ -71,10 +74,22 @@ const (
 	// ErrCodeInternalError is the catch-all 500: panics, DB errors,
 	// downstream timeouts. SDK auto-retries with backoff.
 	ErrCodeInternalError ErrorCode = "internal_error"
-	// ErrCodeServiceUnavailable is REST-only 503 — reserved for
-	// maintenance windows / graceful shutdown. v1 does not yet emit
-	// this code; declared so SDK consumers can write forward-compatible
-	// handlers (see rest-api.md §4.1.1.a).
+	// ErrCodeServiceUnavailable is REST-only 503, and it IS emitted
+	// (MYR-612): every authenticated REST surface answers it when the
+	// fail-closed user-existence probe behind ValidateToken could not
+	// be ANSWERED — a pool wait, a statement timeout, a cancelled peer
+	// sharing the coalesced lookup (rest-api.md §3.2.1) — and the trips
+	// kill switch answers it for a disabled feature. Still reserved, in
+	// addition, for maintenance windows / graceful shutdown (DV-21).
+	//
+	// ⚠ REST-ONLY ON THE WIRE, and structurally so: this code is NOT a
+	// member of ErrorPayload.code in schemas/ws-messages.schema.json,
+	// because the WebSocket analogue of a 503 is a CLOSE CODE rather
+	// than a typed frame. A WS handshake refused for the same reason
+	// closes 1013 Try Again Later with no error frame at all
+	// (websocket-protocol.md §2.4, §6.2). Emitting it on a WS frame
+	// would be a breaking decode on every shipped SDK whose generated
+	// union does not carry the member.
 	ErrCodeServiceUnavailable ErrorCode = "service_unavailable"
 	// ErrCodeSnapshotRequired is WS-only — server cannot satisfy the
 	// client's subscribe.sinceSeq request because the gap is too large.

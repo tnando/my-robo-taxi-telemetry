@@ -90,8 +90,8 @@ func (a *tripNotifierAdapter) TripDeleted(ctx context.Context, trip telemetry.Tr
 // TripParticipantAdded announces to the OWNER that a participant added somebody
 // to their trip (MYR-618).
 //
-// THE ONLY METHOD HERE THAT PASSES ANYTHING BUT AN ID THROUGH. The other four
-// hand over a trip id and let the live half read what it needs, because what
+// THE ONLY METHOD HERE THAT PASSES ANYTHING BUT AN ID THROUGH. Its five
+// siblings hand over ids only and let the live half read what it needs, because what
 // they announce is a state the database holds. This one announces WHO did
 // something, and the names it interpolates are the roster's — already resolved,
 // by the read the handler did to build its response. Re-resolving them one
@@ -103,6 +103,19 @@ func (a *tripNotifierAdapter) TripParticipantAdded(
 	if err := a.svc.NotifyTripParticipantAdded(ctx, trip.ID, actorName, addedNames); err != nil {
 		a.log(ctx, "trip_participant_added", trip.ID, err)
 	}
+}
+
+// ActivityTokenRegistered raises the open leg's card on the phone that just
+// registered (MYR-612).
+//
+// THE ONE METHOD ON THIS SEAM THAT IS NOT AN ANNOUNCEMENT. Its five siblings turn
+// a request into a push about a trip; this one repairs a card that the leg-open
+// fan-out could not have raised, because the registration it needed had not
+// happened yet. The live side returns nothing for the same reason those four
+// discard their errors here: the registration has already committed and is
+// correct whatever the push does.
+func (a *tripNotifierAdapter) ActivityTokenRegistered(ctx context.Context, tripID, userID string) {
+	a.svc.CatchUpLegActivity(ctx, tripID, userID)
 }
 
 // log records a failed announcement at WARN. Not ERROR: the state change it was

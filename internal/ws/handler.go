@@ -97,14 +97,7 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 			slog.Any("error", err),
 			slog.String("remote_addr", clientIP),
 		)
-		errCode := wserrors.ErrCodeAuthFailed
-		if errors.Is(err, ErrAuthTimeout) {
-			errCode = wserrors.ErrCodeAuthTimeout
-		}
-		errCtx, errCancel := context.WithTimeout(context.Background(), cfg.WriteTimeout)
-		_ = sendError(errCtx, conn, errCode, err.Error(), cfg.WriteTimeout)
-		errCancel()
-		_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
+		h.refuseHandshake(conn, err, cfg)
 		return
 	}
 
@@ -149,6 +142,43 @@ func (h *Hub) handleUpgrade(w http.ResponseWriter, r *http.Request, auth Authent
 	h.Unregister(client)
 }
 
+// refuseHandshake is the ONE place a failed handshake is answered, and it is
+// one place on purpose (MYR-612 review).
+//
+// IT USED TO BE TWO. authenticateClient wrote a frame with a static message and
+// then this path wrote a SECOND frame carrying `err.Error()` — the whole
+// wrapped chain, "hub.authenticateClient: get vehicles(user=clx…): …", with the
+// user id inside it. §6.3 and Rule CG-DC-2 say the `message` field must carry
+// no P1 value, and a user id in an error a client keeps and logs is exactly
+// that. Two frames also broke §2.3's own promise that a client sees `auth_ok`
+// OR one `error`, never more than one, so an SDK reading the first frame and
+// the second on the same socket saw a code it had already handled.
+//
+// ⚠ THE UNANSWERABLE EXISTENCE PROBE GETS A CLOSE CODE AND NO FRAME AT ALL.
+// `service_unavailable` is deliberately NOT a member of ErrorPayload.code
+// (rest-api.md §4.1.1.a, ws-messages.schema.json): the WebSocket analogue of a
+// 503 is a CLOSE CODE, not a typed frame, and inventing the frame would have
+// been a breaking decode on every shipped SDK whose generated union does not
+// carry the member. 1013 Try Again Later says the same thing the REST 503 says
+// — the refusal is real, the credential is not implicated, come back — and it
+// says it in the vocabulary this transport already has (§6.2).
+func (h *Hub) refuseHandshake(conn *websocket.Conn, err error, cfg HandlerConfig) {
+	if authpkg.IsLookupFailure(err) {
+		_ = conn.Close(websocket.StatusTryAgainLater, "authentication temporarily unavailable")
+		return
+	}
+
+	code, message := wserrors.ErrCodeAuthFailed, "invalid token"
+	if errors.Is(err, ErrAuthTimeout) {
+		code, message = wserrors.ErrCodeAuthTimeout, "auth frame not received"
+	}
+	// STATIC MESSAGES ONLY, never the error chain — see above and §6.3.
+	errCtx, cancel := context.WithTimeout(context.Background(), cfg.WriteTimeout)
+	_ = sendError(errCtx, conn, code, message, cfg.WriteTimeout)
+	cancel()
+	_ = conn.Close(websocket.StatusPolicyViolation, "authentication failed")
+}
+
 // authenticateClient waits for the auth message, validates the token,
 // and populates the client's userID and vehicleIDs.
 func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authenticator, cfg HandlerConfig) error {
@@ -177,15 +207,21 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 		return fmt.Errorf("hub.authenticateClient: unmarshal auth payload: %w", err)
 	}
 
+	// NO FRAME IS WRITTEN FROM HERE (MYR-612 review). This function REPORTS the
+	// refusal and refuseHandshake answers it — one emission point, one frame,
+	// static messages. `%w` all the way out is what lets that one place tell
+	// the two refusals apart: `auth_failed` says the credential is dead and a
+	// phone acts on that by discarding the session, while an existence probe
+	// that could not be ANSWERED — a pool wait, a cancelled peer sharing the
+	// singleflight slot — says nothing about the credential and is answered
+	// with close 1013 instead.
 	userID, err := auth.ValidateToken(authCtx, payload.Token)
 	if err != nil {
-		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "invalid token", cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: validate token: %w", err)
 	}
 
 	vehicleIDs, err := h.timedGetUserVehicles(authCtx, auth, userID)
 	if err != nil {
-		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "failed to load vehicles", cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: get vehicles(user=%s): %w", userID, err)
 	}
 

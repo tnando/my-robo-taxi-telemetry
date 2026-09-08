@@ -150,12 +150,18 @@ func (a *JWTAuthenticator) ValidateToken(ctx context.Context, token string) (str
 	if a.userExistsCache != nil {
 		exists, existsErr := a.userExistsCache.Exists(ctx, sub)
 		if existsErr != nil {
-			// Fail-closed wrap: callers that branch on
-			// errors.Is(err, ErrUserNotFound) get the same answer in
-			// the "DB outage" branch as in the "row missing" branch.
-			// The underlying transient error stays in the chain for
-			// observability.
-			return "", fmt.Errorf("auth.ValidateToken: %w: %w: %w", ErrInvalidToken, ErrUserNotFound, existsErr)
+			// STILL FAIL-CLOSED, and still ErrInvalidToken: a lookup we could
+			// not answer is a token we do not accept, and MYR-73's rule that
+			// authentication may not survive a database outage is unchanged.
+			//
+			// WHAT CHANGED (MYR-612) IS THE SENTINEL. This branch used to wrap
+			// ErrUserNotFound as well, so the operator's log said the account
+			// did not exist when what had actually happened was that the query
+			// failed — and the resulting incident spent hours looking for a
+			// missing row in a table the ladder had probed correctly all along.
+			// ErrUserLookupFailed says the true thing; nothing in the codebase
+			// branches on the distinction, and both wrap ErrInvalidToken.
+			return "", fmt.Errorf("auth.ValidateToken: %w: %w: %w", ErrInvalidToken, ErrUserLookupFailed, existsErr)
 		}
 		if !exists {
 			return "", fmt.Errorf("auth.ValidateToken: %w: %w", ErrInvalidToken, ErrUserNotFound)
