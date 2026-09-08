@@ -36,7 +36,7 @@ func fixtureDriveDetail(driveID string) DriveDetailData {
 		DriveAccessFacts: DriveAccessFacts{
 			DriveID:   driveID,
 			VehicleID: fixtureSnapshotRowID,
-			StartTime: "2026-04-13T18:22:00Z",
+			StartTime: fixtureDriveStart,
 		},
 		EndTime:          "2026-04-13T18:46:18Z",
 		Date:             "2026-04-13",

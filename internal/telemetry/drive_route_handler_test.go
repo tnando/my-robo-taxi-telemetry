@@ -30,6 +30,12 @@ func (s *stubDriveRouteFetcher) GetDriveRoute(_ context.Context, _ string) (Driv
 // routeFixtureDriveID is the drive every case in this file asks for.
 const routeFixtureDriveID = "clmno9876543210zyxw0001"
 
+// fixtureDriveStart is the instant EVERY drive fixture in this package starts
+// at — §7.3's detail fixture reads it too. One constant rather than two spelled
+// literals, so the two surfaces that share one access identity cannot drift
+// into disagreeing about when the same fixture drive began.
+const fixtureDriveStart = "2026-04-13T18:22:00Z"
+
 // fixtureRouteFacts builds the access identity a real drive row carries.
 //
 // A HELPER RATHER THAN A LITERAL IN EACH CASE, so no test in this file can
@@ -41,7 +47,7 @@ func fixtureRouteFacts(vehicleID string) DriveAccessFacts {
 	return DriveAccessFacts{
 		DriveID:   routeFixtureDriveID,
 		VehicleID: vehicleID,
-		StartTime: "2026-06-06T18:22:00Z",
+		StartTime: fixtureDriveStart,
 	}
 }
 
