@@ -109,7 +109,7 @@ func (d *Detector) decide(
 	//    name and any arrival estimate, or arrival evidence (branch 1, above)
 	//    settles it. See vehicleState.clearConfirmed.
 	if state.clearPending() {
-		if !state.clearConfirmed(f, d.cfg) {
+		if !state.clearConfirmed(f, d.cfg, atDestination) {
 			// Held open. The card is deliberately NOT refreshed while the
 			// route is in doubt: the honest content-state is the one already
 			// on the lock screen, and its stale-date keeps it honest.
@@ -131,13 +131,27 @@ func (d *Detector) decide(
 	//    the beginning of an arrival, not the end of a leg; the dwell decides
 	//    which, and until it does the leg stays open.
 	//
+	//    PARKED IS NOT "STOPPED ON THIS FRAME" (MYR-612 review). `!driving`
+	//    alone says only that the last frame reported a speed at or under 1
+	//    mph, which a car waiting at a junction reports for twenty seconds at a
+	//    time — so this branch used to close a leg at the first red light away
+	//    from the destination, mid-route, as `completed`. vehicleState.parked
+	//    is the claim this branch was always making in prose: the driver put it
+	//    in P, or it has not moved for a whole LegClearGrace.
+	//
 	//    The residual case is a car that parks at its destination and then goes
 	//    completely silent, with not even a MYR-394 REST poll frame to satisfy
 	//    the dwell. Its leg stays open until the window closes and is then
 	//    settled as `completed`. That is the honest answer — nothing ever
 	//    proved it stayed — and it is the same dependency internal/arrival has
 	//    on the same poller for the same reason.
-	if !state.driving && drivingBefore && !atDestination {
+	//    `drivingBefore` IS NOT PART OF THE TEST any more, and could not be:
+	//    it is true on exactly the FIRST stopped frame, so pairing it with a
+	//    stop that has to be SUSTAINED asks for two things that can never hold
+	//    at once. A park is a state the detector re-observes on every frame
+	//    until it acts on it, which is the same shape every other closing
+	//    condition here has.
+	if !atDestination && state.parked(f, d.cfg) {
 		d.closeLegNow(ctx, tv, state, leg, false)
 		return
 	}

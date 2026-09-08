@@ -373,3 +373,111 @@ func TestAClearArrivingWithItsOwnEstimateStillCloses(t *testing.T) {
 		t.Errorf("final card status = %q, want %q", got, tripStatusCompleted)
 	}
 }
+
+// TestARedLightDoesNotConfirmAClear — the debounce must survive a junction
+// (MYR-612 review).
+//
+// The park rung of the confirmation read `!driving`, which is true of any
+// frame reporting a speed at or under 1 mph. A car that waits at a light for
+// eight seconds reports exactly that, so a delta which happened to omit the
+// destination name followed by ONE red-light frame closed the leg on the spot
+// — the sixty-second grace bought nothing at all on a city street.
+func TestARedLightDoesNotConfirmAClear(t *testing.T) {
+	d, _, legs, pusher, activities := newTestDetector(t)
+
+	feed(d, []frame{
+		underway(),
+		// The delta with no name, still moving.
+		{230, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName):  dest(""),
+			string(telemetry.FieldSpeed):            speed(28),
+			string(telemetry.FieldMinutesToArrival): speed(12),
+		}},
+		// A junction: stopped, well short of the destination, for 8 seconds.
+		{235, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed): speed(0),
+		}},
+		{240, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed): speed(0),
+		}},
+		// Green, and the name is back in the next delta.
+		{243, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName):  dest(sedona),
+			string(telemetry.FieldSpeed):            speed(24),
+			string(telemetry.FieldMinutesToArrival): speed(11),
+		}},
+	})
+
+	open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 1 {
+		t.Fatalf("open legs = %d, want 1 — a red light is not a park", len(open))
+	}
+	if got := len(legs.byID); got != 1 {
+		t.Errorf("legs recorded = %d, want 1", got)
+	}
+	if got := starts(pusher); got != 1 {
+		t.Errorf("trip_leg_started banners = %d, want 1", got)
+	}
+	if got := len(activities.ends); got != 0 {
+		t.Errorf("cards ended = %d, want 0", got)
+	}
+}
+
+// TestAClearOnArrivalStillArrives — the `!atDestination` guard, carried from
+// decide's park-short branch onto the clear confirmation (MYR-612 review).
+//
+// A dash clears its route when it reaches the place, so the arrival frame and
+// the clear frame are frequently the same frame. Without the guard the park
+// rung settled the clear one second into a twenty-second dwell and the leg
+// closed as `completed`: "your car arrived" was never sent for the one ending
+// that had earned it.
+func TestAClearOnArrivalStillArrives(t *testing.T) {
+	d, _, legs, pusher, activities := newTestDetector(t)
+
+	feed(d, []frame{
+		// Under way, measuring the distance the dash reports.
+		{0, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(sedona),
+			string(telemetry.FieldGear):            gear("D"),
+			string(telemetry.FieldSpeed):           speed(30),
+			string(telemetry.FieldMilesToArrival):  speed(2),
+		}},
+		// Arrival: stopped at the destination AND the route cleared, in the
+		// one frame the dash actually sends.
+		{100, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(""),
+			string(telemetry.FieldGear):            gear("P"),
+			string(telemetry.FieldSpeed):           speed(0),
+			string(telemetry.FieldMilesToArrival):  speed(0.01),
+		}},
+		// The dwell plays out on the REST-poll cadence.
+		{110, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+		{125, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+	})
+
+	open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 0 {
+		t.Fatalf("open legs = %d, want 0 — the car arrived", len(open))
+	}
+	var arrived bool
+	for _, e := range pusher.events() {
+		if e == push.TripEventLegArrived {
+			arrived = true
+		}
+	}
+	if !arrived {
+		t.Errorf("no trip_leg_arrived push: %v — the clear closed the leg inside the dwell", pusher.events())
+	}
+	if len(activities.ends) != 1 {
+		t.Fatalf("cards ended = %d, want 1", len(activities.ends))
+	}
+	if got := activities.ends[0].Status; got != tripStatusArrived {
+		t.Errorf("final card status = %q, want %q", got, tripStatusArrived)
+	}
+}

@@ -55,6 +55,16 @@ type vehicleState struct {
 	// driving is the last decided motion verdict. Sticky across frames that
 	// report neither speed nor gear, which is most of them.
 	driving bool
+	// stoppedSince is when the CURRENT run of stopped frames began, zero while
+	// the car is moving or has never reported motion.
+	//
+	// It is what tells a PARK apart from a red light. `!driving` alone says
+	// only that the last frame reported a speed at or under 1 mph, which a car
+	// waiting at a junction reports for twenty seconds at a time; using it as
+	// the park rung of the clear confirmation made the whole debounce
+	// evaporate at the first traffic light after a delta that happened to omit
+	// the destination name.
+	stoppedSince time.Time
 	// prev is the last located fix, held so the positional stillness rung has
 	// something to compare against.
 	prev *fix
@@ -229,7 +239,14 @@ func (v *vehicleState) apply(f fix, cfg Config) {
 	switch reportedMotion(f, cfg.StoppedSpeedMPH) {
 	case motionMoving:
 		v.driving = true
+		v.stoppedSince = time.Time{}
 	case motionStopped:
+		if v.driving || v.stoppedSince.IsZero() {
+			// The START of a stop. A run already under way keeps its original
+			// stamp, which is what makes the run a DURATION rather than a
+			// restarting instant.
+			v.stoppedSince = f.at
+		}
 		v.driving = false
 	case motionUnreported:
 		// Left alone deliberately. A frame that says nothing about motion is
@@ -359,20 +376,28 @@ func (v *vehicleState) stillnessRun(f fix, prev *fix, cfg Config) (time.Time, bo
 // one — the MYR-612 debounce, stated as the three things that are allowed to
 // end a leg on an absent destination.
 //
-//	PARK       the car stopped. Nothing needs debouncing: a parked car with no
-//	           route is not on its way anywhere, and the park-short branch would
-//	           reach the same verdict a frame later anyway.
+//	PARK       the car PARKED — gear P, or a stop sustained for the grace.
+//	           Nothing needs debouncing: a parked car with no route is not on
+//	           its way anywhere, and the park-short branch would reach the same
+//	           verdict a frame later anyway.
 //	SUSTAINED  LegClearGrace has passed since the name went, AND no arrival
 //	           estimate has been reported in that time. Both, not either: a car
 //	           still saying how long it has to go still has somewhere to be, and
 //	           that is exactly the frame sequence the incident produced.
 //	(ARRIVAL)  handled before this is ever reached — it is the strongest claim
 //	           and the only one that fires `trip_leg_arrived`.
-func (v *vehicleState) clearConfirmed(f fix, cfg Config) bool {
+//
+// ⚠ THE PARK RUNG CARRIES `!atDestination`, exactly as decide's park-short
+// branch does and for the same reason. A car that ARRIVES also stops, so
+// without the guard a route cleared on arrival — which is what a dash does
+// when it reaches the place — closed the leg as `completed` one second into a
+// twenty-second dwell, and `trip_leg_arrived` was never sent. A stop inside
+// the radius is the beginning of an arrival, not the end of a leg.
+func (v *vehicleState) clearConfirmed(f fix, cfg Config, atDestination bool) bool {
 	if v.destClearedAt.IsZero() {
 		return false
 	}
-	if !v.driving {
+	if !atDestination && v.parked(f, cfg) {
 		return true
 	}
 	if f.at.Sub(v.destClearedAt) < cfg.LegClearGrace {
@@ -394,6 +419,30 @@ func (v *vehicleState) clearConfirmed(f fix, cfg Config) bool {
 	// claiming to be going anywhere. A zero etaSeenAt (a car that never
 	// reported one) is arbitrarily stale, which is the right answer for it.
 	return f.at.Sub(v.etaSeenAt) >= cfg.LegClearGrace
+}
+
+// parked reports whether the car has actually PARKED, as against merely having
+// reported a speed at or under the stopped threshold on this one frame.
+//
+// ⚠ `!driving` IS NOT PARKED, and using it as though it were is what made the
+// MYR-612 debounce evaporate at the first red light: a car waiting at a
+// junction reports 0 mph for twenty seconds at a time, and one such frame after
+// a delta that happened to omit the destination name closed the leg on the
+// spot — the exact outcome the debounce was added to prevent.
+//
+// Two things count, and both are claims about the car rather than about one
+// frame: the driver put it in P, or it has not moved for a whole
+// LegClearGrace. The second is deliberately the same duration as the grace the
+// SUSTAINED rung waits out — a stop long enough to settle a clear on its own is
+// a stop no longer than the wait it is short-cutting.
+func (v *vehicleState) parked(f fix, cfg Config) bool {
+	if f.gear == gearPark {
+		return true
+	}
+	if v.driving || v.stoppedSince.IsZero() {
+		return false
+	}
+	return f.at.Sub(v.stoppedSince) >= cfg.LegClearGrace
 }
 
 // clearPending reports whether the car is inside the debounce window.
