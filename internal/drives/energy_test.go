@@ -383,3 +383,93 @@ func TestCalculateStats_EnergyDeltaComesFromTheAccumulator(t *testing.T) {
 		nearly(t, calculateStats(drive).EnergyDelta, 0, "EnergyDelta")
 	})
 }
+
+// ── THE CADENCE MISMATCH THE REVIEW ROUND FOUND ─────────────────────────────
+//
+// `EnergyRemaining` is configured at IntervalSeconds: 30 and
+// `DetailedChargeState` is on-change with a 120s resend, so at best ONE energy
+// frame in FOUR carries a charge state. These two tests drive a charging
+// session at exactly that ratio.
+//
+// chargingSessionTotal opens a drive on a car whose parked energy is cached,
+// burns `burnKwh` on one in-drive sample, then charges at `kw` for 15 minutes
+// in 30s steps with `chargeState: Charging` on every FOURTH frame — the shape
+// the stream actually delivers. It returns the drive's accumulator.
+func chargingSessionTotal(t *testing.T, vin string, burnKwh, kw float64) *driveEnergy {
+	t.Helper()
+	d := energyDetector()
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+
+	// Parked with a known pack level, then the gear frame that opens the drive.
+	d.handleTelemetry(telemetryEvent(vin, base, map[string]events.TelemetryValue{
+		string(telemetry.FieldGear):            stringField("P"),
+		string(telemetry.FieldEnergyRemaining): floatField(60),
+	}))
+	d.handleTelemetry(telemetryEvent(vin, base.Add(time.Second), map[string]events.TelemetryValue{
+		string(telemetry.FieldGear): stringField("D"),
+	}))
+
+	// One real driving sample: the drive burned `burnKwh` getting to the plug.
+	level := 60 - burnKwh
+	d.handleTelemetry(telemetryEvent(vin, base.Add(30*time.Second), map[string]events.TelemetryValue{
+		string(telemetry.FieldEnergyRemaining): floatField(level),
+	}))
+
+	// The car parks at a charger without ever sending gear=P, so the drive is
+	// still open (the stall watchdog is what eventually closes it). 15 minutes
+	// of charging at 30s steps.
+	perStep := kw * 30.0 / 3600.0
+	for i := range 30 {
+		at := base.Add(time.Duration(60+30*i) * time.Second)
+		level += perStep
+		fields := map[string]events.TelemetryValue{
+			string(telemetry.FieldEnergyRemaining): floatField(level),
+		}
+		// Every fourth frame carries the charge state; the other three do not.
+		if i%4 == 0 {
+			fields[string(telemetry.FieldChargeState)] = stringField("Charging")
+		}
+		d.handleTelemetry(telemetryEvent(vin, at, fields))
+	}
+
+	return &activeDriveFor(t, d, vin).energy
+}
+
+// TestDetector_DCChargingInsideDriveCreditsNoRegen is the case the rate bound
+// already caught on its own: 150 kW puts 1.25 kWh into the pack every 30s, far
+// beyond what regenerative braking could return, so every step is refused
+// whether or not the frame said "Charging".
+func TestDetector_DCChargingInsideDriveCreditsNoRegen(t *testing.T) {
+	e := chargingSessionTotal(t, "TESTVIN000ENERGY4", 5, 150)
+
+	got, reported := e.total()
+	if !reported {
+		t.Fatal("energy not reported; the driving sample before the plug should have measured")
+	}
+	nearly(t, got, 5, "total")
+	if !e.chargedInside {
+		t.Error("chargedInside = false, want true")
+	}
+}
+
+// TestDetector_ACChargingInsideDriveCreditsNoRegen is the one the rate bound
+// CANNOT catch, and the reason the charge state is latched. 11 kW is 0.092 kWh
+// per 30s step — comfortably inside the ~0.58 kWh a 70 kW regen ceiling admits
+// over the same interval — so the bound credits every step as regen and the
+// drive under-reports what it burned.
+//
+// ⚠ THIS TEST FAILS WITHOUT THE LATCH. Reading `chargeState` off the frame that
+// carried the energy sample answers on one step in four; the other three are
+// credited as regen and the total lands near 2.9 kWh instead of 5.
+func TestDetector_ACChargingInsideDriveCreditsNoRegen(t *testing.T) {
+	e := chargingSessionTotal(t, "TESTVIN000ENERGY5", 5, 11)
+
+	got, reported := e.total()
+	if !reported {
+		t.Fatal("energy not reported; the driving sample before the plug should have measured")
+	}
+	nearly(t, got, 5, "total")
+	if !e.chargedInside {
+		t.Error("chargedInside = false, want true")
+	}
+}

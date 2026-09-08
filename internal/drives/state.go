@@ -103,6 +103,32 @@ type vehicleState struct {
 	lastEnergy  float64
 	energyKnown bool
 
+	// lastChargeState caches the most recent NON-EMPTY `chargeState` seen for
+	// this vehicle, and chargeStateKnown reports whether one has ever arrived.
+	// It is LATCHED rather than read per frame, and that is load-bearing for
+	// the energy accumulator (MYR-629 review round).
+	//
+	// ⚠ THE TWO FIELDS ARE ON DIFFERENT CADENCES AND THE FRAMES DO NOT LINE UP.
+	// `EnergyRemaining` is configured at IntervalSeconds: 30 and
+	// `DetailedChargeState` on-change with a 120s resend, so at best ONE energy
+	// frame in FOUR carries a charge state. Reading `chargeState` off the frame
+	// that carried the energy sample therefore asked the authoritative half of
+	// the charging/regen discriminator (energy.go) a question it could not
+	// answer three times out of four, and the rate bound then had to decide
+	// alone — which is fine for a 150 kW DC session and WRONG for an 11 kW AC
+	// one, where a 30s step adds ~0.09 kWh, far inside what regen could have
+	// returned. Latching the last state the car reported makes the car's own
+	// answer available on every energy sample.
+	//
+	// LATCHING IS SAFE BECAUSE THE FIELD RE-ASSERTS ITSELF. MYR-333 gave
+	// proto 179 a 120s resend precisely so a listener that missed the
+	// plugged-in transition still learns the state; unplugging therefore
+	// clears the latch within 120s. Until it does, gains are treated as
+	// charging and dropped — the fail-closed direction, costing at most a
+	// couple of minutes of regen credit and never inventing consumption.
+	lastChargeState  string
+	chargeStateKnown bool
+
 	// lastTelemetryAt records the wall-clock time of the most recently
 	// received telemetry event for this vehicle (any field, gear-bearing
 	// or not). The end-condition watchdog uses this to detect drives
@@ -176,4 +202,16 @@ func resetToIdle(s *vehicleState) {
 	s.status = StatusIdle
 	s.drive = nil
 	s.lastGear = ""
+}
+
+// latchedChargeState returns the last charge state the vehicle reported, or ""
+// when it has never reported one. "" is the honest answer for a car that has
+// never charged since we started listening: isChargingState("") is false, so
+// the energy accumulator falls through to its rate bound rather than guessing.
+// The caller must hold s.mu.
+func (s *vehicleState) latchedChargeState() string {
+	if !s.chargeStateKnown {
+		return ""
+	}
+	return s.lastChargeState
 }

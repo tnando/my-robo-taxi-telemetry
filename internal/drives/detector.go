@@ -327,6 +327,18 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		state.energyKnown = true
 	}
 
+	// Latch the charge state the same way (MYR-629 review round), and note
+	// this one is a STRING cache with no plausibility filter beyond
+	// non-emptiness: "" means the frame said nothing, every other value is
+	// something the car asserted. It is latched rather than read per frame
+	// because `chargeState` and `energyRemaining` stream on different cadences
+	// and only about one energy frame in four carries a charge state — see the
+	// field comment in state.go.
+	if cs := extractStringField(te.Fields, telemetry.FieldChargeState); cs != "" {
+		state.lastChargeState = cs
+		state.chargeStateKnown = true
+	}
+
 	switch state.status {
 	case StatusIdle:
 		d.handleIdle(state, vin, te)

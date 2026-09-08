@@ -38,7 +38,7 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	// point, or odometer advance). Feeds the watchdog's stall condition
 	// (MYR-160): a drive whose telemetry keeps flowing without movement
 	// for StallTimeout is a parked car whose gear=P frame was missed.
-	moved := accumulateDriveCounters(drive, te)
+	moved := accumulateDriveCounters(state, drive, te)
 
 	// Accumulate route point if location is present AND the car has actually
 	// moved since the last fix.
@@ -88,7 +88,7 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 // FSD and odometer baselines are lazily seeded from the first in-drive
 // sample when they were cold at drive start (MYR-157). The caller must
 // hold state.mu.
-func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent) bool {
+func accumulateDriveCounters(state *vehicleState, drive *activeDrive, te events.VehicleTelemetryEvent) bool {
 	moved := false
 
 	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
@@ -133,14 +133,22 @@ func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent
 	}
 
 	// MYR-629 — one energy sample folded into the running accumulator, with the
-	// SAME frame's chargeState so a gain taken on a cable is excluded rather
-	// than credited as regen. energy.go carries the whole argument; the reason
-	// this is a fold and not `drive.lastEnergy = energy` is that a two-point
-	// subtraction cannot exclude a charging stop that happened inside an open
-	// drive, and cannot report anything at all for a drive whose opening frame
-	// carried no energy — which was 453 of the last 460 production drives.
+	// vehicle's LATCHED chargeState so a gain taken on a cable is excluded
+	// rather than credited as regen. energy.go carries the whole argument; the
+	// reason this is a fold and not `drive.lastEnergy = energy` is that a
+	// two-point subtraction cannot exclude a charging stop that happened inside
+	// an open drive, and cannot report anything at all for a drive whose
+	// opening frame carried no energy — which was 453 of the last 460
+	// production drives.
+	//
+	// ⚠ THE LATCHED STATE, NOT THIS FRAME'S. The frame that carries an energy
+	// sample usually carries no charge state at all (30s against an on-change
+	// field with a 120s resend), so reading it off the frame silenced the
+	// authoritative half of the discriminator on ~3 samples in 4 and left AC
+	// charging inside an open drive to be credited as regen. See the
+	// lastChargeState comment in state.go.
 	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
-		drive.energy.observe(energy, te.CreatedAt, extractStringField(te.Fields, telemetry.FieldChargeState))
+		drive.energy.observe(energy, te.CreatedAt, state.latchedChargeState())
 	}
 
 	return moved
