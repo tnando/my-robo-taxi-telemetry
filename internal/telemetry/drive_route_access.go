@@ -74,10 +74,17 @@ func (h *DriveRouteHandler) verifyOwnership(ctx context.Context, w http.Response
 				return false
 			}
 			startedAt, parsed := parseDriveStartTime(startTime)
-			if !parsed || !admission.covers(startedAt) {
-				// An unparseable startTime is admitted to NOBODY through a
-				// trip: the window test cannot be evaluated, and the safe
-				// answer for an unevaluable access check is denial.
+			if !parsed {
+				// MYR-614: SEPARATED FROM THE REFUSAL BELOW. An unparseable
+				// startTime is admitted to nobody either way, but it is a
+				// server data fault rather than a legitimate "outside your
+				// window", and reporting it as the latter is what let a whole
+				// surface fail silently for every participant. 500 + an
+				// Error log; see failDriveStartTimeUnreadable.
+				failDriveStartTimeUnreadable(w, h.logger, "drive route", driveID, vehicleID, userID, startTime)
+				return false
+			}
+			if !admission.covers(startedAt) {
 				denyDriveOutsideTripWindow(w, h.logger, "drive route", driveID, userID)
 				return false
 			}

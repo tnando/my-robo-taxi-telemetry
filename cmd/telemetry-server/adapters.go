@@ -341,6 +341,34 @@ func driveListItem(d store.DriveSummaryRow) telemetry.DriveListItem {
 	}
 }
 
+// driveRecordReader is the one store method the two drive-scoped read adapters
+// need: the wide single-drive read. Declared at the consumer site (CLAUDE.md)
+// rather than taking *store.DriveRepo so the REAL adapters can be exercised
+// against a scripted drive row — which is how MYR-614's regression is now held
+// down at the wiring level rather than only at the handler's stub boundary.
+type driveRecordReader interface {
+	GetByID(ctx context.Context, id string) (store.DriveRecord, error)
+}
+
+// driveAccessFacts projects a store drive row onto the identity BOTH §7.3 and
+// §7.4 feed to their access gate.
+//
+// ONE PRODUCER, FOR THE REASON MYR-614 EXISTS. The route adapter used to build
+// its own literal and set two of the three fields — no StartTime — so the
+// §7.4 trip-window admission could never parse a start instant and refused
+// every participant every route with a 404 that read exactly like a legitimate
+// "outside your window". The detail adapter, three lines below it, set the
+// field correctly, which is precisely how a divergence like this survives
+// review. The two surfaces now cannot disagree about what a drive's access
+// identity is, because there is only one place that says.
+func driveAccessFacts(rec store.DriveRecord) telemetry.DriveAccessFacts {
+	return telemetry.DriveAccessFacts{
+		DriveID:   rec.ID,
+		VehicleID: rec.VehicleID,
+		StartTime: rec.StartTime,
+	}
+}
+
 // driveRouteAdapter adapts store.DriveRepo.GetByID to the
 // telemetry.DriveRouteFetcher interface used by the drive-route handler
 // (DV-20). GetByID already resolves the routePointsEnc shadow into the
@@ -348,7 +376,7 @@ func driveListItem(d store.DriveSummaryRow) telemetry.DriveListItem {
 // wraps sdk.ErrNotFound, so passing the error through with %w lets the
 // handler map an unknown drive to a 404.
 type driveRouteAdapter struct {
-	repo *store.DriveRepo
+	repo driveRecordReader
 }
 
 func (a *driveRouteAdapter) GetDriveRoute(ctx context.Context, driveID string) (telemetry.DriveRouteData, error) {
@@ -357,9 +385,8 @@ func (a *driveRouteAdapter) GetDriveRoute(ctx context.Context, driveID string) (
 		return telemetry.DriveRouteData{}, fmt.Errorf("get drive by id: %w", err)
 	}
 	return telemetry.DriveRouteData{
-		DriveID:     rec.ID,
-		VehicleID:   rec.VehicleID,
-		RoutePoints: rec.RoutePoints,
+		DriveAccessFacts: driveAccessFacts(rec),
+		RoutePoints:      rec.RoutePoints,
 	}, nil
 }
 
@@ -372,7 +399,7 @@ func (a *driveRouteAdapter) GetDriveRoute(ctx context.Context, driveID string) (
 // so passing the error through with %w lets the handler map an unknown
 // drive to a 404.
 type driveDetailAdapter struct {
-	repo *store.DriveRepo
+	repo driveRecordReader
 }
 
 func (a *driveDetailAdapter) GetDriveDetail(ctx context.Context, driveID string) (telemetry.DriveDetailData, error) {
@@ -381,9 +408,7 @@ func (a *driveDetailAdapter) GetDriveDetail(ctx context.Context, driveID string)
 		return telemetry.DriveDetailData{}, fmt.Errorf("get drive by id: %w", err)
 	}
 	return telemetry.DriveDetailData{
-		ID:               rec.ID,
-		VehicleID:        rec.VehicleID,
-		StartTime:        rec.StartTime,
+		DriveAccessFacts: driveAccessFacts(rec),
 		EndTime:          rec.EndTime,
 		Date:             rec.Date,
 		DistanceMiles:    rec.DistanceMiles,

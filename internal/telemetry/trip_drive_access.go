@@ -142,11 +142,49 @@ func denyDriveOutsideTripWindow(w http.ResponseWriter, logger *slog.Logger, surf
 		wserrors.ErrCodeNotFound, "drive not found")
 }
 
+// failDriveStartTimeUnreadable answers a participant read of a drive whose
+// stored `startTime` will not parse.
+//
+// THIS IS A 500, NOT THE 404 — AND MYR-614 IS WHY IT HAD TO BECOME ONE.
+//
+// The two answers look identical to a client and mean opposite things. "Outside
+// your window" is a correct, deliberate refusal of a drive that exists. An
+// unreadable start instant is a SERVER DATA FAULT: the gate cannot evaluate its
+// own question, and the caller may well be entitled to the drive. Folding the
+// fault into the refusal is exactly what hid MYR-614 — the route adapter never
+// carried a start time at all, every participant's every route parsed as "" and
+// came back 404, and the response was indistinguishable from the feature
+// working correctly. It took a client report to find it.
+//
+// So the fault now says it is a fault: 500 to the client, and an Error-level
+// log naming the drive, so the same bug in some future adapter shows up in the
+// error rate on the day it ships instead of as a map that quietly never draws.
+//
+// The caller is still told NOTHING about the drive — `internal_error` is the
+// generic envelope, and the drive id in the log is server-side only.
+//
+// STILL ADMITTED TO NOBODY. This is not a widening: the request is refused
+// either way. Only the honesty of the refusal changed.
+func failDriveStartTimeUnreadable(
+	w http.ResponseWriter, logger *slog.Logger, surface, driveID, vehicleID, userID, startTime string,
+) {
+	logger.Error(surface+": drive startTime is missing or unparseable — cannot evaluate the trip window",
+		slog.String("drive_id", driveID),
+		slog.String("vehicle_id", vehicleID),
+		slog.String("user_id", userID),
+		slog.String("start_time", startTime),
+	)
+	wserrors.WriteErrorEnvelope(w, logger, http.StatusInternalServerError,
+		wserrors.ErrCodeInternalError, "internal error")
+}
+
 // parseDriveStartTime reads a Drive row's RFC 3339 `startTime`.
 //
 // A drive whose start time will not parse is admitted to NOBODY through a trip:
 // the window test cannot be evaluated, and the fail-closed answer for an
-// unevaluable access check is denial. The owner path never reaches here.
+// unevaluable access check is denial. What the caller is TOLD about that
+// denial is failDriveStartTimeUnreadable's business, not this function's. The
+// owner path never reaches here.
 func parseDriveStartTime(s string) (time.Time, bool) {
 	t, err := time.Parse(time.RFC3339, s)
 	if err != nil {
