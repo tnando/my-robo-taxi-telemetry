@@ -36,10 +36,24 @@ func (d *Detector) decide(
 		return
 	}
 
-	underway := state.driving && state.destination != ""
 	if !leg.Open() {
 		state.endLeg()
-		if underway && (!drivingBefore || destBefore == "") {
+		// A PENDING CLEAR WITH NO OPEN LEG IS ALREADY SETTLED (MYR-612).
+		//
+		// The debounce exists to protect an OPEN leg from one delta that
+		// happened to omit the destination name; with no leg open there is
+		// nothing to protect and nothing left to confirm it either — branch 2
+		// below is the only place that calls confirmClear, and it is
+		// unreachable from here. Left pending, `destination` keeps naming a
+		// place the driver cancelled while parked, and the next time the car
+		// pulls out it reads as "driving with a destination" although no route
+		// is set: a PHANTOM leg, with a banner and a card, for a journey
+		// nobody planned.
+		if state.clearPending() {
+			state.confirmClear()
+			return
+		}
+		if state.driving && state.destination != "" && (!drivingBefore || destBefore == "") {
 			edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
 			defer cancel()
 			d.svc.openLeg(edgeCtx, tv, state.destination, f.at)

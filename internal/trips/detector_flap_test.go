@@ -273,3 +273,61 @@ func onlyLegID(t *testing.T, legs *fakeLegStore) string {
 	}
 	return ""
 }
+
+// TestARouteClearedWhileParkedOpensNoPhantomLeg is the pending clear's other
+// half, and the one the debounce got wrong (MYR-612 review).
+//
+// A clear is PENDING until something confirms it, and the only confirmation
+// path ran inside `decide`'s leg-open branch. A driver who arrives, parks, and
+// THEN cancels the route therefore left the pending clear in memory for ever:
+// `destination` went on naming a place nobody was going, and the next time the
+// car pulled out — with no route set at all — it read as "driving with a
+// destination" and opened a leg, with a banner and a card, for a journey that
+// did not exist.
+func TestARouteClearedWhileParkedOpensNoPhantomLeg(t *testing.T) {
+	d, _, legs, pusher, activities := newTestDetector(t)
+
+	feed(d, []frame{
+		// Arrive: the car reaches the hotel and sits there for the dwell.
+		{0, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(sedona),
+			string(telemetry.FieldSpeed):           speed(40),
+			string(telemetry.FieldMilesToArrival):  speed(4),
+		}},
+		{60, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+		{90, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+	})
+	if open, _ := legs.OpenLegsForTrip(context.Background(), testTrip); len(open) != 0 {
+		t.Fatalf("setup: the leg should have arrived and closed, %d open", len(open))
+	}
+
+	feed(d, []frame{
+		// The driver clears the route on the dash while parked. No leg is
+		// open, so nothing in the leg path can confirm the clear.
+		{120, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(""),
+			string(telemetry.FieldGear):            gear("P"),
+		}},
+		// The next day the car sets off with NO destination at all.
+		{9000, map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):  gear("D"),
+			string(telemetry.FieldSpeed): speed(35),
+		}},
+	})
+
+	if got := len(legs.byID); got != 1 {
+		t.Errorf("legs recorded = %d, want 1 — a phantom leg opened with no route set", got)
+	}
+	if got := starts(pusher); got != 1 {
+		t.Errorf("trip_leg_started banners = %d, want 1", got)
+	}
+	if got := len(activities.starts); got != 1 {
+		t.Errorf("push-to-start fan-outs = %d, want 1", got)
+	}
+}
