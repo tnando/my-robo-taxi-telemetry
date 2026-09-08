@@ -68,6 +68,18 @@ type Config struct {
 	// history.
 	LegMergeWindow time.Duration
 
+	// LegBannerWindow is how long a leg banner about ONE trip going to ONE
+	// place silences its own repeat (MYR-620).
+	//
+	// ⚠ IT IS NOT A CLAIM ON A LEG, and that is the whole point. Every one of
+	// the ten "Tesla is on the move — Heading to Element by Marriott Sedona."
+	// banners on the client's 2026-09-08 lock screen was a correctly-claimed,
+	// once-per-leg push; the LEG flapped, and `started_notified_at` is a stamp
+	// on a ROW that each reopen replaced. The debounce and the resume make that
+	// flap far rarer, and this makes the banner bounded whatever the detector
+	// does — which is the property the person holding the phone cares about.
+	LegBannerWindow time.Duration
+
 	// LegReadTTL is how long the detector serves a car's open-leg answer from
 	// memory before re-reading it (MYR-612).
 	//
@@ -165,6 +177,14 @@ const (
 	// same place after two minutes has genuinely made two journeys.
 	defaultLegMergeWindow = 120 * time.Second
 
+	// Half an hour, which is the number the client's screenshot argues for from
+	// both sides: short enough that a genuine second departure for the same
+	// place — a driver who arrives, waits, and sets off again — is still
+	// announced, and long enough that no realistic flap can get a second
+	// banner through. A trip going somewhere ELSE is never suppressed by it:
+	// the destination is part of the key.
+	defaultLegBannerWindow = 30 * time.Minute
+
 	// Five seconds: a third of the candidate TTL, so a car entering or leaving
 	// a leg is noticed within the same order of latency the candidate snapshot
 	// already imposes, and far inside the dwell that decides an arrival.
@@ -200,6 +220,7 @@ func DefaultConfig() Config {
 		CandidateLimit:      defaultCandidateLimit,
 		LegClearGrace:       defaultLegClearGrace,
 		LegMergeWindow:      defaultLegMergeWindow,
+		LegBannerWindow:     defaultLegBannerWindow,
 		LegReadTTL:          defaultLegReadTTL,
 		ArrivalRadiusMeters: defaultArrivalRadiusMeters,
 		Dwell:               defaultDwell,
@@ -244,6 +265,9 @@ func (c Config) withScheduleDefaults() Config {
 	}
 	if c.LegMergeWindow <= 0 {
 		c.LegMergeWindow = d.LegMergeWindow
+	}
+	if c.LegBannerWindow <= 0 {
+		c.LegBannerWindow = d.LegBannerWindow
 	}
 	if c.LegReadTTL <= 0 {
 		c.LegReadTTL = d.LegReadTTL

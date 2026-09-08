@@ -641,8 +641,11 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	// liveActivityRepo is passed for the MYR-413 duplicate-banner gate: a
 	// lifecycle banner is skipped when the recipient already has a running
 	// Live Activity for that ride, whose island alert carries the same news.
+	// tripTokenRepo is its MYR-620 sibling for the TRIP surface: a leg banner
+	// is skipped for a phone registered to receive the leg's card.
 	notifier, err := setupPushNotifier(
-		cfg, bus, apnsClient, pushRepo, pushPrefsRepo, liveActivityRepo, vehicleNameRepo, rideRepo, logger)
+		cfg, bus, apnsClient, pushRepo, pushPrefsRepo, liveActivityRepo, vehicleNameRepo,
+		rideRepo, tripTokenRepo, logger)
 	if err != nil {
 		return fmt.Errorf("setting up push notifier: %w", err)
 	}

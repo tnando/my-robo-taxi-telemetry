@@ -167,6 +167,10 @@ type fakeLegStore struct {
 	// openCalls counts OpenLegForVehicle reads. MYR-612: one per frame before
 	// the LegReadTTL cache, roughly one per TTL after it.
 	openCalls int
+	// bannerSlots is the MYR-620 suppression window's state: when each
+	// (trip, event, destination) banner last actually went out.
+	bannerSlots map[string]time.Time
+	bannerErr   error
 }
 
 func newFakeLegStore() *fakeLegStore {
@@ -310,6 +314,31 @@ func (f *fakeLegStore) ClaimLegActivityStart(_ context.Context, legID string) (b
 
 func (f *fakeLegStore) ClaimLegActivityEnd(_ context.Context, legID string) (bool, error) {
 	return f.claim("act_end:" + legID)
+}
+
+// ClaimLegBannerSlot models the MYR-620 (trip, event, destination) window. It
+// remembers WHEN each slot last sent, because the rule under test is a
+// duration and a boolean claim would assert the test's own opinion of it.
+func (f *fakeLegStore) ClaimLegBannerSlot(
+	_ context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.bannerErr != nil {
+		return false, f.bannerErr
+	}
+	if tripID == "" || event == "" || destinationKey == "" {
+		return true, nil
+	}
+	if f.bannerSlots == nil {
+		f.bannerSlots = map[string]time.Time{}
+	}
+	key := tripID + "|" + event + "|" + destinationKey
+	if last, ok := f.bannerSlots[key]; ok && now.Sub(last) < window {
+		return false, nil
+	}
+	f.bannerSlots[key] = now
+	return true, nil
 }
 
 // idFor mints a readable leg id. strconv rather than rune arithmetic so gosec's

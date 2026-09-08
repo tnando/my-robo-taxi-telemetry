@@ -65,6 +65,15 @@ type delivery struct {
 	// nil check rather than a comparison against a zero struct — the same
 	// reason ActivityNotification.Alert is one.
 	tripPush *TripPush
+	// legActivity marks a delivery whose news a LEG's Live Activity is also
+	// carrying, on every phone registered for the trip (MYR-620).
+	//
+	// The trips sibling of islandAlerts, and separate from it because the two
+	// consult different registries about different subjects: that one asks
+	// go_live_activities about a RIDE, this one asks the push-to-start registry
+	// about a TRIP. False is the safe default and the common one — a lifecycle
+	// trip push and every ride push leave it unset and keep their banner.
+	legActivity bool
 }
 
 // fanOut resolves one ride party's devices and sends the alert to each. Every
@@ -119,6 +128,15 @@ func (n *Notifier) fanOut(ctx context.Context, d delivery, a alert) {
 	// only the rider has a card. Second rather than first, so a rider who
 	// muted the category costs one read instead of two.
 	if n.duplicatesLiveActivity(ctx, d) {
+		return
+	}
+
+	// MYR-620 — the trips sibling of the same question: is this leg's card
+	// already on this recipient's lock screen? A phone registered for the
+	// trip's push-to-start gets the card and NOT the banner; a phone with Live
+	// Activities disabled never registers, so it is told in prose. Checked per
+	// RECIPIENT for the same reason: the audience is mixed by construction.
+	if n.holdsLegActivity(ctx, d) {
 		return
 	}
 

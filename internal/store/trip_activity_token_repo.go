@@ -260,3 +260,43 @@ func (r *TripActivityTokenRepo) ReleasePushToStartClaim(ctx context.Context, tri
 	}
 	return nil
 }
+
+// queryHasPushToStartToken answers "is this person's phone registered to
+// receive this trip's leg Live Activities" (MYR-620).
+//
+// NO MEMBERSHIP PREDICATE, unlike its two siblings above, and the asymmetry is
+// deliberate. Those two decide who to SEND to, so they re-ask the access
+// question. This one decides whether to SUPPRESS a banner, and a stale
+// registration belonging to somebody who has left the trip must not be able to
+// silence a notification — but such a person is not in the banner's audience
+// either, so the question never reaches here for them. Asking only about the
+// ROW keeps the gate cheap and keeps its failure direction honest: the answer
+// it gives is exactly "does a token exist", which is exactly what "will a card
+// appear" depends on.
+//
+// #nosec G101 -- column/predicate SQL over the push-to-start registry, not a
+// credential literal.
+const queryHasPushToStartToken = `
+SELECT 1 FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
+
+// HasPushToStartToken reports whether this party holds a push-to-start
+// registration for this trip.
+//
+// Absence is the ordinary answer and never an error: most trips have some
+// participants on the web, and a phone with Live Activities disabled never
+// registers at all — which is the case the leg banner exists for.
+func (r *TripActivityTokenRepo) HasPushToStartToken(ctx context.Context, tripID, userID string) (bool, error) {
+	if tripID == "" || userID == "" {
+		return false, nil
+	}
+	var one int
+	err := r.pool.QueryRow(ctx, queryHasPushToStartToken, tripID, userID).Scan(&one)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return false, nil
+	default:
+		return false, fmt.Errorf("store.HasPushToStartToken(trip=%s): %w", tripID, err)
+	}
+}

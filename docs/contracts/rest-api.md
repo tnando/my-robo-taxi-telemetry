@@ -4394,21 +4394,108 @@ privacy. **The TRIP NAME is never interpolated into a title or a body** — it i
 free text a person typed, and it appears only in the Live Activity's
 content-state (§7.21.7).
 
-**`apns-collapse-id`** is built from `{tripId}:{topic}` for the three lifecycle
-events and `{tripId}|{legId}:{topic}` for the two leg ones. The leg narrowing is
-required: without it two consecutive legs of one trip present the same header,
-Apple merges their banners, and a participant who missed the first arrival finds
-only the second in Notification Center.
+#### 7.19.5.a A leg banner is for a phone with no card ([MYR-620](https://linear.app/myrobotaxi/issue/MYR-620))
 
-**A LEG'S SUBJECT IS TWO IDS AND THEREFORE EXCEEDS APPLE'S 64-BYTE CAP, so it is
-HASHED rather than truncated** — the header carries `h.` plus 128 bits of
-SHA-256 over the value above. Truncation was the pre-MYR-602 behaviour and was a
-guard that could not fire while every subject was a single cuid; with two it
-fires on every leg push and it removes **the discriminating tail**, so
-`trip_leg_started` and `trip_leg_arrived` on one leg collapsed into a single
-banner at Apple — the exact merge the leg id was added to prevent, reintroduced
-by the cap. A subject that FITS is still sent verbatim, so an ordinary
-`crr_…:ride.status.changed` stays readable in a packet capture.
+**THE FIELD REPORT, 2026-09-08.** A client screenshot: **ten** *"Tesla is on the
+move — Heading to Element by Marriott Sedona."* banners on one lock screen in 59
+minutes, five of them inside a single minute, plus an older one for a Subway.
+Thomas's reading was *"users reported app spamming notifications when heading to
+next destination, this should be moving into dynamic island"*, and both halves of
+that sentence are rules now.
+
+**EVERY ONE OF THOSE PUSHES WAS CORRECT BY THE OLD RULES.** `trip_leg_started`
+is claimed once per leg on `go_trip_legs.started_notified_at`, and it was: the
+**leg** flapped ([MYR-612](https://linear.app/myrobotaxi/issue/MYR-612) — a
+transient destination-name delta closed the leg and the next frame reopened it),
+so each banner belonged to a different row. A per-row claim can never bound a
+sentence that is about the **journey**.
+
+Three rules now stand between a leg edge and a lock screen, and they answer
+different questions:
+
+| Rule | Grain | What it asks |
+|------|-------|--------------|
+| The per-leg claim (MYR-602) | one leg | Has this leg's banner been **delivered** yet? |
+| **The Live Activity gate** (MYR-620) | one recipient | Is this person getting the **card** instead? |
+| **The suppression window** (MYR-620) | one (trip, event, destination) | Has this **sentence** already been said recently? |
+
+**THE LIVE ACTIVITY GATE.** For the two LEG events only, a recipient who holds a
+push-to-start registration for that trip (`go_trip_activity_tokens`, §7.30.8)
+receives **the Live Activity and no banner**. The card appearing IS the
+announcement — the leg-open fan-out deliberately attaches no alert to it — and a
+banner on top of it takes the strip of screen the island wants, so the very push
+that duplicates the card is also the thing standing in front of it. That is the
+§7.21.6 (MYR-413) argument exactly, made about a leg instead of a ride, and it
+consults the register that actually knows.
+
+- **A phone with notifications allowed and Live Activities OFF never registers a
+  token**, so it is not in the registry and it is told in prose. That is the
+  whole reason the banner still exists.
+- **The three LIFECYCLE pushes are untouched.** They are not about a leg, no
+  card announces them, and `trip_ended` is precisely when a card is going away.
+- **A registration APNs has rejected with a 410 is DELETED**, so its owner reads
+  as token-less and keeps every banner. A phone whose app is gone is never left
+  dark.
+- **The grain is (trip, user)**, because that is the registry's own primary key
+  — ActivityKit rotates the push-to-start token, so a row per device would mean
+  two cards for one journey on one lock screen. A person signed in on two
+  phones, one with Live Activities disabled, therefore loses the banner on the
+  second.
+- **IT FAILS OPEN** — no registry wired, a lookup error — for the same reason
+  and in the same direction as §7.19.3's preference gate: a duplicate is an
+  annoyance, a silence is somebody never told their car set off.
+
+**THE SUPPRESSION WINDOW.** A leg banner for the same `(tripId, event,
+normalised destinationName)` is not re-sent within **30 minutes**, however many
+legs open underneath. Held on the Go-owned `go_trip_leg_banners` (migration
+**0051**) as an upsert-as-claim, so two servers racing one flap resolve to
+exactly one send.
+
+- **The key is a DIGEST**, SHA-256 over the lower-cased, whitespace-collapsed
+  name. A destination is P1 (`data-classification.md` §1.18) and this table
+  holds none; equality is the only operation the predicate needs. Normalising
+  first is what stops the rule being defeated by a space — Tesla re-sends the
+  name on every re-route and neither the casing nor the inner whitespace is
+  stable across those.
+- **`event` is part of the key**, so a departure and an arrival suppress
+  independently. They are different sentences about one journey and the second
+  reports the outcome; suppressing an arrival because a departure went out ten
+  minutes ago would delete the half worth keeping.
+- **A different destination is never suppressed.** Half an hour is short enough
+  that a genuine second departure for the same place — arrive, wait, set off
+  again — is still announced, and long enough that no realistic flap gets
+  through.
+- **Only a WINNER advances the stamp.** Twenty refused attempts in a minute do
+  not push the next legitimate banner half an hour further out.
+- **A leg with no destination name is never suppressed**: its banner says
+  nothing that could be repeated, and one shared slot for every nameless leg
+  would collapse genuinely different journeys.
+- **IT FAILS OPEN** on a store error, for the same reason.
+
+**`apns-collapse-id`** is built from **`{tripId}:{topic}` on every event**,
+including the two leg ones.
+
+It used to narrow the leg events to `{tripId}|{legId}:{topic}` so two
+consecutive legs of one trip could not merge their banners. **MYR-620 reverses
+that deliberately**: the client's screenshot is ten *"Heading to Element by
+Marriott Sedona."* lines stacked in Notification Center, and the one worth
+keeping is the newest — collapsing on the trip is what makes a later banner
+**replace** the earlier rather than pile onto it, which is what Apple's header
+exists for and the second half of *"this should be moving into dynamic island"*.
+
+**THE DEPARTURE/ARRIVAL DISTINCTION SURVIVES**, because the topic is still
+appended: `trip_leg_started` and `trip_leg_arrived` carry different ids and
+never merge. That is the distinction MYR-431 found the old truncation
+destroying, and it is the one that matters — a participant who missed a
+departure must still find the arrival. What may safely merge is two
+**departures** of one trip, which is exactly the noise being removed.
+
+**AND THE VALUE IS SHORT AGAIN.** `{tripId}|{legId}:{topic}` was ~67 bytes
+before the topic, over Apple's 64-byte cap, so every leg push was hashed to `h.`
+plus 128 bits of SHA-256. `{tripId}:{topic}` fits and is sent verbatim, so a
+leg push is as readable in a packet capture as an ordinary
+`crr_…:ride.status.changed`. The hashing path remains for any subject that does
+exceed the cap — truncation removes a discriminating tail, a digest does not.
 
 ### 7.20 Saved places (MYR-321)
 

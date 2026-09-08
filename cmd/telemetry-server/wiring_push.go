@@ -62,6 +62,7 @@ func setupPushNotifier(
 	activityRepo *store.LiveActivityRepo,
 	vehicleNames *store.VehicleNameRepo,
 	rideRepo *store.RideRequestRepo,
+	tripTokenRepo *store.TripActivityTokenRepo,
 	logger *slog.Logger,
 ) (*push.Notifier, error) {
 	pushCfg := cfg.Push()
@@ -84,6 +85,15 @@ func setupPushNotifier(
 		activities = activityRepo
 	}
 
+	// The push-to-start registry, for the MYR-620 leg-banner gate, on the same
+	// terms: no adapter (the repo method's signature already IS the interface)
+	// and the same typed-nil care, because the gate's fail-open path keys off
+	// the INTERFACE being nil.
+	var tripActivities push.TripActivityPresenceStore
+	if tripTokenRepo != nil {
+		tripActivities = tripTokenRepo
+	}
+
 	notifier := push.NewNotifier(
 		sender,
 		&pushDeviceStoreAdapter{repo: pushRepo},
@@ -97,7 +107,10 @@ func setupPushNotifier(
 		// method's signature already IS push.RideMemberLister — with the same
 		// typed-nil care as the sender above, because the notifier's
 		// no-fan-out path keys off the INTERFACE being nil.
-		WithRideMembers(rideMemberLister(rideRepo))
+		WithRideMembers(rideMemberLister(rideRepo)).
+		// MYR-620: a leg banner stands down for a phone that is getting the
+		// leg's Live Activity instead.
+		WithTripActivityPresence(tripActivities)
 	if err := notifier.Subscribe(bus); err != nil {
 		return nil, fmt.Errorf("subscribe push notifier: %w", err)
 	}

@@ -430,6 +430,41 @@ an unrelated HTTP request timed out against the starved pool and answered `401`.
 pins the deadline, because both properties are invisible to every functional
 test — which is how they regressed.
 
+### Why one leg does not mean one banner
+
+MYR-620 is the client's screenshot: **ten** *"Tesla is on the move — Heading to
+Element by Marriott Sedona."* banners on one lock screen in 59 minutes, five of
+them inside a single minute. Every one was a correctly-claimed, once-per-leg
+`trip_leg_started` push. The **leg** flapped, and `started_notified_at` is a
+stamp on a **row** that each reopen replaced — so a per-leg claim can never bound
+a sentence that is about the **journey**.
+
+The debounce and the resume above make that flap far rarer. Two further rules
+make the banner bounded whatever the detector does, because that is the property
+the person holding the phone actually cares about:
+
+- **A leg banner is for a phone with NO card.** A recipient holding a
+  push-to-start registration for the trip gets the Live Activity and nothing
+  else: the card appearing IS the announcement, and a banner on top of it takes
+  the strip of screen the island wants. It is the MYR-413 ride gate's argument
+  made about a leg, and it lives beside it in `internal/push` because that is
+  where the registry is. A phone with Live Activities disabled never registers,
+  so it is still told in prose — which is the whole reason the banner survives.
+- **One banner per (trip, event, destination) per 30 minutes**, on
+  `go_trip_leg_banners` (migration 0051) as an upsert-as-claim, so two servers
+  racing one flap resolve to one send. The key holds a DIGEST of the normalised
+  name, never the P1 name itself. The event is part of the key: a departure and
+  an arrival are different sentences and the second reports the outcome.
+
+Both gates FAIL OPEN, in the same direction as every other gate in this service:
+a duplicate notification is an annoyance, a silence is somebody who was never
+told their car set off.
+
+And the `apns-collapse-id` narrows to the TRIP rather than the leg, so a banner
+that does get through REPLACES its predecessor in Notification Center instead of
+stacking. The topic still separates a departure from an arrival — merging those
+was MYR-431's bug, and merging two departures of one trip is the point.
+
 ### The four claims
 
 A leg has four independent deliveries, and each carries its own durable stamp on

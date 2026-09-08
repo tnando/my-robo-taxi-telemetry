@@ -21,6 +21,16 @@ import (
 // Run directly against the live schema rather than through golang-migrate's
 // version counter, for the reason 0048's twin gives: the suite shares one
 // container and one schema_migrations row.
+//
+// ⚠ THE LATER TRIP MIGRATIONS ARE ROLLED BACK FIRST, and rolled forward
+// afterwards, which is what golang-migrate would do and what the pre-MYR-620
+// version of this test only got away with by accident. 0049 and 0050 add an
+// index and a column INSIDE the four tables, so dropping the tables took them
+// with it and re-applying 0047 alone silently left the shared schema without
+// them. 0051 made that latent hole visible: it adds a SEPARATE table with a
+// foreign key onto go_trips, so `DROP TABLE go_trips` now fails outright
+// (SQLSTATE 2BP01) rather than quietly under-restoring. The fix for both is the
+// same — a rollback of 0047 is a rollback of everything built on top of it.
 func TestMigration0047_DownThenUp(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping migration integration test")
@@ -29,10 +39,13 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 	ctx := context.Background()
 
 	// The shared schema must come back whatever happens in between: every other
-	// test in this package reads the four trip tables.
+	// test in this package reads the four trip tables, the 0049 index, the 0050
+	// column and the 0051 slot table.
 	t.Cleanup(func() {
-		if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0047_trips.up.sql")); err != nil {
-			t.Fatalf("restoring the trip tables failed; the shared schema is now missing them: %v", err)
+		for _, file := range tripMigrationUps {
+			if _, err := testPool.Exec(ctx, readMigrationSQL(t, file)); err != nil {
+				t.Fatalf("restoring %s failed; the shared schema is now incomplete: %v", file, err)
+			}
 		}
 	})
 
@@ -58,9 +71,17 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 	mustExec0047(t, `INSERT INTO go_live_activities (id, trip_leg_id, user_id, activity_push_token)
 	                 VALUES ('cla0047down', 'cleg0047down', 'cuser0047down', 'tok-0047')`)
 
+	// 0051 first: its table holds a foreign key onto go_trips, so it is part of
+	// what "roll back the trips schema" means.
+	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0051_trip_leg_banner_slots.down.sql")); err != nil {
+		t.Fatalf("rolling back 0051 failed: %v", err)
+	}
 	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0047_trips.down.sql")); err != nil {
 		t.Fatalf("down migration failed with a leg-anchored Activity present — "+
 			"the rollback cannot cope with the data the up-file makes possible: %v", err)
+	}
+	if tableExists(t, "go_trip_leg_banners") {
+		t.Error("go_trip_leg_banners survived its own rollback")
 	}
 
 	for _, table := range []string{"go_trips", "go_trip_participants", "go_trip_activity_tokens", "go_trip_legs"} {
@@ -84,10 +105,15 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 		mustExec0047(t, `DELETE FROM go_live_activities WHERE id = 'cla0047none'`)
 	}
 
-	if _, err := testPool.Exec(ctx, readMigrationSQL(t, "0047_trips.up.sql")); err != nil {
-		t.Fatalf("re-applying up after down failed; the pair is not a round trip: %v", err)
+	for _, file := range tripMigrationUps {
+		if _, err := testPool.Exec(ctx, readMigrationSQL(t, file)); err != nil {
+			t.Fatalf("re-applying %s after down failed; the pair is not a round trip: %v", file, err)
+		}
 	}
-	for _, table := range []string{"go_trips", "go_trip_participants", "go_trip_activity_tokens", "go_trip_legs"} {
+	for _, table := range []string{
+		"go_trips", "go_trip_participants", "go_trip_activity_tokens", "go_trip_legs",
+		"go_trip_leg_banners",
+	} {
 		if !tableExists(t, table) {
 			t.Errorf("%s did not come back", table)
 		}
@@ -95,6 +121,40 @@ func TestMigration0047_DownThenUp(t *testing.T) {
 	if !liveActivitiesHaveLegAnchor(t) {
 		t.Error("go_live_activities did not regain its trip_leg_id column")
 	}
+	// The 0050 column lives INSIDE a table 0047 drops, so re-applying 0047
+	// alone would have left it behind — silently, until a push-to-start claim
+	// failed at run time. This is the assertion that the roll-forward is whole.
+	if !columnExists(t, "go_trip_activity_tokens", "started_leg_id") {
+		t.Error("go_trip_activity_tokens.started_leg_id did not come back; the 0050 " +
+			"roll-forward was skipped and every push-to-start claim would fail")
+	}
+}
+
+// tripMigrationUps is the trips schema in dependency order: 0047 builds the
+// four tables, 0049 indexes one of them, 0050 adds a column to another, and
+// 0051 hangs a fifth table off go_trips. Rolling 0047 back means rolling back
+// everything above it; rolling forward means replaying all of them.
+//
+// 0048 is absent deliberately — it touches go_push_prefs, not the trip tables,
+// and has its own down test.
+var tripMigrationUps = []string{
+	"0047_trips.up.sql",
+	"0049_trip_leg_resume.up.sql",
+	"0050_trip_activity_token_leg_stamp.up.sql",
+	"0051_trip_leg_banner_slots.up.sql",
+}
+
+// columnExists reports whether one column is currently installed.
+func columnExists(t *testing.T, table, column string) bool {
+	t.Helper()
+	var present bool
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT EXISTS (
+		    SELECT 1 FROM information_schema.columns
+		     WHERE table_name = $1 AND column_name = $2)`, table, column).Scan(&present); err != nil {
+		t.Fatalf("probe %s.%s: %v", table, column, err)
+	}
+	return present
 }
 
 // liveActivitiesHaveLegAnchor reports whether the second anchor column is

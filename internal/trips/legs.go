@@ -165,12 +165,19 @@ func (s *Service) windowStillOpen(ctx context.Context, tv TripVehicle) bool {
 	return false
 }
 
-// announceLegStarted fires `trip_leg_started` once per leg.
+// announceLegStarted fires `trip_leg_started` once per leg — and, since
+// MYR-620, at most once per (trip, destination) per LegBannerWindow.
 //
 // TO EVERYONE, owner included — unlike the three lifecycle pushes, which go to
 // participants only. The owner is on the leg card by explicit product decision,
 // and a card with no banner behind it would make the driving party the one
 // person in the feature who is never told anything.
+//
+// ⚠ THE PER-LEG CLAIM IS NOT ENOUGH ON ITS OWN, and the client's 2026-09-08
+// screenshot is the proof: ten of these banners in an hour, every one of them
+// correctly claimed, because the LEG flapped and each reopen was a new row. See
+// leg_banners.go. The recipients who hold a Live Activity for the trip are
+// filtered out further down, in internal/push, where the registry lives.
 func (s *Service) announceLegStarted(ctx context.Context, leg Leg, audience TripAudience) {
 	claimed, err := s.legs.ClaimLegStartedPush(ctx, leg.ID)
 	if err != nil {
@@ -179,6 +186,9 @@ func (s *Service) announceLegStarted(ctx context.Context, leg Leg, audience Trip
 		return
 	}
 	if !claimed {
+		return
+	}
+	if !s.legBannerAllowed(ctx, leg, push.TripEventLegStarted) {
 		return
 	}
 	s.notify(ctx, push.TripPush{
@@ -274,7 +284,13 @@ func (s *Service) endLegActivity(ctx context.Context, leg Leg, audience TripAudi
 	s.activities.EndLeg(ctx, s.legContext(ctx, leg, audience, status, &at))
 }
 
-// announceLegArrived fires `trip_leg_arrived`, ONLY on evidence.
+// announceLegArrived fires `trip_leg_arrived`, ONLY on evidence — and under
+// the same (trip, destination) window the departure banner is under (MYR-620).
+//
+// ITS OWN SLOT, keyed on the event, because a departure and an arrival are
+// different sentences about the same journey and the second reports the
+// outcome. Suppressing an arrival because a departure went out ten minutes ago
+// would delete the half of the story worth keeping.
 func (s *Service) announceLegArrived(ctx context.Context, leg Leg, audience TripAudience) {
 	claimed, err := s.legs.ClaimLegArrivedPush(ctx, leg.ID)
 	if err != nil {
@@ -283,6 +299,9 @@ func (s *Service) announceLegArrived(ctx context.Context, leg Leg, audience Trip
 		return
 	}
 	if !claimed {
+		return
+	}
+	if !s.legBannerAllowed(ctx, leg, push.TripEventLegArrived) {
 		return
 	}
 	s.notify(ctx, push.TripPush{

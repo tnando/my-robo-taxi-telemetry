@@ -178,6 +178,14 @@ func (a *tripLegStoreAdapter) ClaimLegActivityEnd(ctx context.Context, legID str
 	return wrapClaim(a.repo.ClaimLegActivityEnd(ctx, legID))
 }
 
+// ClaimLegBannerSlot arbitrates the (trip, event, destination) banner slot —
+// the MYR-620 gate that bounds a leg banner whatever the detector does.
+func (a *tripLegStoreAdapter) ClaimLegBannerSlot(
+	ctx context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+) (bool, error) {
+	return wrapClaim(a.repo.ClaimLegBannerSlot(ctx, tripID, event, destinationKey, now, window))
+}
+
 // wrapClaim adds the package prefix to a claim's error. The four claims differ
 // only in their statement, so their error wrapping is written once.
 func wrapClaim(claimed bool, err error) (bool, error) {

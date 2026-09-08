@@ -76,6 +76,13 @@ type LegStore interface {
 	ClaimLegArrivedPush(ctx context.Context, legID string) (bool, error)
 	ClaimLegActivityStart(ctx context.Context, legID string) (bool, error)
 	ClaimLegActivityEnd(ctx context.Context, legID string) (bool, error)
+	// ClaimLegBannerSlot reports whether a leg banner for this (trip, event,
+	// destination) may be sent, given that one sent inside `window` already
+	// said the same sentence (MYR-620). `destinationKey` is a DIGEST, never
+	// the P1 name.
+	ClaimLegBannerSlot(
+		ctx context.Context, tripID, event, destinationKey string, now time.Time, window time.Duration,
+	) (bool, error)
 }
 
 // Leg mirrors store.TripLeg, narrowed to what this package reads.

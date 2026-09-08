@@ -107,10 +107,18 @@ func TestNotifyTrip_PayloadShape(t *testing.T) {
 	}
 }
 
-// TestNotifyTrip_CollapseIsPerLeg is the reason TripPush carries a LegID it
-// never puts on the wire: two consecutive legs of one trip must not merge their
-// banners at Apple.
-func TestNotifyTrip_CollapseIsPerLeg(t *testing.T) {
+// TestNotifyTrip_CollapseIsPerTrip — MYR-620.
+//
+// It used to be per LEG, so two consecutive legs of one trip could not merge
+// their banners. The client's screenshot reversed that: ten "Heading to Element
+// by Marriott Sedona." lines stacked in Notification Center, and the one worth
+// keeping is the newest. Collapsing on the TRIP makes a later banner REPLACE
+// the earlier one instead of piling onto it.
+//
+// The departure/arrival distinction survives, because collapseID appends the
+// topic — that is the one MYR-431 found the old truncation destroying, and a
+// participant who missed a departure must still find the arrival.
+func TestNotifyTrip_CollapseIsPerTrip(t *testing.T) {
 	n, sender := newTripNotifier(t, DefaultPrefs())
 	base := TripPush{TripID: "trip-1", VehicleID: "veh-1", Event: TripEventLegStarted,
 		DestinationName: "Somewhere", UserIDs: []string{"user-a"}}
@@ -119,27 +127,43 @@ func TestNotifyTrip_CollapseIsPerLeg(t *testing.T) {
 	first.LegID = "leg-1"
 	second := base
 	second.LegID = "leg-2"
+	arrived := base
+	arrived.LegID = "leg-2"
+	arrived.Event = TripEventLegArrived
 	lifecycle := TripPush{TripID: "trip-1", VehicleID: "veh-1",
 		Event: TripEventEnded, UserIDs: []string{"user-a"}}
 
 	n.NotifyTrip(context.Background(), first)
 	n.NotifyTrip(context.Background(), second)
+	n.NotifyTrip(context.Background(), arrived)
 	n.NotifyTrip(context.Background(), lifecycle)
 
 	sent := sender.Sent()
-	if len(sent) != 3 {
-		t.Fatalf("sent %d notifications, want 3", len(sent))
+	if len(sent) != 4 {
+		t.Fatalf("sent %d notifications, want 4", len(sent))
 	}
-	if sent[0].CollapseSubject == sent[1].CollapseSubject {
-		t.Errorf("two legs share collapse subject %q — Apple would merge their banners",
-			sent[0].CollapseSubject)
+	for i, got := range sent {
+		if want := "trip-1"; got.CollapseSubject != want {
+			t.Errorf("send %d collapse subject = %q, want the bare trip %q",
+				i, got.CollapseSubject, want)
+		}
 	}
-	if want := "trip-1|leg-1"; sent[0].CollapseSubject != want {
-		t.Errorf("collapse subject = %q, want %q", sent[0].CollapseSubject, want)
+
+	// AND THE RENDERED HEADER still tells a departure from an arrival, because
+	// the topic is part of the id. This is the property that must not regress.
+	depart := collapseID(sent[0].CollapseSubject, sent[0].EventTopic)
+	arrive := collapseID(sent[2].CollapseSubject, sent[2].EventTopic)
+	if depart == "" || depart == arrive {
+		t.Errorf("departure and arrival collapse ids are %q and %q; a participant "+
+			"who missed the departure would find only the arrival", depart, arrive)
 	}
-	if want := "trip-1"; sent[2].CollapseSubject != want {
-		t.Errorf("lifecycle collapse subject = %q, want the bare trip %q",
-			sent[2].CollapseSubject, want)
+	if len(depart) > maxCollapseIDBytes {
+		t.Errorf("collapse id %q is %d bytes, over Apple's %d-byte cap",
+			depart, len(depart), maxCollapseIDBytes)
+	}
+	if strings.HasPrefix(depart, collapseDigestPrefix) {
+		t.Errorf("collapse id %q was hashed; a trip-scoped subject fits and should "+
+			"stay readable in a packet capture", depart)
 	}
 }
 
