@@ -152,13 +152,18 @@ func (f *fakeTripStore) ActiveTripVehicles(_ context.Context, _ int) ([]TripVehi
 type fakeLegStore struct {
 	mu sync.Mutex
 
-	byID       map[string]*Leg
-	openByVeh  map[string]string
-	nextID     int
-	claimed    map[string]bool
-	startErr   error
-	openErr    error
-	startCalls int
+	byID      map[string]*Leg
+	openByVeh map[string]string
+	nextID    int
+	claimed   map[string]bool
+	// arrived models go_trip_legs.arrived, which trips.Leg does not carry: the
+	// resume probe refuses a leg that ARRIVED, so the fake has to remember it.
+	arrived     map[string]bool
+	startErr    error
+	openErr     error
+	resumeErr   error
+	startCalls  int
+	resumeCalls int
 	// openCalls counts OpenLegForVehicle reads. MYR-612: one per frame before
 	// the LegReadTTL cache, roughly one per TTL after it.
 	openCalls int
@@ -169,6 +174,7 @@ func newFakeLegStore() *fakeLegStore {
 		byID:      map[string]*Leg{},
 		openByVeh: map[string]string{},
 		claimed:   map[string]bool{},
+		arrived:   map[string]bool{},
 	}
 }
 
@@ -195,7 +201,52 @@ func (f *fakeLegStore) StartLeg(_ context.Context, tripID, vehicleID, destinatio
 	return *leg, nil
 }
 
-func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time, _ bool) error {
+// ResumeRecentLeg models the store's merge: the leg this car closed most
+// recently WITHOUT ARRIVING, if it closed since notBefore and was going to the
+// same place, is re-opened rather than replaced.
+func (f *fakeLegStore) ResumeRecentLeg(
+	_ context.Context, vehicleID, destination string, notBefore time.Time,
+) (Leg, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resumeCalls++
+	if f.resumeErr != nil {
+		return Leg{}, false, f.resumeErr
+	}
+	if destination == "" {
+		return Leg{}, false, nil
+	}
+	if _, open := f.openByVeh[vehicleID]; open {
+		return Leg{}, false, nil
+	}
+	var best *Leg
+	for _, leg := range f.byID {
+		if leg.VehicleID != vehicleID || leg.EndedAt == nil || f.arrived[leg.ID] {
+			continue
+		}
+		if leg.EndedAt.Before(notBefore) || leg.DestinationName != destination {
+			continue
+		}
+		if best == nil || leg.EndedAt.After(*best.EndedAt) {
+			best = leg
+		}
+	}
+	if best == nil {
+		return Leg{}, false, nil
+	}
+	best.EndedAt = nil
+	if f.claimed["act_end:"+best.ID] {
+		// A card that was ENDED is gone from the lock screen, so the resumed
+		// leg may raise a new one: its push-to-start claim is released. A card
+		// still running keeps its claim and is not started twice.
+		delete(f.claimed, "act_start:"+best.ID)
+	}
+	delete(f.claimed, "act_end:"+best.ID)
+	f.openByVeh[vehicleID] = best.ID
+	return *best, true, nil
+}
+
+func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time, arrived bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	leg, ok := f.byID[legID]
@@ -204,6 +255,7 @@ func (f *fakeLegStore) EndLeg(_ context.Context, legID string, endedAt time.Time
 	}
 	end := endedAt
 	leg.EndedAt = &end
+	f.arrived[legID] = f.arrived[legID] || arrived
 	delete(f.openByVeh, leg.VehicleID)
 	return nil
 }

@@ -80,10 +80,28 @@ func (d *Detector) decide(
 		return
 	}
 
-	// 2. THE ROUTE WAS CLEARED. The driver cancelled navigation; the car may
-	//    still be moving. The leg is over as a leg — there is no longer a place
-	//    it is going — and it ended without evidence.
-	if state.destination == "" {
+	// 2. THE ROUTE WAS CLEARED — ONCE THE CLEAR IS CONFIRMED (MYR-612).
+	//
+	//    THIS BRANCH USED TO FIRE ON THE FIRST FRAME WITH AN EMPTY NAME, and
+	//    that is the bug the issue was raised for. Tesla streams deltas, and a
+	//    car four minutes into a leg to "Element by Marriott Sedona" sent a
+	//    frame whose destination name was present-but-empty while its
+	//    `minutesToArrival` still read 98 and the dash still showed the place.
+	//    The leg closed at 03:40:22 and re-opened at 03:40:24 — two legs for
+	//    one journey, two start banners, two push-to-start fan-outs, and any
+	//    card raised for the first ended as `completed` while the car drove on.
+	//
+	//    The clear is now PENDING until park, a sustained absence of both the
+	//    name and any arrival estimate, or arrival evidence (branch 1, above)
+	//    settles it. See vehicleState.clearConfirmed.
+	if state.clearPending() {
+		if !state.clearConfirmed(f, d.cfg) {
+			// Held open. The card is deliberately NOT refreshed while the
+			// route is in doubt: the honest content-state is the one already
+			// on the lock screen, and its stale-date keeps it honest.
+			return
+		}
+		state.confirmClear()
 		d.closeLegNow(ctx, tv, state, leg, false)
 		return
 	}

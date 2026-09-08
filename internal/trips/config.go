@@ -47,6 +47,27 @@ type Config struct {
 	StillnessMeters     float64
 	MaxStillnessGap     time.Duration
 
+	// LegClearGrace is how long a car may report an EMPTY destination name,
+	// while still driving and still reporting an arrival estimate, before the
+	// detector believes the route was actually cancelled (MYR-612).
+	//
+	// Zero is not a legitimate value here and withDefaults replaces it: a zero
+	// grace is the pre-MYR-612 behaviour, which closed a leg on one delta that
+	// happened to carry an empty name and re-opened it two seconds later.
+	LegClearGrace time.Duration
+
+	// LegMergeWindow is how soon after a leg closed WITHOUT ARRIVING the same
+	// car may resume it, rather than start a second one, when it sets off again
+	// for the same place.
+	//
+	// It is the second line of defence behind LegClearGrace, for the closes
+	// that debouncing cannot prevent — a process restart between the two
+	// frames, two servers during a rolling deploy, a grace that expired one
+	// frame before the name came back. What it buys is that the journey stays
+	// ONE leg: one `trip_leg_started` banner, one card, one row in the trip's
+	// history.
+	LegMergeWindow time.Duration
+
 	// LegReadTTL is how long the detector serves a car's open-leg answer from
 	// memory before re-reading it (MYR-612).
 	//
@@ -109,6 +130,19 @@ const (
 	defaultStillnessMeters     = 15.0
 	defaultMaxStillnessGap     = 90 * time.Second
 
+	// Sixty seconds, which is the number the incident argues for from both
+	// sides: long enough that a burst of name-less deltas on a car that is
+	// plainly still navigating cannot end a leg, and short enough that a driver
+	// who really did cancel the route sees the card go within a minute.
+	defaultLegClearGrace = 60 * time.Second
+
+	// Twice the grace. A leg that closed despite the debounce closed for a
+	// reason the debounce could not see, and two minutes is long enough to
+	// cover a restart or a rolling deploy while being far shorter than any real
+	// stop on a road trip — a car that parks, waits, and sets off again for the
+	// same place after two minutes has genuinely made two journeys.
+	defaultLegMergeWindow = 120 * time.Second
+
 	// Five seconds: a third of the candidate TTL, so a car entering or leaving
 	// a leg is noticed within the same order of latency the candidate snapshot
 	// already imposes, and far inside the dwell that decides an arrival.
@@ -136,6 +170,8 @@ func DefaultConfig() Config {
 		SweepLimit:          defaultSweepLimit,
 		CandidateTTL:        defaultCandidateTTL,
 		CandidateLimit:      defaultCandidateLimit,
+		LegClearGrace:       defaultLegClearGrace,
+		LegMergeWindow:      defaultLegMergeWindow,
 		LegReadTTL:          defaultLegReadTTL,
 		ArrivalRadiusMeters: defaultArrivalRadiusMeters,
 		Dwell:               defaultDwell,
@@ -167,6 +203,12 @@ func (c Config) withDefaults() Config {
 	}
 	if c.CandidateLimit <= 0 {
 		c.CandidateLimit = d.CandidateLimit
+	}
+	if c.LegClearGrace <= 0 {
+		c.LegClearGrace = d.LegClearGrace
+	}
+	if c.LegMergeWindow <= 0 {
+		c.LegMergeWindow = d.LegMergeWindow
 	}
 	if c.LegReadTTL <= 0 {
 		c.LegReadTTL = d.LegReadTTL

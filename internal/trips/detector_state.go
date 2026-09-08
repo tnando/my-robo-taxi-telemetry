@@ -26,6 +26,32 @@ type vehicleState struct {
 	destLat, destLng float64
 	hasDest          bool
 
+	// destClearedAt is when the car FIRST reported an empty destination name
+	// while a leg was under way — the start of a PENDING CLEAR, zero when there
+	// is none (MYR-612).
+	//
+	// ⚠ AN EMPTY NAME IS NOT A CLEARED ROUTE, and treating it as one is the bug
+	// this field exists to fix. Tesla streams deltas, and on 2026-09-08 a car
+	// four minutes into a leg to "Element by Marriott Sedona" sent a frame
+	// whose destination name was present-but-empty while `minutesToArrival`
+	// still read 98 and the dash still showed the place. The leg closed at
+	// 03:40:22 and re-opened at 03:40:24 for the same journey: two legs, two
+	// start banners, two push-to-start fan-outs, and leg A's card ended as
+	// `completed` on every lock screen that had one.
+	//
+	// While a clear is pending the last known destination, its coordinate and
+	// the arrival latch are all KEPT. Only a clear that is CONFIRMED — see
+	// clearConfirmed — actually clears them.
+	destClearedAt time.Time
+	// etaSeenAt is the last frame that carried an arrival estimate of any kind.
+	//
+	// It is the second half of the confirmation, and the half that makes the
+	// rule fair to a REAL cancellation: a car still reporting how long it has
+	// to go is a car that still has somewhere to be, whatever a delta left out
+	// of one frame. On a genuine route cancel Tesla stops sending BOTH the name
+	// and the estimate, so the two go stale together and the leg closes.
+	etaSeenAt time.Time
+
 	// driving is the last decided motion verdict. Sticky across frames that
 	// report neither speed nor gear, which is most of them.
 	driving bool
@@ -142,8 +168,30 @@ func (v *vehicleState) endLeg() { v.beginLeg("") }
 // Returns the two edges the detector acts on: whether the car is NOW driving
 // with a destination, and whether it just STOPPED being so.
 func (v *vehicleState) apply(f fix, cfg Config) {
-	if f.destName != nil {
+	if f.minutesToGo != nil || f.milesToGo != nil {
+		v.etaSeenAt = f.at
+	}
+	if f.destName != nil && *f.destName == "" && v.destination != "" {
+		// A PENDING CLEAR (MYR-612), not a new destination. Nothing about the
+		// remembered route is touched: the name, the coordinate, the arrival
+		// latch and the dwell all survive, because a delta that omitted the
+		// name is not evidence the car stopped going there. decide decides
+		// whether the clear is real; only confirmClear acts on it.
+		//
+		// ⚠ THE REST OF THIS METHOD STILL RUNS. The motion fold below is what
+		// tells the confirmation that the car PARKED, which is one of the three
+		// things allowed to settle a clear without waiting out the grace —
+		// returning early here would have made a car that stopped and cleared
+		// its route in the same frame wait a full minute for a verdict it had
+		// already given.
+		if v.destClearedAt.IsZero() {
+			v.destClearedAt = f.at
+		}
+	} else if f.destName != nil {
 		next := *f.destName
+		// A name is BACK: whatever pending clear was running is over, and the
+		// leg that would have been closed by it never was.
+		v.destClearedAt = time.Time{}
 		if next != v.destination {
 			// A NEW DESTINATION RESETS THE ARRIVAL STATE. The car is going
 			// somewhere else now, so the dwell it may have been accumulating at
@@ -173,9 +221,6 @@ func (v *vehicleState) apply(f fix, cfg Config) {
 			v.hasDest, v.destLat, v.destLng = false, 0, 0
 		}
 		v.destination = next
-		if next == "" {
-			v.hasDest = false
-		}
 	}
 	if f.hasDest {
 		v.destLat, v.destLng, v.hasDest = f.destLat, f.destLng, true
@@ -308,4 +353,46 @@ func (v *vehicleState) stillnessRun(f fix, prev *fix, cfg Config) (time.Time, bo
 	// Stillness proven across the interval, so the dwell may honestly count
 	// from the EARLIER fix.
 	return prev.at, true
+}
+
+// clearConfirmed reports whether a PENDING destination clear has become a real
+// one — the MYR-612 debounce, stated as the three things that are allowed to
+// end a leg on an absent destination.
+//
+//	PARK       the car stopped. Nothing needs debouncing: a parked car with no
+//	           route is not on its way anywhere, and the park-short branch would
+//	           reach the same verdict a frame later anyway.
+//	SUSTAINED  LegClearGrace has passed since the name went, AND no arrival
+//	           estimate has been reported in that time. Both, not either: a car
+//	           still saying how long it has to go still has somewhere to be, and
+//	           that is exactly the frame sequence the incident produced.
+//	(ARRIVAL)  handled before this is ever reached — it is the strongest claim
+//	           and the only one that fires `trip_leg_arrived`.
+func (v *vehicleState) clearConfirmed(f fix, cfg Config) bool {
+	if v.destClearedAt.IsZero() {
+		return false
+	}
+	if !v.driving {
+		return true
+	}
+	if f.at.Sub(v.destClearedAt) < cfg.LegClearGrace {
+		return false
+	}
+	// An estimate seen since the clear began, or recently enough to still speak
+	// for the route, holds the leg open.
+	return v.etaSeenAt.Before(v.destClearedAt) && f.at.Sub(v.etaSeenAt) >= cfg.LegClearGrace
+}
+
+// clearPending reports whether the car is inside the debounce window.
+func (v *vehicleState) clearPending() bool { return !v.destClearedAt.IsZero() }
+
+// confirmClear finally forgets the route. Called only when clearConfirmed said
+// so, immediately before the leg is closed.
+func (v *vehicleState) confirmClear() {
+	v.destination = ""
+	v.destClearedAt = time.Time{}
+	v.hasDest, v.destLat, v.destLng = false, 0, 0
+	v.stillSince = time.Time{}
+	v.arrivalLatched = false
+	v.lastCardETA, v.lastCardPush = nil, time.Time{}
 }

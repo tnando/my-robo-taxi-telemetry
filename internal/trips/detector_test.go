@@ -77,11 +77,20 @@ func newTestDetector(t *testing.T) (
 }
 
 // feed pushes a scripted sequence through the frame handler.
+//
+// THE SERVICE CLOCK FOLLOWS THE FRAMES. In production `now()` and a frame's
+// timestamp are the same instant to within the streaming lag, and several rules
+// — the leg-resume window most of all — compare a stamp taken from one against a
+// deadline computed from the other. A frozen clock made those comparisons
+// meaningless: a leg "ended" at second zero however far into the script it
+// actually closed.
 func feed(d *Detector, frames []frame) {
 	for _, fr := range frames {
+		now := at(fr.afterSeconds)
+		d.svc.now = func() time.Time { return now }
 		d.handleFrame(events.NewEvent(events.VehicleTelemetryEvent{
 			VIN:       testVIN,
-			CreatedAt: at(fr.afterSeconds),
+			CreatedAt: now,
 			Fields:    fr.fields,
 		}))
 	}
@@ -308,27 +317,36 @@ func TestLegDoesNotArriveOnAPassingStop(t *testing.T) {
 func TestLegCompletesWithoutEvidence(t *testing.T) {
 	tests := []struct {
 		name  string
-		final frame
+		final []frame
 	}{
 		{
-			name: "the driver cleared the route",
-			final: frame{600, map[string]events.TelemetryValue{
-				string(telemetry.FieldDestinationName): dest(""),
-			}},
+			// MYR-612: a cleared route now needs the clear to be CONFIRMED —
+			// SUSTAINED past LegClearGrace with no arrival estimate — because
+			// one delta carrying an empty name is not evidence the driver
+			// cancelled anything. The second frame is what confirms it.
+			name: "the driver cleared the route, and kept it cleared",
+			final: []frame{
+				{600, map[string]events.TelemetryValue{
+					string(telemetry.FieldDestinationName): dest(""),
+				}},
+				{700, map[string]events.TelemetryValue{
+					string(telemetry.FieldSpeed): speed(50),
+				}},
+			},
 		},
 		{
 			name: "the car parked somewhere else",
-			final: frame{600, map[string]events.TelemetryValue{
+			final: []frame{{600, map[string]events.TelemetryValue{
 				string(telemetry.FieldGear):     gear("P"),
 				string(telemetry.FieldLocation): loc(35.00, -111.00),
-			}},
+			}}},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			d, _, legs, pusher, activities := newTestDetector(t)
-			feed(d, []frame{
+			feed(d, append([]frame{
 				{0, map[string]events.TelemetryValue{
 					string(telemetry.FieldDestinationName): dest("Grand Canyon"),
 					string(telemetry.FieldDestLocation):    loc(36.0544, -112.1401),
@@ -336,8 +354,7 @@ func TestLegCompletesWithoutEvidence(t *testing.T) {
 					string(telemetry.FieldSpeed):           speed(55),
 					string(telemetry.FieldLocation):        loc(36.20, -112.30),
 				}},
-				tt.final,
-			})
+			}, tt.final...))
 
 			open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
 			if len(open) != 0 {
