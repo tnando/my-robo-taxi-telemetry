@@ -50,6 +50,13 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		// and in tests that do not wire a bus, which restores the old behavior
 		// rather than failing.
 		telemetry.WithShareAccessNotifier(deps.shareAccessNotifier),
+		// MYR-609: and the mirror for the widening direction. An extend adds
+		// a car to somebody who may be CONNECTED, and their frozen handshake
+		// access set will not contain it — so the owner is told the share
+		// worked while the grantee's map does not have the car until they
+		// happen to reconnect. Nil in dev mode and in tests that do not wire
+		// a bus, which restores that delay rather than failing.
+		telemetry.WithShareAccessWidener(deps.shareAccessWidener),
 	)
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/invites", inviteHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/invites", inviteHandler.ServeList)

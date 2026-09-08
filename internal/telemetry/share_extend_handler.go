@@ -47,16 +47,6 @@ type extendShareRequest struct {
 	ShareID string `json:"shareId"`
 }
 
-// ShareExtendInput is the validated extend request as it crosses into the
-// store dependency.
-type ShareExtendInput struct {
-	OwnerUserID string
-	// TargetVehicleID is the PATH vehicle — the car gaining the grant.
-	TargetVehicleID string
-	// SourceShareID is the accepted grant being extended.
-	SourceShareID string
-}
-
 // ServeExtend handles POST /api/vehicles/{vehicleId}/share/extend.
 //
 // 201 with the §7.5 ShareInvite row for the NEW grant, masked for the owner
@@ -69,6 +59,10 @@ type ShareExtendInput struct {
 //   - 409 conflict + subCode already_shared — that person already holds a live
 //     grant on this car. Also what extending a grant onto its OWN vehicle
 //     answers, because that IS the already-shared case.
+//   - 409 conflict, NO subCode — the source grant is paused, the grantee's
+//     grant on this car is paused, or the grantee LEFT this car. Three states
+//     the owner must resolve elsewhere, each with its own message; see
+//     writeExtendError for why none of them borrows already_shared.
 //   - 409 invalid_request — the MYR-599 driver-access car is still awaiting its
 //     owner-approval acknowledgment (the same gate ServeCreate carries).
 func (h *ShareInviteHandler) ServeExtend(w http.ResponseWriter, r *http.Request) {
@@ -107,13 +101,27 @@ func (h *ShareInviteHandler) ServeExtend(w http.ResponseWriter, r *http.Request)
 	// shared with until their entry lapses (5-minute TTL) — and the owner's app
 	// would be showing them as a pickable participant on a car their own client
 	// cannot yet resolve.
-	//
-	// There is deliberately NO socket signal to match it. ShareAccessNotifier
-	// exists to END a stream; gaining access opens nothing that needs closing,
-	// and the grantee's next handshake reads the widened set.
 	if h.access != nil && granteeID != "" {
 		h.access.InvalidateVehicles(granteeID)
 	}
+
+	// THEN WIDEN THE SOCKET THEY ALREADY HOLD, and the order is the same
+	// correctness argument the narrowing paths make: the widen provokes a
+	// reconnect, and a handshake served from a stale access set would come back
+	// WITHOUT the car — turning the fix into a no-op that looks like one that
+	// worked.
+	//
+	// An earlier cut asserted there was deliberately no socket signal here,
+	// reasoning that ShareAccessNotifier exists to END a stream and gaining
+	// access opens nothing that needs closing. The second half is true and the
+	// conclusion does not follow. `Client.vehicleIDs` is frozen at handshake,
+	// so a grantee who is CONNECTED when the owner extends does not get the car
+	// at all until they happen to reconnect — up to a whole session — while
+	// their own REST surface already shows it. The owner is told the share
+	// worked, the grantee's map does not have the car, and neither of them can
+	// see why. `next handshake reads the widened set` was the mechanism; what
+	// was missing was anything that causes a next handshake.
+	h.widenLiveAccess(granteeID, vehicleID, "extended")
 
 	// Ids only: the new grant, the source it was copied from, the car and both
 	// parties. Never the label (P1) and never the code — which on an accepted
@@ -165,12 +173,25 @@ func (h *ShareInviteHandler) decodeExtend(w http.ResponseWriter, r *http.Request
 
 // writeExtendError maps an extend failure onto a response.
 //
-// ErrShareVehicleNotOwned is 403 here and not 404, matching ServeCreate's own
-// mapping of it: the caller has already proved they own the PATH vehicle to
-// reach this code, so there is no existence left to protect. In practice the
-// store's target-ownership check cannot fire behind authOwner — it is the
-// second half of a belt-and-braces pair — but the status it would produce is
-// spelled out rather than falling into the 500 default.
+// FOUR DISTINCT 409s, and only ONE of them carries a sub-code. `already_shared`
+// means the call is a SUCCESS to render — the person has the car — which is
+// what makes an "Add all" affordance safe. The other three mean nothing
+// happened and name a different thing the owner must do first, on a different
+// screen; a client cannot act on those generically, so they are told in the
+// message and the sub-code stays absent rather than being stretched to cover
+// refusals it would misdescribe.
+//
+// ErrShareVehicleNotOwned is 403 here and not 404, and it emits
+// `vehicle_not_owned` rather than create's `permission_denied`. The code is the
+// vehicle-scoped specialization of the same 403 and it is the right one here:
+// the request names a vehicle in the PATH, and the caller has already proved
+// they own it to reach this code — there is no existence left to protect, so
+// the more specific code costs nothing and tells a client which resource it was
+// about. (An earlier comment claimed parity with create's mapping. There was
+// none; create emits `permission_denied` over a whole `vehicleIds` set.) In
+// practice the store's target-ownership check cannot fire behind authOwner — it
+// is the second half of a belt-and-braces pair — but the status it would
+// produce is spelled out rather than falling into the 500 default.
 func (h *ShareInviteHandler) writeExtendError(w http.ResponseWriter, vehicleID, shareID string, err error) {
 	switch {
 	case errors.Is(err, ErrShareAlreadyGranted):
@@ -180,6 +201,15 @@ func (h *ShareInviteHandler) writeExtendError(w http.ResponseWriter, vehicleID, 
 		wserrors.WriteErrorEnvelopeSub(w, h.logger, http.StatusConflict,
 			wserrors.ErrCodeConflict, wserrors.SubCodeAlreadyShared,
 			"that person already has access to this car")
+	case errors.Is(err, ErrShareSourceSuspended):
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
+			"that share is paused — restore it in Share first")
+	case errors.Is(err, ErrShareTargetSuspended):
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
+			"that person is paused on this car — restore them in Share")
+	case errors.Is(err, ErrShareGranteeLeft):
+		h.writeError(w, http.StatusConflict, wserrors.ErrCodeConflict,
+			"they left this car — send them a new invite")
 	case errors.Is(err, sdk.ErrNotFound):
 		// Missing, foreign, pending, revoked — one body for all four.
 		h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "share not found")
