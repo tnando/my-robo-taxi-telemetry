@@ -289,3 +289,147 @@ func TestTripPayload_DeletedIsABooleanAndOnlyPresentOnADeletion(t *testing.T) {
 		}
 	})
 }
+
+// ── MYR-618: the owner's `trip_participant_added` banner ────────────────────
+
+// TestNotifyTrip_ParticipantAddedCopy pins the sentence and, more importantly,
+// what is NOT in it.
+func TestNotifyTrip_ParticipantAddedCopy(t *testing.T) {
+	tests := []struct {
+		name       string
+		actorName  string
+		addedNames []string
+		wantTitle  string
+	}{
+		{
+			name:      "one person, both names known",
+			actorName: "Nabil", addedNames: []string{"Joey"},
+			wantTitle: "Nabil added Joey to your trip",
+		},
+		{
+			// COUNTED, NOT LISTED. A banner is one line on a lock screen and a
+			// comma-joined list is what pushes it past one; the roster is behind
+			// the deep link.
+			name:      "several people are counted",
+			actorName: "Nabil", addedNames: []string{"Joey", "Mom", "Amruth"},
+			wantTitle: "Nabil added 3 people to your trip",
+		},
+		{
+			// A name that would not resolve — an unconfirmed account, a grant
+			// with no label — must not render a gap in the sentence.
+			name:      "unresolved names fall back",
+			actorName: "", addedNames: []string{""},
+			wantTitle: "Someone added someone to your trip",
+		},
+		{
+			// ⚠ REVIEW FINDING 5. THE COUNT IS OVER THE PEOPLE ADDED, NOT OVER
+			// THE NAMES THAT RESOLVED. Three people gained live access to this
+			// owner's car; a banner reading "2 people" because one of them has
+			// not been through the naming prompt under-reports the one number
+			// this push exists to carry, and the gate that produces the empty
+			// name is common rather than exotic.
+			name:      "an unresolved name still counts",
+			actorName: "Nabil", addedNames: []string{"Joey", "", "Amruth"},
+			wantTitle: "Nabil added 3 people to your trip",
+		},
+		{
+			// And a SINGLE unresolved addition falls back rather than borrowing
+			// the count: "1 people" is not a sentence.
+			name:      "one unresolved addition is someone",
+			actorName: "Nabil", addedNames: []string{"  "},
+			wantTitle: "Nabil added someone to your trip",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, sender := newTripNotifier(t, DefaultPrefs())
+			n.NotifyTrip(context.Background(), TripPush{
+				TripID: "trip-1", VehicleID: "veh-1",
+				Event:      TripEventParticipantAdded,
+				UserIDs:    []string{"user-a"},
+				ActorName:  tt.actorName,
+				AddedNames: tt.addedNames,
+			})
+
+			sent := sender.Sent()
+			if len(sent) != 1 {
+				t.Fatalf("sent %d notifications, want 1", len(sent))
+			}
+			if sent[0].Title != tt.wantTitle {
+				t.Errorf("title = %q, want %q", sent[0].Title, tt.wantTitle)
+			}
+
+			// ⚠ THE NAMES REACH THE COPY AND NOT THE PAYLOAD. A P1 name sitting
+			// in a notification payload the OS may retain, for a client that has
+			// the roster one authenticated read away, is a cost with no benefit.
+			raw, err := json.Marshal(sent[0].UserInfo)
+			if err != nil {
+				t.Fatalf("marshal userInfo: %v", err)
+			}
+			for _, name := range append([]string{tt.actorName}, tt.addedNames...) {
+				if name == "" {
+					continue
+				}
+				if strings.Contains(string(raw), name) {
+					t.Errorf("userInfo carries the name %q: %s", name, raw)
+				}
+			}
+			if got, ok := sent[0].UserInfo["event"]; !ok || got != "trip_participant_added" {
+				t.Errorf("event = %v, want trip_participant_added", got)
+			}
+		})
+	}
+}
+
+// TestNotifyTrip_ParticipantAddedNeverNamesTheTrip is this file's standing line,
+// asserted for the one event whose client-facing ask included the trip name.
+//
+// A trip name is free text a person typed, routinely naming where they are
+// going, sealed at rest as P1 — and a banner renders to whoever is holding a
+// phone that is unlocked enough. The CAR is what the owner needs in order to
+// tell two trips apart, and the car's nickname is already permitted here.
+func TestNotifyTrip_ParticipantAddedNeverNamesTheTrip(t *testing.T) {
+	const tripName = "DFW → LA with Mom"
+
+	n, sender := newTripNotifier(t, DefaultPrefs())
+	// There is deliberately no field to put it in — this asserts the SHAPE:
+	// TripPush carries no trip name, so no send site can interpolate one.
+	n.NotifyTrip(context.Background(), TripPush{
+		TripID: "trip-1", VehicleID: "veh-1",
+		Event:     TripEventParticipantAdded,
+		UserIDs:   []string{"user-a"},
+		ActorName: "Nabil", AddedNames: []string{"Joey"},
+	})
+
+	sent := sender.Sent()
+	if len(sent) != 1 {
+		t.Fatalf("sent %d notifications, want 1", len(sent))
+	}
+	raw, err := json.Marshal(sent[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), tripName) {
+		t.Fatalf("the trip name reached the notification: %s", raw)
+	}
+}
+
+// TestNotifyTrip_ParticipantAddedObeysTheTripsSwitch. It is a SIXTH event on an
+// EXISTING category, not a new preference — so the one switch that silences the
+// other five silences this too.
+func TestNotifyTrip_ParticipantAddedObeysTheTripsSwitch(t *testing.T) {
+	prefs := DefaultPrefs()
+	prefs.Trips = false
+
+	n, sender := newTripNotifier(t, prefs)
+	n.NotifyTrip(context.Background(), TripPush{
+		TripID: "trip-1", VehicleID: "veh-1",
+		Event:     TripEventParticipantAdded,
+		UserIDs:   []string{"user-a"},
+		ActorName: "Nabil", AddedNames: []string{"Joey"},
+	})
+
+	if sent := sender.Sent(); len(sent) != 0 {
+		t.Fatalf("sent %d notifications with the trips switch off, want 0", len(sent))
+	}
+}

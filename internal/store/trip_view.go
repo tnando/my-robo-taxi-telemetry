@@ -85,6 +85,39 @@ type TripParticipantView struct {
 	// full name — first names only is the P1 policy for anything delivered to
 	// a counterparty.
 	Name string
+
+	// AddedByName is the confirmed FIRST name of whoever put this person on the
+	// trip (MYR-618), or nil.
+	//
+	// NIL HAS THREE CAUSES AND THEY ARE DELIBERATELY ONE VALUE: the row predates
+	// migration 0060 and records no adder; the adder has not been through the
+	// naming prompt (the MYR-583 confirmation gate); or the adder's account is
+	// gone. All three mean the same thing to the person reading the roster —
+	// there is no name to show — and distinguishing them on the wire would
+	// disclose more about a third party than the row is entitled to.
+	AddedByName *string
+}
+
+// TripAddablePersonView is one row of §7.30.11: somebody who already holds a
+// live grant on the trip's vehicle and is not yet on the trip.
+//
+// TWO FIELDS AND NO MORE, and the narrowness is the contract rather than an
+// economy. This read is admitted to PARTICIPANTS, not just the owner, and §7.5's
+// grant listing — invite codes, statuses, permissions, the owner's private memo
+// on why somebody has a key — stays owner-only for reasons MYR-618 did not
+// change. A picker needs a name to show and an id to post back; anything else
+// would be a share surface reached through a trip.
+type TripAddablePersonView struct {
+	// ShareID is the grant's id — the same value §7.30.4 calls
+	// `addParticipantIds` and the roster calls `participantId`, so a person
+	// picked here round-trips into the add with no translation.
+	ShareID string
+
+	// DisplayName is the accepting account's CONFIRMED first name, else the
+	// owner's own label for the grant. Same ladder, same fallback and same
+	// first-name-only policy as the roster, so a person cannot be called one
+	// thing in the picker and another thing on the trip they were just added to.
+	DisplayName string
 }
 
 // TripLegView is the open leg as the trip card renders it.

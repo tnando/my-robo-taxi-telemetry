@@ -277,6 +277,20 @@ var (
 	// not report which.
 	ErrTripParticipantNotShared = errors.New("store: participant holds no accepted share on this vehicle")
 
+	// ErrTripParticipantOwnerRemoved reports that a PARTICIPANT tried to add
+	// somebody the trip's OWNER had removed. 409 conflict /
+	// participant_owner_removed (MYR-618 review round, migration 0061).
+	//
+	// A `conflict` rather than a `permission_denied`, because the caller holds
+	// the verb — a participant may add people — and it is this particular
+	// person who may not be added, by a decision that already happened. It is
+	// also not `participant_not_shared`: that answer says "get a share first",
+	// which would be wrong advice here, since the person very likely still
+	// holds one and the owner is the only remedy.
+	//
+	// AN OWNER NEVER SEES IT. Their add is what clears the marker.
+	ErrTripParticipantOwnerRemoved = errors.New("store: the trip's owner removed this person")
+
 	// ErrTripLegOpen reports that the trip already has an open leg. The leg
 	// detector treats it as a no-op, not a failure — it is the idempotency
 	// guard doing its job on a redelivered drive-start.

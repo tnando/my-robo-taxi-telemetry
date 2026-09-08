@@ -23,6 +23,7 @@ import (
 //	POST   /api/trips/{tripId}/end
 //	DELETE /api/trips/{tripId}/participants/me
 //	GET    /api/trips/{tripId}/drives
+//	GET    /api/trips/{tripId}/addable-people
 //	POST   /api/trips/{tripId}/activity-start-token
 //	DELETE /api/trips/{tripId}/activity-start-token
 //	POST   /api/trip-legs/{legId}/activity-token
@@ -87,13 +88,14 @@ func setupTripEndpoints(
 	deps.srv.HandleFunc("POST /api/trips/{tripId}/end", handler.ServeEnd)
 	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/participants/me", handler.ServeLeave)
 	deps.srv.HandleFunc("GET /api/trips/{tripId}/drives", handler.ServeDrives)
+	deps.srv.HandleFunc("GET /api/trips/{tripId}/addable-people", handler.ServeAddablePeople)
 	deps.srv.HandleFunc("POST /api/trips/{tripId}/activity-start-token", handler.ServeRegisterActivityToken)
 	deps.srv.HandleFunc("DELETE /api/trips/{tripId}/activity-start-token", handler.ServeDeleteActivityToken)
 	deps.srv.HandleFunc("POST /api/trip-legs/{legId}/activity-token", handler.ServeRegisterLegActivityToken)
 	deps.srv.HandleFunc("DELETE /api/trip-legs/{legId}/activity-token", handler.ServeEndLegActivityToken)
 
 	logger.Info("trip endpoints enabled (§7.30)",
-		slog.Int("routes", 12),
+		slog.Int("routes", 13),
 		slog.Bool("feature_enabled", deps.cfg.TripsEnabled()))
 
 	// RETURNED, not discarded: the same repository is the drives handlers'
@@ -156,6 +158,33 @@ func (a *tripStoreAdapter) UpdateTrip(ctx context.Context, tripID, ownerUserID s
 		RemoveParticipantIDs: in.RemoveParticipantIDs,
 	})
 	return tripData(view), translateTripError(err)
+}
+
+// AddTripParticipants is MYR-618's widening path — the OWNER's add and a live
+// PARTICIPANT's, through one repository method that can do nothing else. It
+// reaches a DIFFERENT method from UpdateTrip above rather than the same one
+// with a flag, because UpdateTrip can also rename, re-window and REMOVE, and
+// those three stay owner-only.
+func (a *tripStoreAdapter) AddTripParticipants(
+	ctx context.Context, tripID, actorUserID string, shareIDs []string,
+) (telemetry.TripData, error) {
+	view, err := a.repo.AddParticipants(ctx, tripID, actorUserID, shareIDs)
+	return tripData(view), translateTripError(err)
+}
+
+// TripAddablePeople is §7.30.11.
+func (a *tripStoreAdapter) TripAddablePeople(
+	ctx context.Context, tripID, userID string,
+) ([]telemetry.TripAddablePersonData, error) {
+	people, err := a.repo.AddablePeople(ctx, tripID, userID)
+	if err != nil {
+		return nil, translateTripError(err)
+	}
+	out := make([]telemetry.TripAddablePersonData, 0, len(people))
+	for _, p := range people {
+		out = append(out, telemetry.TripAddablePersonData{ShareID: p.ShareID, Name: p.DisplayName})
+	}
+	return out, nil
 }
 
 func (a *tripStoreAdapter) EndTrip(ctx context.Context, tripID, ownerUserID string) (telemetry.TripData, error) {

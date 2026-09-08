@@ -40,6 +40,25 @@ const (
 	TripEventLegStarted TripEvent = "trip_leg_started"
 	// TripEventLegArrived — the car reached that place, with arrival evidence.
 	TripEventLegArrived TripEvent = "trip_leg_arrived"
+	// TripEventParticipantAdded — a PARTICIPANT added somebody to the owner's
+	// trip (MYR-618). Sent to the owner and to nobody else.
+	//
+	// A SIXTH EVENT RATHER THAN A FLAG ON `trip_added`, which is the opposite
+	// of the call MYR-607 made for `deleted` — and the difference is what an
+	// un-updated client does with it. `deleted` had to ride an existing event
+	// because a build that ignored it would leave a DELETED trip sitting on the
+	// list, a wrong state the person could not clear. This one carries no state
+	// at all: it is an announcement, its alert body is rendered on the server,
+	// and a build that has never heard of the value still shows the banner and
+	// still opens `myrobotaxi://trips/{tripId}` when it is tapped. The default
+	// arm does the right thing, so the value can be new.
+	//
+	// Riding `trip_added` instead would have been the actively harmful choice:
+	// that event means "YOU were added to a trip", the client acts on it by
+	// refreshing the recipient's own trip list and offering the new trip, and
+	// the owner — who has been on this trip since they made it — would be told
+	// they had just joined it.
+	TripEventParticipantAdded TripEvent = "trip_participant_added"
 )
 
 // TripPush is one trips notification: what happened, on which trip, and to
@@ -95,6 +114,22 @@ type TripPush struct {
 	// to a trip that is being deleted whole, and its card is ended by the
 	// settlement before this banner goes out.
 	Deleted bool
+
+	// ActorName and AddedNames carry `trip_participant_added` (MYR-618): who
+	// widened the roster, and who they let in. FIRST NAMES, from the trip's own
+	// roster — the confirmed name, else the owner's label for the grant — which
+	// is the same class of value copy.go already permits in an alert body for
+	// a ride requester.
+	//
+	// ⚠ THEY REACH THE COPY AND NOT THE PAYLOAD. The alert is rendered here and
+	// the names go into the sentence; `userInfo` carries ids only. A name in
+	// the payload would be a P1 value sitting in a notification the OS may
+	// retain, for a client that has the roster one authenticated read away.
+	//
+	// Both may be empty or short — a name that would not resolve is nil at the
+	// source — and the copy falls back rather than rendering a gap.
+	ActorName  string
+	AddedNames []string
 }
 
 // deepLink is the `myrobotaxi://trips/{tripId}` route the app opens when the
@@ -179,7 +214,7 @@ func (n *Notifier) NotifyTrip(ctx context.Context, p TripPush) {
 	if p.TripID == "" || len(p.UserIDs) == 0 {
 		return
 	}
-	a, ok := tripAlert(p.Event, n.vehicleName(ctx, p.VehicleID), p.DestinationName)
+	a, ok := tripAlert(p, n.vehicleName(ctx, p.VehicleID))
 	if !ok {
 		// An event with no copy. Unreachable through the five constants, and
 		// logged rather than silently dropped because the only way to get here

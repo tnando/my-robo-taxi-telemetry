@@ -75,7 +75,7 @@ func (r *TripRepo) Update(ctx context.Context, tripID, ownerUserID string, in Up
 		return TripView{}, fmt.Errorf("TripRepo.Update(%s): write: %w", tripID, err)
 	}
 
-	if err := applyRosterPatch(ctx, tx, tripID, current.VehicleID, in); err != nil {
+	if err := applyRosterPatch(ctx, tx, tripID, current.VehicleID, ownerUserID, in); err != nil {
 		if !errors.Is(err, ErrTripParticipantNotShared) {
 			r.metrics.IncQueryError(op)
 		}
@@ -124,18 +124,35 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // contract does not define that case, so the server picks the answer that
 // grants less.
 //
+// ⚠ AN ID IN BOTH LISTS IS SUBTRACTED FROM THE ADD SET BEFORE THE ADD RUNS,
+// not merely overwritten by the remove that follows (review finding 7). The
+// end STATE was already right — the remove lands second — but the add wrote a
+// `trip.participant_added` AuditLog row for a person the very same request took
+// off, and an audit row for an act that did not survive its own transaction is
+// exactly the record CG-DL-3 exists to keep from being written. It would also
+// have stamped the attribution column and put the person on the roster the
+// handler diffs for its push fan-out, so the owner could have been told
+// somebody joined a trip they were never on.
+//
+// The subtraction is what makes the documented rule ("ends up REMOVED") true of
+// everything the request touches rather than only of the roster.
+//
 // Split out of Update purely for the cognitive-complexity budget, but the seam
 // is a real one: this is the whole of "who is on the trip", and Update is the
 // whole of "what the trip is".
-func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID string, in UpdateTripInput) error {
-	added, err := resolveShareParticipants(ctx, tx, vehicleID, in.AddParticipantIDs)
-	if err != nil {
+//
+// THE ADD HALF IS THE SHARED ONE (MYR-618). It goes through the same
+// addAndAuditParticipants a participant's own add uses, so the attribution
+// column and the `trip.participant_added` audit row are written identically
+// whoever asked — an owner's add and a participant's add differ in who is
+// allowed to make the request, and in nothing that reaches the database. The
+// REMOVE half has no counterpart and never will: removal stays owner-only.
+func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID, ownerUserID string, in UpdateTripInput) error {
+	adds := subtractStrings(in.AddParticipantIDs, in.RemoveParticipantIDs)
+	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, true, adds); err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
 			return err
 		}
-		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
-	}
-	if err := addTripParticipants(ctx, tx, tripID, added); err != nil {
 		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
 	}
 	if err := removeParticipantsByShare(ctx, tx, tripID, in.RemoveParticipantIDs); err != nil {
@@ -187,18 +204,47 @@ func (r *TripRepo) resolvePatch(current TripView, in UpdateTripInput, now time.T
 	return sealed, endsAt, nil
 }
 
+// subtractStrings returns the members of `from` that are not in `remove`,
+// preserving order and skipping the empty string.
+//
+// Written here rather than as a general helper because its ONE caller is the
+// contradictory-request rule above, and its semantics are that rule: the
+// removal wins. A general set-difference in a utility file would be reached for
+// by something that meant the opposite.
+func subtractStrings(from, remove []string) []string {
+	if len(remove) == 0 {
+		return from
+	}
+	drop := make(map[string]bool, len(remove))
+	for _, id := range remove {
+		if id != "" {
+			drop[id] = true
+		}
+	}
+	out := make([]string, 0, len(from))
+	for _, id := range from {
+		if !drop[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // removeParticipantsByShare marks the named memberships left. Keyed on the
 // SHARE id, which is what the wire calls `participantId`.
+//
+// OWNER-ONLY, AND THE STATEMENT SAYS SO: queryRemoveTripParticipant stamps
+// `removed_by_owner` (migration 0061), which is what stops any other
+// participant reviving the row with a re-add. This function has exactly one
+// caller — applyRosterPatch, reached only through loadOwnedTripForPatch — and
+// AddParticipants contains no path to it.
 //
 // Silently tolerant of an id that names nobody on this trip: removing a person
 // who is not there is the state the caller asked for, and erroring would make
 // PATCH fail on a double-tap.
 func removeParticipantsByShare(ctx context.Context, q tripQuerier, tripID string, shareIDs []string) error {
 	for _, shareID := range dedupeStrings(shareIDs) {
-		if _, err := q.Exec(ctx, `
-UPDATE go_trip_participants
-SET left_at = NOW()
-WHERE trip_id = $1 AND share_id = $2 AND left_at IS NULL`, tripID, shareID); err != nil {
+		if _, err := q.Exec(ctx, queryRemoveTripParticipant, tripID, shareID); err != nil {
 			return fmt.Errorf("remove participant: %w", err)
 		}
 	}

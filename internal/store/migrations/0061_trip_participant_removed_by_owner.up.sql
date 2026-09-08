@@ -1,0 +1,53 @@
+-- 0061_trip_participant_removed_by_owner.up.sql
+--
+-- MYR-618 review round: AN OWNER'S REMOVE MUST STICK.
+--
+-- ── THE HOLE THIS CLOSES ────────────────────────────────────────────────────
+--
+-- Migration 0060 gave a live PARTICIPANT the ability to widen a roster. The
+-- upsert behind it REVIVES a membership somebody had left (`left_at = NULL`),
+-- which is the correct behaviour for a departure and the wrong one for a
+-- REMOVAL: an owner who took somebody off their trip could have that undone,
+-- immediately and repeatedly, by any other participant re-sending the same
+-- share id. The owner's own verb — the one thing MYR-618 was careful to keep
+-- owner-only — would have been the one verb a participant could reverse.
+--
+-- The roster row cannot distinguish the two today, because both write the same
+-- `left_at` tombstone through statements that differ only in who was allowed
+-- to ask. This column is the distinction, recorded on the row that carries the
+-- consequence.
+--
+-- ── FALSE BY DEFAULT, AND THAT IS THE HONEST VALUE ──────────────────────────
+--
+-- `NOT NULL DEFAULT FALSE` rather than a nullable tri-state. Every pre-existing
+-- departed row is one of two things — a self-leave, or an owner's remove — and
+-- nothing recorded which. FALSE is not a claim that they all left voluntarily;
+-- it is this column's spelling of "no removal was observed on this row", which
+-- is exactly true of every row written before it existed. It also keeps the
+-- behaviour of those rows IDENTICAL to what it is today, so the migration
+-- changes no existing answer.
+--
+-- Postgres 11+ adds a NOT NULL column with a non-volatile default without
+-- rewriting the heap, so this is additive in the same strict sense 0060 was.
+--
+-- ── WHO WRITES IT ───────────────────────────────────────────────────────────
+--
+-- TRUE:  the owner's §7.30.4 `removeParticipantIds` — and ONLY that path.
+-- FALSE: every revival, because an owner re-adding somebody is the act that
+--        undoes the removal, and it is the only act that may.
+-- UNTOUCHED: the participant's own §7.30.6 leave (they were not removed), and
+--        the revoked-share cascade (that statement serves both an owner's
+--        revoke and a grantee's own leave through one UPDATE and cannot tell
+--        them apart — and a revoked grant-holder is refused by the add's live
+--        grant predicate anyway, so nothing turns on it).
+--
+-- ── CLASSIFICATION ──────────────────────────────────────────────────────────
+--
+-- P0. A boolean about a membership, beside three opaque cuids on the same row.
+-- It names nobody and is never emitted on the wire: its only observable effect
+-- is that §7.30.11 stops offering the person to a participant's picker and
+-- §7.30.4 answers `409 conflict / participant_owner_removed` if one is sent
+-- anyway.
+
+ALTER TABLE go_trip_participants
+    ADD COLUMN IF NOT EXISTS removed_by_owner BOOLEAN NOT NULL DEFAULT FALSE;

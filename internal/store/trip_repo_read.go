@@ -210,10 +210,18 @@ func (r *TripRepo) loadRoster(ctx context.Context, v *TripView) error {
 			p              TripParticipantView
 			label          string
 			acceptedByName *string
+			addedByName    *string
 		)
-		if err := rows.Scan(&p.ParticipantID, &p.UserID, &label, &acceptedByName); err != nil {
+		if err := rows.Scan(&p.ParticipantID, &p.UserID, &label, &acceptedByName, &addedByName); err != nil {
 			return fmt.Errorf("load trip roster: scan: %w", err)
 		}
+		// MYR-618's attribution, reduced by the SAME helper as every other name
+		// on the platform so "Added by" and "ownerFirstName" cannot shorten one
+		// person's name two different ways. Nil stays nil — there is no
+		// fallback here, because there is nothing to fall back TO: a label
+		// belongs to a grant, and the adder may not hold one (the owner does
+		// not).
+		p.AddedByName = ownerFirstNameToken(addedByName)
 		// THE ROSTER RULE (MYR-581): the accepting account's CONFIRMED first
 		// name wins; the owner's own label for the grant is the fallback. The
 		// fallback matters — an owner who invited "Mom" before she had been

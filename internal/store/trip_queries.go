@@ -20,6 +20,15 @@ package store
 // trip_repo_read.go, trip_repo_write.go, trip_repo_end.go, trip_repo_catalog.go
 // and trip_repo_drives.go are each well inside the cap.
 //
+// ⚠ ONE STATEMENT GROUP LIVES IN A SIBLING FILE: trip_participant_queries.go
+// holds everything that reads or writes go_trip_participants — the roster
+// upsert, the two departures, the revoked-share cascade, the two MYR-618
+// capability statements and tripMemberRoleExpr. It is NOT a split by operation
+// (the thing invariant 2 warns about): it is one relation's whole statement
+// set, moved together, and the three invariants below hold across BOTH files as
+// one. Read them as one file that happens to be stored in two. That file's own
+// header carries the pointer back.
+//
 // THREE INVARIANTS HOLD ACROSS THE FILE.
 //
 //  1. OWNER-SCOPED MUTATIONS CARRY `owner_user_id = $n` IN THE STATEMENT. The
@@ -42,6 +51,14 @@ package store
 //     vehicle_share_access_queries.go. Statements that serve only DISPLAY (the
 //     roster) join the share by id instead, because a name should not vanish
 //     from a historical roster the moment a grant is revoked.
+//
+//     ⚠ THE ROLE EXPRESSION COMES IN TWO SPELLINGS FOR EXACTLY THAT REASON
+//     (MYR-618). `tripRoleExpr` answers "is this person on the roster" and
+//     feeds the DISPLAY reads; `tripMemberRoleExpr` answers "may this person
+//     ACT as a member" and carries the conjunction, and it feeds the two
+//     capability routes alone (§7.30.4's add and §7.30.11's picker) through
+//     queryTripRoleForUser. Each expression's own comment argues why
+//     substituting the other would be wrong, and in which direction.
 
 // tripColumns is the full go_trips projection. Ordered as the struct is, so
 // scanTrip reads straight down.
@@ -86,60 +103,6 @@ SELECT EXISTS (
 	  AND $2 < COALESCE(ended_at, ends_at)
 )`
 
-// queryAcceptedShareParticipants resolves the requested share ids to the people
-// behind them, KEEPING ONLY the ones that are a live accepted grant on THIS
-// vehicle.
-//
-// The filtering happens here rather than in Go, and the caller compares COUNTS
-// rather than inspecting which id fell out, because the create endpoint must
-// answer one thing for "no such share", "a share on a different car", "a share
-// that was never accepted" and "a suspended share". A loop that reported the
-// first failing id would be an oracle for other people's share ids.
-const queryAcceptedShareParticipants = `
-SELECT id, accepted_by_user_id
-FROM go_vehicle_shares
-WHERE vehicle_id = $1
-  AND id = ANY($2::text[])
-  AND status = 'accepted' AND suspended_at IS NULL
-  AND accepted_by_user_id IS NOT NULL AND accepted_by_user_id <> ''`
-
-// queryUpsertTripParticipant adds a person, or REVIVES a membership they had
-// left. `left_at = NULL` in the DO UPDATE is the revival; `added_at` is
-// deliberately NOT refreshed, because it answers "when did this person first
-// join this trip" and a re-add should not erase that.
-const queryUpsertTripParticipant = `
-INSERT INTO go_trip_participants (trip_id, user_id, share_id)
-VALUES ($1, $2, $3)
-ON CONFLICT (trip_id, user_id) DO UPDATE
-SET left_at = NULL, share_id = EXCLUDED.share_id`
-
-// queryLeaveTrip is BOTH the participant's own "leave" and the owner's
-// "remove", because they write the same row the same way and the difference is
-// only who was allowed to ask. Idempotent by the `left_at IS NULL` guard: a
-// second call updates zero rows and the handler still answers 204.
-const queryLeaveTrip = `
-UPDATE go_trip_participants
-SET left_at = NOW()
-WHERE trip_id = $1 AND user_id = $2 AND left_at IS NULL`
-
-// queryLeaveTripByShare is the REVOKED-SHARE CASCADE (see TripRepo.
-// RemoveParticipantsForShare). Keyed on (vehicle, user) rather than on the
-// share id, so a grant that was revoked and re-issued under a new id still
-// removes the person from the trips they joined under the old one.
-//
-// Scoped to trips that have not ENDED: rewriting the roster of a finished trip
-// would rewrite history for no benefit — the window is closed, the access is
-// already gone, and the roster is the only record of who was on it.
-const queryLeaveTripByShare = `
-UPDATE go_trip_participants p
-SET left_at = NOW()
-FROM go_trips t
-WHERE t.id = p.trip_id
-  AND t.vehicle_id = $1
-  AND p.user_id = $2
-  AND p.left_at IS NULL
-  AND NOW() < COALESCE(t.ended_at, t.ends_at)`
-
 // tripRoleExpr resolves the caller's relationship to a trip in the SAME
 // statement that reads it, so there is no read-then-authorize window and no
 // second round trip.
@@ -152,6 +115,11 @@ WHERE t.id = p.trip_id
 //
 // A participant who LEFT resolves NULL. Leaving is meant to end the
 // relationship, not to leave a read-only souvenir.
+//
+// ⚠ IT DOES NOT RE-JOIN THE LIVE GRANT, and that is correct HERE and wrong for
+// the two MYR-618 capability routes — see tripMemberRoleExpr, which is this
+// expression plus invariant 3's conjunction, and which is what
+// queryTripRoleForUser uses.
 const tripRoleExpr = `
 	CASE
 		WHEN t.owner_user_id = $1 THEN 'owner'
@@ -251,8 +219,39 @@ WHERE id = $1 AND owner_user_id = $2 AND ended_at IS NULL`
 // share row yields a NULL name and the Go side falls back — first to the
 // owner's label, which is also NULL here, and then to the empty string the
 // contract permits.
+//
+// `added_by_name` (MYR-618) is the CONFIRMED first name of whoever put this
+// person on the trip, resolved through the ladder in trip_added_by_name.go and
+// NULL for every row written before migration 0060. It is projected here rather
+// than joined in a second read for the same reason the label is: the roster is
+// read on every trip card, and an attribution that needed a second query would
+// be the first thing a future optimisation dropped.
+//
+// ── ⚠ EIGHT CORRELATED SUBSELECTS PER ROW, AND THAT IS KNOWN ────────────────
+//
+// `acceptedByNameExpr` and `addedByNameExpr` are each a confirmation EXISTS
+// plus a three-rung COALESCE of scalar subselects — four apiece — so a roster
+// of N people issues 8N correlated lookups against `"User"`,
+// `go_identity_apple`, `go_users` and `go_profile_name_confirmations`. Every
+// one of them is a primary-key or unique-index probe, and a roster is a handful
+// of people, so a single trip read is cheap in practice.
+//
+// **THE COST THAT IS REAL IS ON `GET /api/trips` (§7.30.2), and it is
+// PRE-EXISTING rather than something MYR-618 introduced.** That list decorates
+// every trip it returns, so a page of T trips runs the roster read T times and
+// the subselect count is 8 × (total participants). MYR-618 doubled the per-row
+// constant by adding the second ladder; it did not change the shape.
+//
+// **DELIBERATELY NOT FIXED HERE.** The fix is a batched name resolution —
+// collect every user id across every roster in the response and resolve them in
+// ONE pass — which is a change to the read path's structure, touching the
+// catalog's owner name and the ride surfaces by the same argument. Doing it
+// inside a roster-widening change would mean rewriting the statement that
+// decides what a name says in a PR whose subject is who may add people.
+// Recorded so the next person to profile §7.30.2 finds the reasoning rather
+// than rediscovering it.
 const queryTripRoster = `
-SELECT p.share_id, p.user_id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `
+SELECT p.share_id, p.user_id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `, ` + addedByNameExpr + `
 FROM go_trip_participants p
 LEFT JOIN go_vehicle_shares s ON s.id = p.share_id
 WHERE p.trip_id = $1 AND p.left_at IS NULL

@@ -17,13 +17,13 @@ import (
 // (`vehicle_not_owned`), an absence (`not_found`) and a disabled feature
 // (`service_unavailable`) — five things the vocabulary already says.
 //
-// WHAT IS NEW IS THREE SUB-CODES, which is the mechanism that exists exactly
+// WHAT IS NEW IS FOUR SUB-CODES, which is the mechanism that exists exactly
 // for this: telling a client WHICH conflict, when the primary code alone does
 // not say what to do next. `subCode` is an open string on
 // ws-messages.schema.json — the enum is documented in prose, not declared — so
 // emitting a new value is schema-VALID today and needs no client rebuild.
 //
-// ⚠ CONTRACT NOTE: contracts v0.41.0 does NOT yet list these three in that
+// ⚠ CONTRACT NOTE: contracts v0.41.0 does NOT yet list these four in that
 // prose enum. The values are chosen to match the spec's own wording
 // (`trip_overlaps`, `participant_not_shared`) so the upstream addition is a
 // documentation change rather than a rename. Recorded as a divergence in
@@ -61,6 +61,20 @@ const (
 	// `endsAt` past NOW() on a lapsed trip would resurrect live access every
 	// participant was already told had ended.
 	SubCodeTripEnded wserrors.SubCode = "trip_ended"
+
+	// SubCodeParticipantOwnerRemoved qualifies `conflict` when a PARTICIPANT
+	// tries to add somebody the trip's OWNER removed (MYR-618 review round).
+	//
+	// It earns a sub-code for the reason `trip_ended` does: a bare `conflict`
+	// on an add the client believes is legal is indistinguishable from a
+	// server bug, and the client would retry — forever, because nothing the
+	// caller can do will change the answer. With this it can say the true
+	// thing, which is that the owner has to be the one to add this person.
+	//
+	// DELIBERATELY UNSPECIFIC ABOUT WHICH PERSON, exactly as
+	// `participant_not_shared` is: which of several people an owner removed is
+	// a fact about the owner's own decisions.
+	SubCodeParticipantOwnerRemoved wserrors.SubCode = "participant_owner_removed"
 )
 
 // tripStoreErrors is the consumer-site view of the store's sentinels. Declared
@@ -91,6 +105,11 @@ var (
 
 	// ErrTripEnded → 409 conflict / trip_ended.
 	ErrTripEnded = errors.New("trip has already ended")
+
+	// ErrTripParticipantOwnerRemoved → 409 conflict /
+	// participant_owner_removed. A PARTICIPANT tried to add somebody the
+	// trip's OWNER had removed (MYR-618 review round).
+	ErrTripParticipantOwnerRemoved = errors.New("the trip's owner removed this person")
 )
 
 // writeTripError maps a store-layer error onto the wire.
@@ -117,6 +136,13 @@ func (h *TripHandler) writeTripError(w http.ResponseWriter, err error) bool {
 	case errors.Is(err, ErrTripEnded):
 		h.writeErrorSub(w, http.StatusConflict, wserrors.ErrCodeConflict, SubCodeTripEnded,
 			"this trip has ended and can no longer be changed")
+	case errors.Is(err, ErrTripParticipantOwnerRemoved):
+		// BEFORE the not-shared arm, because the two are reachable for the
+		// same request and this one is the more specific answer: a person the
+		// owner removed usually still HOLDS the share, so "get a share first"
+		// would be advice that leads nowhere.
+		h.writeErrorSub(w, http.StatusConflict, wserrors.ErrCodeConflict, SubCodeParticipantOwnerRemoved,
+			"the trip's owner removed them from this trip — only the owner can add them back")
 	case errors.Is(err, ErrTripParticipantNotShared):
 		h.writeErrorSub(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, SubCodeParticipantNotShared,
 			"every participant must be someone this vehicle is already shared with")

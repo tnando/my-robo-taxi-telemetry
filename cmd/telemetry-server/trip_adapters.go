@@ -44,6 +44,8 @@ func translateTripError(err error) error {
 		return fmt.Errorf("%w: %w", telemetry.ErrTripNameInvalid, err)
 	case errors.Is(err, store.ErrTripEnded):
 		return fmt.Errorf("%w: %w", telemetry.ErrTripEnded, err)
+	case errors.Is(err, store.ErrTripParticipantOwnerRemoved):
+		return fmt.Errorf("%w: %w", telemetry.ErrTripParticipantOwnerRemoved, err)
 	case errors.Is(err, store.ErrLiveActivityClosed):
 		// The LEG anchor's refusal (§7.21.7): the leg ended, or it is not this
 		// trip's. Translated here for the same reason the six above are — the
@@ -68,6 +70,7 @@ func tripData(v store.TripView) telemetry.TripData {
 			ParticipantID: p.ParticipantID,
 			Name:          p.Name,
 			UserID:        p.UserID,
+			AddedByName:   p.AddedByName,
 		})
 	}
 

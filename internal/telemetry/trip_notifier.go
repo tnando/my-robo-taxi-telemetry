@@ -82,10 +82,33 @@ type TripNotifier interface {
 	// would be worse than a flag an old build ignores.
 	TripDeleted(ctx context.Context, trip TripData, userIDs []string)
 
+	// TripParticipantAdded tells the trip's OWNER that somebody else widened
+	// their roster (MYR-618).
+	//
+	// THE ONLY EVENT ON THIS SURFACE WHOSE AUDIENCE IS THE OWNER ALONE, and the
+	// asymmetry is the reason it exists: every other trips push announces
+	// something the owner did, so sending it to them would be telling a person
+	// about their own tap. This one announces something done TO their car's
+	// audience by somebody else, which is the one thing on the platform that
+	// changes who can watch an owner's vehicle without the owner acting.
+	//
+	// THE NAMES ARE PASSED RATHER THAN LOOKED UP, and they are the ROSTER's
+	// names — the confirmed first name, else the owner's own label for the
+	// grant. The handler has just read them back; resolving them again in the
+	// live half would be a second ladder that could disagree with the trip
+	// sheet the owner opens from the banner. `actorName` may be empty and
+	// `addedNames` may be short if a name failed to resolve; the copy layer
+	// falls back rather than rendering an empty sentence.
+	//
+	// The recipient is resolved by the implementation, which reads the trip's
+	// audience for itself — this package holds no owner id (the wire never
+	// carries one) and must not start.
+	TripParticipantAdded(ctx context.Context, trip TripData, actorName string, addedNames []string)
+
 	// ActivityTokenRegistered raises the current leg's Live Activity on the
 	// phone that has just registered a push-to-start token (MYR-612).
 	//
-	// IT TAKES IDS RATHER THAN A TripData, alone among the five, because it is
+	// IT TAKES IDS RATHER THAN A TripData, alone among the six, because it is
 	// not an announcement about a trip — it is a repair addressed to ONE
 	// device, and the live side reads everything else it needs for itself.
 	//
@@ -106,11 +129,12 @@ type TripNotifier interface {
 // event added later cannot forget the check.
 type noopTripNotifier struct{}
 
-func (noopTripNotifier) TripAdded(context.Context, TripData, []string)           {}
-func (noopTripNotifier) TripStarted(context.Context, TripData, []string)         {}
-func (noopTripNotifier) TripEnded(context.Context, TripData, []string)           {}
-func (noopTripNotifier) TripDeleted(context.Context, TripData, []string)         {}
-func (noopTripNotifier) ActivityTokenRegistered(context.Context, string, string) {}
+func (noopTripNotifier) TripAdded(context.Context, TripData, []string)                    {}
+func (noopTripNotifier) TripStarted(context.Context, TripData, []string)                  {}
+func (noopTripNotifier) TripEnded(context.Context, TripData, []string)                    {}
+func (noopTripNotifier) TripDeleted(context.Context, TripData, []string)                  {}
+func (noopTripNotifier) TripParticipantAdded(context.Context, TripData, string, []string) {}
+func (noopTripNotifier) ActivityTokenRegistered(context.Context, string, string)          {}
 
 // participantUserIDs is the fan-out list for a trip: every live participant.
 //

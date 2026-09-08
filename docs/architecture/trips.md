@@ -122,9 +122,15 @@ Both elevated probes **fail closed by returning false rather than an error**: th
 
 When a grant is revoked or handed back, `TripRepo.RemoveParticipantsForShare` stamps `left_at` on that person's memberships in that car's **non-ended** trips.
 
+**⚠ IT IS NOW ACTUALLY WIRED, which until the [MYR-618](https://linear.app/myrobotaxi/issue/MYR-618) review round it was not.** The function had existed since MYR-602 with exactly one caller in the repository — a test — so in production a severed grant left the person on every roster on that car indefinitely. Both severing paths now run it **in the same transaction as the tombstone flip**: the owner's revoke (`VehicleShareRepo.RevokeInvite`, [`rest-api.md`](../contracts/rest-api.md) §7.5.3) and the grantee's own leave (`LeaveVehicleShares`, §7.5.7). A repair that lands separately from the thing it repairs can land late, or not at all, and then the roster is wrong for a window nobody can bound.
+
+**SUSPENSION DELIBERATELY DOES NOT CASCADE.** A suspend is reversible — the owner is pausing somebody, not removing them — and stamping `left_at` would turn a pause into a departure that un-suspending could not undo. What stops a suspended grant-holder **acting** is the live-grant re-join in the role probe (`tripMemberRoleExpr`, §10B); what stops them **seeing** is the four access legs in §3. Neither needs the roster to move.
+
 **⚠ THIS IS NOT WHAT ENFORCES THE ACCESS RULE, and mistaking it for that would be the dangerous reading.** Trip access cannot outlive the share because **every access query re-joins the live grant** — the fourth UNION leg, `queryActiveTripParticipation`, `queryTripWindowsForUserVehicle` and the catalog leg all carry `status = 'accepted' AND suspended_at IS NULL`. **A revoked grant stops granting the instant it is revoked, cascade or no cascade, and if this function never ran the security property would still hold.**
 
 **What it fixes is the ROSTER.** Without it the owner's trip card keeps listing somebody who can no longer see anything, the participant count lies, and the person appears in the "who is on this trip" list of a car they have been removed from. It is a **display-consistency repair**, and it is written down as one — here, in the function's own doc comment, and in `data-classification.md` §1.26 — **so nobody later deletes an access predicate on the strength of it.**
+
+It stamps `left_at` and **not** `removed_by_owner` (§10B): the one statement serves both severing paths and cannot tell an owner's revoke from a grantee's own exit. Nothing turns on that, because a person whose grant is gone is refused by the add's live-grant predicate long before the marker would be read.
 
 It is keyed on `(vehicle, user)` rather than on the share id, so a grant revoked and re-issued under a new id still removes the person from trips they joined under the old one. It is scoped to trips that have **not ended**: rewriting a finished trip's roster would rewrite history for no benefit — the window is closed, the access is already gone, and the roster is the only record of who was on it.
 
@@ -595,6 +601,114 @@ deletes (CG-DL-3): `targetType='trip'`, the owner's id, and `{vehicleId}` as the
 whole of its metadata. **It is the only record the participants have.**
 Normatively specified in [`data-lifecycle.md`](../contracts/data-lifecycle.md)
 §3.6 and §4.2.
+
+## 10B. A participant may bring somebody along (MYR-618)
+
+**The roster has a second writer.** A LIVE PARTICIPANT of a scheduled or active
+trip may add anybody who already holds an accepted, unsuspended grant on the
+trip's vehicle — `PATCH /api/trips/{tripId}` with `addParticipantIds` and
+NOTHING else ([`rest-api.md`](../contracts/rest-api.md) §7.30.4). Removing,
+renaming, moving the window, ending and deleting all stay with the owner.
+
+**WHY THAT IS SAFE, AND IT IS ONE SENTENCE: A TRIP MINTS NOTHING.** Its
+participants are drawn from the car's already-accepted grants and from nowhere
+else, so the widest thing a participant can do is move somebody the OWNER
+already trusted with the car from *"sees it whenever the owner shares it"* to
+*"sees it during this window"*. They cannot create a grant, cannot invite a
+stranger, and the window they widen is one the owner opened.
+
+**THE SEPARATION IS THE ENFORCEMENT, not a flag.** `TripRepo.Update` refuses
+everybody but the owner in its first statement and every statement after it is
+owner-scoped; threading a *"sometimes the caller is a participant"* boolean
+through it would put the widest gate on this surface behind a branch.
+`TripRepo.AddParticipants` is a separate entry point that **can only ever widen a
+roster, because widening a roster is the only statement it contains** — a
+handler bug that reached it with the wrong caller cannot become a removal. The
+owner's own add goes through the same shared body, so an owner's add and a
+participant's add differ in **who may ask** and in nothing that reaches the
+database.
+
+| | Owner | Live participant | Stranger |
+|---|---|---|---|
+| `addParticipantIds` | ✅ | ✅ | `404` |
+| `removeParticipantIds` / `name` / `endsAt` | ✅ | `403 permission_denied`, **whole request refused** | `404` |
+| `GET .../addable-people` | ✅ | ✅ | `404` |
+
+**`403` IS THE ONE PLACE THIS SURFACE ANSWERS ANYTHING BUT `404`, and it is not
+a crack in the rule.** The 404-not-403 rule exists so a trip id cannot be
+probed; this caller has already been resolved as a member, so there is nothing
+left to conceal and a `404` would only be a lie about a resource they are
+demonstrably on. **The role is resolved BEFORE the body is interpreted** — a
+participant sending a malformed `endsAt` is told they may not move the window,
+not that their date is malformed.
+
+**THE ATTRIBUTION IS A COLUMN AND A ROW, and they are not substitutes.**
+`go_trip_participants.added_by_user_id` (migration **0060**, nullable, **not
+backfilled**) records the resulting STATE and is what the trip sheet reads to
+say *"Added by Amruth"*; the `trip.participant_added` AuditLog row records the
+ACT and is what an operator reads years later. A roster row is read on every
+trip card and must answer without joining a table that is pruned on a retention
+schedule. **A pre-0060 row stays NULL**: every one of them was written by the
+owner, so a backfill would be correct and would also record, indistinguishably
+from a real observation, an act nobody observed.
+
+**⚠ THE UPSERT PRESERVES AN EXISTING ATTRIBUTION and overwrites it only on a
+genuine revival, and that asymmetry is a security property rather than a
+nicety.** Re-adding somebody already aboard is a no-op `200`; without the
+preserve arm, any participant could claim credit for the owner's own additions
+simply by adding the same person a second time.
+
+**⚠ AN OWNER'S REMOVE STICKS, AND THAT NEEDED A SECOND COLUMN (migration
+0061).** The upsert behind an add REVIVES a departed membership — right for
+somebody who left, wrong for somebody the owner took off — so without a marker,
+removal would have been the one owner-only verb any participant could reverse,
+immediately and as often as they liked, by re-sending the same share id.
+`go_trip_participants.removed_by_owner` is written by the owner's
+`removeParticipantIds` **and by nothing else**: not by a self-leave (walking
+away is not being removed, and any member may invite that person back), and not
+by the revoked-share cascade (one statement serves both an owner's revoke and a
+grantee's own leave and cannot tell them apart — and a person whose grant is
+gone is refused by the live-grant predicate long before the marker is read).
+**Only the owner clears it, by adding the person back**, which is why an owner
+never sees the refusal, and why the owner's picker still lists somebody a
+participant's picker withholds: hiding the row from the owner would strand their
+own removal forever. A participant who sends the id anyway gets **`409 conflict /
+participant_owner_removed`, all-or-nothing** and deliberately unspecific about
+which person.
+
+**⚠ THE TWO CAPABILITY ROUTES RE-JOIN THE LIVE GRANT IN THEIR ROLE PROBE, and
+the display reads deliberately do not.** `tripMemberRoleExpr` is `tripRoleExpr`
+plus §3's `status = 'accepted' AND suspended_at IS NULL` conjunction, and
+`queryTripRoleForUser` — the probe in front of the add and the picker — is its
+only user. A membership row is **not** rewritten when the grant behind it is
+suspended or revoked: the cascade below (§6) is a display repair by its own
+documentation and nothing runs it on a suspend at all. Without the conjunction a
+grant-holder the owner had already cut off would keep resolving `participant`,
+their map dark, still able to widen the owner's roster and enumerate the car's
+grant-holders by name. **Narrowing the DISPLAY reads the same way would be the
+opposite error** — a suspended participant's trip card would vanish mid-window,
+which is the "silently dropped mid-drive" failure §11 forbids. The two
+expressions answer two questions: *is this person on the roster* and *may this
+person act as a member*.
+
+**THE PICKER IS ITS OWN ROUTE.** `GET /api/trips/{tripId}/addable-people`
+(§7.30.11) returns `{shareId, displayName}` for the vehicle's live grant-holders
+not yet aboard — because §7.5's grant listing is owner-only and must stay that
+way: it carries invite CODES, email addresses, pending invitations, per-grant
+permissions, statuses and user ids, none of which appear here. **The
+`displayName` fallback IS the owner's label for the grant** — the same ladder
+and the same fallback the roster uses, so a person cannot be called one thing in
+the picker and another on the trip they were added to one tap later. The owner
+reads the same route, so the two pickers offer the same people **except for the
+ones the owner removed** (above). It also refuses on an ENDED trip (`409
+trip_ended`), because §7.30.4's add refuses one.
+
+**ONE PUSH IS NEW AND IT GOES TO THE OWNER ALONE**: `trip_participant_added`, a
+sixth event on the existing `trips` category with **no new preference**. It is
+the only push here whose audience is the owner, and it exists because a
+participant's add is the one thing on the platform that changes who may watch an
+owner's car without the owner acting. **The owner's own add sends it to
+nobody.** The people added hear the ordinary `trip_added` either way.
 
 ## 11. Kill switch
 

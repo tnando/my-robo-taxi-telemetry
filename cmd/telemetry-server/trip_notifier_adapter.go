@@ -87,10 +87,28 @@ func (a *tripNotifierAdapter) TripDeleted(ctx context.Context, trip telemetry.Tr
 	}
 }
 
+// TripParticipantAdded announces to the OWNER that a participant added somebody
+// to their trip (MYR-618).
+//
+// THE ONLY METHOD HERE THAT PASSES ANYTHING BUT AN ID THROUGH. Its five
+// siblings hand over ids only and let the live half read what it needs, because what
+// they announce is a state the database holds. This one announces WHO did
+// something, and the names it interpolates are the roster's — already resolved,
+// by the read the handler did to build its response. Re-resolving them one
+// layer down would be a second name ladder that could disagree with the trip
+// sheet the banner deep-links to.
+func (a *tripNotifierAdapter) TripParticipantAdded(
+	ctx context.Context, trip telemetry.TripData, actorName string, addedNames []string,
+) {
+	if err := a.svc.NotifyTripParticipantAdded(ctx, trip.ID, actorName, addedNames); err != nil {
+		a.log(ctx, "trip_participant_added", trip.ID, err)
+	}
+}
+
 // ActivityTokenRegistered raises the open leg's card on the phone that just
 // registered (MYR-612).
 //
-// THE ONE METHOD ON THIS SEAM THAT IS NOT AN ANNOUNCEMENT. The other four turn
+// THE ONE METHOD ON THIS SEAM THAT IS NOT AN ANNOUNCEMENT. Its five siblings turn
 // a request into a push about a trip; this one repairs a card that the leg-open
 // fan-out could not have raised, because the registration it needed had not
 // happened yet. The live side returns nothing for the same reason those four

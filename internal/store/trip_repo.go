@@ -152,7 +152,11 @@ func (r *TripRepo) Create(ctx context.Context, in CreateTripInput) (TripView, er
 		return TripView{}, fmt.Errorf("TripRepo.Create(vehicle=%s): insert: %w", in.VehicleID, err)
 	}
 
-	if err := addTripParticipants(ctx, tx, tripID, participants); err != nil {
+	// The owner is the actor for every participant a CREATE admits, and no
+	// audit row is written for them: the act being recorded is the creation of
+	// the trip, and its initial roster is part of that act rather than a
+	// separate widening of it (see AuditActionTripParticipantAdded).
+	if err := addTripParticipants(ctx, tx, tripID, in.OwnerUserID, participants); err != nil {
 		r.metrics.IncQueryError(op)
 		return TripView{}, fmt.Errorf("TripRepo.Create(vehicle=%s): %w", in.VehicleID, err)
 	}
@@ -235,10 +239,18 @@ func resolveShareParticipants(ctx context.Context, q tripQuerier, vehicleID stri
 	return out, nil
 }
 
-// addTripParticipants writes (or revives) one membership per resolved person.
-func addTripParticipants(ctx context.Context, q tripQuerier, tripID string, participants []TripParticipantView) error {
+// addTripParticipants writes (or revives) one membership per resolved person,
+// attributed to `actorUserID` (MYR-618).
+//
+// THE ACTOR IS RECORDED, NOT ASSUMED. Before MYR-618 the only writer was the
+// trip's owner and the column would have been redundant; now the same statement
+// serves an owner's patch and a participant's add, and the roster is what the
+// owner's trip sheet reads to say "Added by Amruth". The statement preserves an
+// existing attribution when the row is already live — see its own comment for
+// why a re-add must not be able to rewrite one.
+func addTripParticipants(ctx context.Context, q tripQuerier, tripID, actorUserID string, participants []TripParticipantView) error {
 	for _, p := range participants {
-		if _, err := q.Exec(ctx, queryUpsertTripParticipant, tripID, p.UserID, p.ParticipantID); err != nil {
+		if _, err := q.Exec(ctx, queryUpsertTripParticipant, tripID, p.UserID, p.ParticipantID, actorUserID); err != nil {
 			return fmt.Errorf("add participant: %w", err)
 		}
 	}

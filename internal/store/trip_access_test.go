@@ -29,7 +29,6 @@ func TestTripAccessCannotOutliveTheShare(t *testing.T) {
 	ctx := context.Background()
 	vehicleID, shareID := seedTripFixture(t)
 	repo := newTripRepo(t)
-	shareRepo := newShareRepo(t)
 	now := time.Now().UTC()
 
 	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareID})
@@ -52,15 +51,27 @@ func TestTripAccessCannotOutliveTheShare(t *testing.T) {
 	})
 
 	t.Run("revoking the share ends it, with no cascade required", func(t *testing.T) {
-		if _, err := shareRepo.RevokeInvite(ctx, shareID, shareOwnerA); err != nil {
-			t.Fatalf("RevokeInvite: %v", err)
+		// THE TOMBSTONE FLIP ALONE, not VehicleShareRepo.RevokeInvite — which
+		// since the MYR-618 review round runs the roster cascade in the same
+		// transaction and would let this pass for the wrong reason. What is
+		// under test is that the ACCESS is gone with the membership row still
+		// live, which is the property that lets the cascade be described
+		// honestly as a roster repair rather than as the enforcement.
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_vehicle_shares SET status = 'revoked', revoked_at = NOW() WHERE id = $1`,
+			shareID); err != nil {
+			t.Fatalf("revoke share: %v", err)
+		}
+		var leftAt *time.Time
+		if err := testPool.QueryRow(ctx, `
+SELECT left_at FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+			trip.ID, shareViewer1).Scan(&leftAt); err != nil {
+			t.Fatalf("read membership: %v", err)
+		}
+		if leftAt != nil {
+			t.Fatalf("left_at = %v — the raw flip must not have moved the roster", leftAt)
 		}
 
-		// NOTE WHAT IS *NOT* CALLED HERE: RemoveParticipantsForShare. The
-		// go_trip_participants row is still present and still has left_at NULL
-		// — and the access is gone anyway, because every access query re-joins
-		// the live grant. That is the property this test exists to pin, and it
-		// is why the cascade can be described honestly as a roster repair.
 		ids, err := repo.ActiveTripVehicleIDs(ctx, shareViewer1)
 		if err != nil {
 			t.Fatalf("ActiveTripVehicleIDs: %v", err)
@@ -492,6 +503,98 @@ func TestTripStatusFilterAgreesWithStatusAt(t *testing.T) {
 			if views[i].CreatedAt.After(views[i-1].CreatedAt) {
 				t.Fatalf("row %d is newer than row %d — the list must be newest-first", i, i-1)
 			}
+		}
+	})
+}
+
+// TestShareSeveringCascadesToTripRosters is the MYR-618 REVIEW FIX for the
+// cascade that nothing called.
+//
+// `TripRepo.RemoveParticipantsForShare` has existed since MYR-602 and had
+// exactly ONE caller in the whole repository — a test. In production a revoked
+// or handed-back grant left the person on every roster on that car
+// indefinitely: the owner's trip card kept listing somebody who could see
+// nothing, and the participant count lied. Both severing paths now run it in
+// the same transaction as the tombstone flip.
+func TestShareSeveringCascadesToTripRosters(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+
+	liveRoster := func(t *testing.T, tripID string) int {
+		t.Helper()
+		var n int
+		if err := testPool.QueryRow(ctx, `
+SELECT COUNT(*) FROM go_trip_participants WHERE trip_id = $1 AND left_at IS NULL`,
+			tripID).Scan(&n); err != nil {
+			t.Fatalf("count roster: %v", err)
+		}
+		return n
+	}
+
+	t.Run("the OWNER's revoke (§7.5.3)", func(t *testing.T) {
+		vehicleID, shareID := seedTripFixture(t)
+		repo := newTripRepo(t)
+		shareRepo := newShareRepo(t)
+		now := time.Now().UTC()
+		trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareID})
+		if got := liveRoster(t, trip.ID); got != 1 {
+			t.Fatalf("roster = %d before the revoke, want 1", got)
+		}
+
+		if _, err := shareRepo.RevokeInvite(ctx, shareID, shareOwnerA); err != nil {
+			t.Fatalf("RevokeInvite: %v", err)
+		}
+		if got := liveRoster(t, trip.ID); got != 0 {
+			t.Fatalf("roster = %d after the revoke, want 0 — the cascade did not run", got)
+		}
+	})
+
+	t.Run("the GRANTEE's leave (§7.5.7)", func(t *testing.T) {
+		vehicleID, shareID := seedTripFixture(t)
+		repo := newTripRepo(t)
+		shareRepo := newShareRepo(t)
+		now := time.Now().UTC()
+		trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareID})
+
+		result, err := shareRepo.LeaveVehicleShares(ctx, vehicleID, shareViewer1)
+		if err != nil {
+			t.Fatalf("LeaveVehicleShares: %v", err)
+		}
+		if result != store.ShareLeaveDone {
+			t.Fatalf("result = %v, want ShareLeaveDone", result)
+		}
+		if got := liveRoster(t, trip.ID); got != 0 {
+			t.Fatalf("roster = %d after the leave, want 0 — the cascade did not run", got)
+		}
+	})
+
+	t.Run("a SUSPEND deliberately does NOT cascade", func(t *testing.T) {
+		// A suspend is REVERSIBLE — the owner is pausing somebody, not removing
+		// them — and stamping left_at would turn a pause into a departure that
+		// un-suspending could not undo. What stops a suspended grant-holder
+		// ACTING is tripMemberRoleExpr; what stops them SEEING is the four
+		// access legs. Neither needs the roster to move.
+		vehicleID, shareID := seedTripFixture(t)
+		repo := newTripRepo(t)
+		now := time.Now().UTC()
+		trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareID})
+
+		if _, err := testPool.Exec(ctx,
+			`UPDATE go_vehicle_shares SET suspended_at = NOW() WHERE id = $1`, shareID); err != nil {
+			t.Fatalf("suspend: %v", err)
+		}
+		if got := liveRoster(t, trip.ID); got != 1 {
+			t.Fatalf("roster = %d after a suspend, want 1 — a pause is not a departure", got)
+		}
+		// And the access is gone anyway.
+		ids, err := repo.ActiveTripVehicleIDs(ctx, shareViewer1)
+		if err != nil {
+			t.Fatalf("ActiveTripVehicleIDs: %v", err)
+		}
+		if len(ids) != 0 {
+			t.Fatalf("a suspended share still admits the vehicle: %v", ids)
 		}
 	})
 }

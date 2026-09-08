@@ -87,6 +87,31 @@ type TripParticipantData struct {
 	// publishing it would hand every participant a durable identifier for
 	// everybody else on the trip.
 	UserID string
+
+	// AddedByName is the confirmed FIRST name of whoever put this person on the
+	// trip (MYR-618), or nil. Nil covers a row written before the column
+	// existed, an adder who has not been through the naming prompt, and an
+	// adder whose account is gone — one value for three causes, deliberately,
+	// because they mean the same thing to the person reading the roster.
+	AddedByName *string
+}
+
+// TripAddablePersonData is one row of §7.30.11 — somebody who already holds a
+// live grant on the trip's vehicle and is not yet on the trip.
+//
+// TWO FIELDS, and the narrowness is the contract. This read is admitted to
+// PARTICIPANTS, not only the owner, so it must not become §7.5's grant listing
+// reached through a trip: no invite codes, no email addresses, no statuses, no
+// permissions.
+type TripAddablePersonData struct {
+	// ShareID is the grant's id — the same value the roster calls
+	// `participantId` and PATCH calls `addParticipantIds`, so a picked person
+	// round-trips into the add with no translation.
+	ShareID string
+
+	// Name is the accepting account's confirmed FIRST name, else the owner's
+	// own label for the grant. Same ladder and same fallback as the roster.
+	Name string
 }
 
 // TripLegData is the open leg as the card renders it.
@@ -158,6 +183,31 @@ type TripStore interface {
 
 	// UpdateTrip applies a patch. Owner-only; ErrTripNotFound to anybody else.
 	UpdateTrip(ctx context.Context, tripID, ownerUserID string, in TripUpdateInput) (TripData, error)
+
+	// AddTripParticipants widens the roster on behalf of the OWNER OR A LIVE
+	// PARTICIPANT (MYR-618, §7.30.4).
+	//
+	// A SEPARATE METHOD FROM UpdateTrip, and the separation is the whole
+	// safety argument rather than a naming preference: UpdateTrip can rename a
+	// trip, move its window and REMOVE people, and all three stay owner-only.
+	// This one can only add, because adding is the only thing its
+	// implementation contains — so a handler bug that reached it with a
+	// participant's id cannot become a removal.
+	//
+	// The share ids must resolve to accepted, unsuspended grants on the trip's
+	// vehicle (ErrTripParticipantNotShared otherwise, all-or-nothing), the trip
+	// must not have ended (ErrTripEnded), and a caller who is neither owner nor
+	// live participant receives ErrTripNotFound like everybody else.
+	//
+	// Adding somebody already on the trip is a NO-OP: it writes nothing,
+	// audits nothing and announces nothing, and the call still succeeds.
+	AddTripParticipants(ctx context.Context, tripID, actorUserID string, shareIDs []string) (TripData, error)
+
+	// TripAddablePeople is §7.30.11: the trip vehicle's accepted, unsuspended
+	// grant-holders who are not already on the trip, for a caller who owns it
+	// or is on it. ErrTripNotFound for everybody else — the same answer an
+	// unknown trip id gets.
+	TripAddablePeople(ctx context.Context, tripID, userID string) ([]TripAddablePersonData, error)
 
 	// EndTrip stamps the early end. IDEMPOTENT: a second call returns the
 	// already-ended trip rather than moving the end forward.
