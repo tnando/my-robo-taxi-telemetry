@@ -679,6 +679,7 @@ No contract changes are required for the new role's wire shape (the REST respons
 | `DELETE` | `/api/invites/{inviteId}` | Cancel a pending invite / revoke an accepted grant (tombstone, 204, idempotent) — §7.5.3 | Bearer + owner of the invite | FR-5.3 |
 | `PATCH` | `/api/invites/{inviteId}` | Edit one **accepted** grant's capabilities in place — `allowRides` / `suspended`, partial, accepted-only (409 on pending) — §7.5.7 | Bearer + owner of the invite | FR-5.1, FR-5.3, MYR-369 |
 | `POST` | `/api/invites/{inviteId}/resend` | Re-mint the code + reset the 7-day expiry across **every** pending row of the invite (pending only) — §7.5.4 | Bearer + owner of the invite | FR-5.1, MYR-184 |
+| `POST` | `/api/vehicles/{vehicleId}/share/extend` | Copy one of the caller's **accepted** grants onto another car they own — no second redemption; refuses a paused source, a paused grant on the target, and a car the grantee LEFT — §7.5.8 | Bearer + owner of vehicleId AND of the source grant | FR-5.1, FR-5.4, MYR-609 |
 | `POST` | `/api/invites/redeem` | Rider-side join: accept every row backing a code, atomically — §7.5.5 | Bearer (self); rate-limited 10/min | FR-5.1, FR-5.4, MYR-184 |
 | `PATCH` | `/api/users/me` | Set the caller's own display name — §7.26 | Bearer (self only) | FR-9.3, MYR-581 |
 | `DELETE` | `/api/users/me` | Delete own account + all data | Bearer (self only) | FR-10.1, FR-10.2, NFR-3.29 |
@@ -1302,7 +1303,7 @@ See §5.2.4. **Owner-only, unconditionally, as of [MYR-369](https://linear.app/m
 ### 7.5 Vehicle sharing (invites + redeem)
 
 > **Anchored:** FR-5.1, FR-5.2, FR-5.3, FR-5.4.
-> **Schema:** [`schemas/vehicle-sharing.schema.json`](schemas/vehicle-sharing.schema.json) — `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `PatchShareInviteRequest`, `ShareInviteListResponse` (contracts v0.23.0 — `ShareInvite.shareUrl` added by MYR-368 §7.5.6; `ShareInvite.allowRides` / `ShareInvite.suspended` and `PatchShareInviteRequest` added by MYR-369 §7.5.7).
+> **Schema:** [`schemas/vehicle-sharing.schema.json`](schemas/vehicle-sharing.schema.json) — `ShareInvite`, `SharePermission`, `CreateShareInviteRequest`, `RedeemShareInviteRequest`, `RedeemShareInviteResponse`, `PatchShareInviteRequest`, `ShareInviteListResponse`, `ExtendShareRequest` (contracts v0.23.0 — `ShareInvite.shareUrl` added by MYR-368 §7.5.6; `ShareInvite.allowRides` / `ShareInvite.suspended` and `PatchShareInviteRequest` added by MYR-369 §7.5.7; `ExtendShareRequest` and the `already_shared` sub-code added by [MYR-609](https://linear.app/myrobotaxi/issue/MYR-609) §7.5.8, contracts v0.42.0).
 > **Persisted:** Go-owned `go_vehicle_shares` table (migration 0020 — [`data-classification.md`](data-classification.md) §1.15). No foreign keys to the sibling schema (CG-DL-9).
 
 Mounted on the **Go telemetry server** as of **MYR-184** (2026-07-29). This **SUPERSEDES §10 DV-23**, which had assigned invites to the now-deprecated Next.js app: `react-frontend` is retired, the email-keyed Prisma `Invite` table is retired **unused**, and sharing is Go-owned end to end. See the DV-23 row in §10 for the full supersession note.
@@ -1834,6 +1835,12 @@ Copies one of the caller's **ACCEPTED** grants onto another car the caller owns,
 
 Anything wider than that — extending across owners, extending from a grant the caller merely holds, extending onto a car the caller does not own — is refused, and the refusals are the bulk of this section.
 
+**THREE THINGS THE CONSENT BASIS DOES NOT COVER**, each answered `409 conflict` with no sub-code and its own message:
+
+1. **A SUSPENDED SOURCE.** A pause is the owner's own explicit state on a relationship, not a property to propagate.
+2. **A SUSPENDED GRANT ALREADY ON THE TARGET.** That person currently has no access to this car at all, so `already_shared` — which a client renders as success — would be a false report in the one direction that matters.
+3. **A CAR THE GRANTEE LEFT** under §7.5.7. Leaving is the one exit a grantee has, and an endpoint that hands the access back on the owner's button press, with no act by the grantee and no notification to them, is not an exit. The owner's route is a fresh §7.5.1 invite, which the person can decline by not redeeming it.
+
 ##### Request
 
 ```
@@ -1856,6 +1863,8 @@ Content-Type: application/json; charset=utf-8
 
 A single `ShareInvite`: the **NEW** grant, on the path vehicle. It is an **accepted** row, so it carries `allowRides` / `suspended` and the derived `permission`, and carries neither `code` nor `shareUrl` nor `expiresAt`.
 
+**Nor does the stored row.** `code` and `expires_at` are **NULL in the database** (migration 0052 made both nullable behind a CHECK that requires them only on a `pending` row), not merely suppressed on the way out. The first implementation minted a real 6-character code and stamped an already-lapsed expiry to satisfy the old `NOT NULL`, and argued the value was unreachable three times over — the redeem statement requires `status = 'pending'`, `expires_at > NOW()` refuses the lapsed stamp, and the projection blanks `code` on any non-pending row. Every one of those was true, and each is a line somebody could change for an unrelated reason; a credential that is dead by argument is still a credential. There is also no mint round trip, so an extend cannot draw from or shadow the live code space even in principle.
+
 ```json
 {
   "inviteId": "cshx0123456789abcdef0123456789ab",
@@ -1875,11 +1884,15 @@ A single `ShareInvite`: the **NEW** grant, on the path vehicle. It is an **accep
 
 **`accepted_at` is the instant the OWNER extended it**, not the instant the source was redeemed: it is when this car's access actually began, and it is what the owner's "shared {ago}" line on the new row refers to.
 
-**A SUSPENDED source produces a SUSPENDED grant.** Extending is not blocked by a pause — a pause is the owner's own reversible state and refusing here would force them to un-pause somebody in order to add a car — but the pause travels with the grant, because copying it live would be a way to undo a suspension without lifting it. The new row is then excluded from the access set by §7.5.0's suspension invariant, exactly like its source, and one §7.5.7 `PATCH` per row lifts them independently.
+**A SUSPENDED source is REFUSED, and the new row is NEVER born paused.** An earlier draft of this section specified that the pause travelled with the grant. It was wrong in a way worth recording, because the reasoning that produced it is tempting: refusing seems to force an owner to un-pause somebody in order to add a car, and copying the pause seems to preserve the owner's intent. What copying it actually produces is a grant born suspended — excluded from the access set by §7.5.0's suspension invariant, so **invisible to the grantee**, while the owner's own §7.5.2 listing shows the car as shared with them. Nobody would know to lift it, and it contradicts the invariant redemption asserts in the other direction (a freshly accepted grant is never paused, precisely so that no grant exists that only its creator can see). The endpoint answers `409` naming the pause and the remedy instead. The same holds on the other side: a PAUSED grant the grantee already has on the TARGET car is its own `409`, not `already_shared` — that sub-code tells a client the call **succeeded**, and a paused person has nothing.
+
+**A car the grantee LEFT is refused too.** §7.5.7 `DELETE /api/vehicles/{vehicleId}/share` is the grantee's own way out, and since [MYR-609](https://linear.app/myrobotaxi/issue/MYR-609) the tombstone it writes records **who ended the share** (`revoked_by`, migration 0051). Extend consults the NEWEST tombstone for the (car, grantee) pair and refuses when the grantee wrote it. An OWNER-written tombstone does not block — an owner re-sharing a car they themselves un-shared is the ordinary case this endpoint exists for — and a tombstone with no recorded author (any written before the migration) does not block either: the author was never captured, and refusing on "unknown" would block most extends for a leave that probably never happened. Only the newest tombstone is consulted, so a grantee who left, was re-invited, and had that later invite revoked by the owner is extendable again.
 
 **The row is INDISTINGUISHABLE from a redeemed grant everywhere else**, and it must be: the §7.0 catalog merge, the §7.1 snapshot gate, the WebSocket access set and the §7.8 ride gates all admit it with no special case, because there is nothing in the row for them to special-case. The only record that it was not redeemed is the `share.extended` audit row.
 
-**The grantee's cached access set is busted immediately**, in the widening direction of the same rule §7.5.3 and §7.5.7 apply to narrowing: without it, the car would be invisible to the person it was just shared with until their cache entry lapsed (5-minute TTL), while the owner's app already showed them as a pickable participant on it. There is deliberately **no socket signal** to match — `share.access_revoked` exists to END a stream, and gaining access opens nothing that needs closing; the grantee's next handshake reads the widened set.
+**The grantee's cached access set is busted immediately**, in the widening direction of the same rule §7.5.3 and §7.5.7 apply to narrowing: without it, the car would be invisible to the person it was just shared with until their cache entry lapsed (5-minute TTL), while the owner's app already showed them as a pickable participant on it.
+
+**And their LIVE SOCKET is made to re-handshake** — the widening half of [`websocket-protocol.md`](websocket-protocol.md) §4.5.1, which this endpoint is the first producer of. An earlier draft said there was deliberately no socket signal, on the grounds that `share.access_revoked` exists to END a stream and gaining access opens nothing that needs closing. The premise is true and the conclusion does not follow: `Client.vehicleIDs` is **frozen at handshake**, so a grantee who is connected when the owner extends does not get the car until they happen to reconnect — up to a whole session — while their own REST surface already lists it. "The next handshake reads the widened set" was the mechanism; what was missing was anything that causes a next handshake. The server publishes the internal-only `share.access_widened` event after the commit and after the cache bust (that order is load-bearing for the mirror-image reason it is on the narrowing paths — a reconnect served from the pre-mutation cache would come back **without** the car), and a hub dispatcher closes the grantee's sessions with the **same `4002` frame**, whose documented client contract is already "reconnect, then render whatever the new handshake returns". **Zero wire change**, and a widening is deliberately indistinguishable from a narrowing on the wire: the correct client behaviour is identical, and the client finds out what actually changed by reconnecting, which is the only honest way to learn either. Best-effort — a dropped publish costs the grantee a reconnect's delay, never a wrong answer, and the 60-second revalidation sweep backstops it.
 
 **No push is sent** in v1 — there is no viewer-facing share notification category to send it through. `viewer_joined` (§7.19) is the OWNER's switch for "somebody redeemed an invite to your car" and has no send site at all; sending on it would address the wrong party through the wrong preference. The new row simply appears in the grantee's §7.0 catalog on their next read. A "{Owner} also shared {car} with you" push is recorded as an open product question on the issue, not silently decided.
 
@@ -1892,13 +1905,18 @@ A single `ShareInvite`: the **NEW** grant, on the path vehicle. It is an **accep
 | 403 | `vehicle_not_owned` | — | Caller does not own the path vehicle |
 | 404 | `not_found` | — | Path `vehicleId` does not exist |
 | 404 | `not_found` | — | `shareId` does not exist, belongs to another owner, is still `pending`, or is a revoked tombstone |
-| 409 | `conflict` | `already_shared` | That person already holds a live grant on the path vehicle |
+| 409 | `conflict` | `already_shared` | That person already holds a live, UNPAUSED grant on the path vehicle |
+| 409 | `conflict` | — | The SOURCE grant is suspended — "that share is paused — restore it in Share first" |
+| 409 | `conflict` | — | That person's grant on the PATH vehicle is suspended — "that person is paused on this car — restore them in Share" |
+| 409 | `conflict` | — | That person LEFT the path vehicle under §7.5.7 — "they left this car — send them a new invite" |
 | 409 | `invalid_request` | — | The path vehicle is a §7.29 driver-access car still awaiting its owner-approval acknowledgment |
 | 500 | `internal_error` | — | Store-layer error |
 
 **THE FOUR 404 CAUSES ARE ONE ANSWER, WITH ONE BODY.** Missing, another owner's, still pending, and revoked are deliberately indistinguishable — the same non-oracle rule §7.5.3 and §7.5.7 already hold for invite ids, and it matters more here because the id in the request body is one a caller could guess at rather than one the path already proved they own. A blank `shareId` is `400` and not `404` for the same reason the join endpoint splits a malformed code from a dead one (§7.24): the `404` body means "that share is not extendable by you", and folding a client bug into that set would make the indistinguishability harder to reason about rather than easier.
 
 **`already_shared` is a sub-code because `conflict` alone is not actionable.** `conflict` otherwise means an illegal lifecycle *transition*; this one means the thing the caller asked for is already true, which is not an error they made and not one to retry. A client branches on the sub-code to mark that person as already having the car and move on — which is also what makes an "Add all" affordance safe, since the responses that come back `already_shared` are successes to render rather than failures to report.
+
+**The other three 409s deliberately carry NO sub-code, and that asymmetry is the design rather than an omission.** `already_shared` exists to say *this call is a success to render*. The other three say the opposite — nothing happened — and each names a **different thing the owner must do first, on a different screen**. A client cannot act on those generically: there is no shared behaviour for "un-pause them", "un-pause this share" and "send a new invite", so a sub-code would be a machine-readable "try again after doing something", which is the `message`'s job. A client that receives a `conflict` with a null `subCode` from this endpoint surfaces the message and does **not** treat the person as added — the one distinction that has to survive, and the one the sub-code's presence already draws.
 
 **Extending a grant onto its OWN vehicle answers `409 already_shared`, not `404`.** It is a special case of the conflict rather than a separate rule: the grantee demonstrably holds a live row on that car — it is the very row named in the request — so the conflict is the honest answer, and a `404` would hide a row the caller owns and can see on their own §7.5.2 listing.
 
