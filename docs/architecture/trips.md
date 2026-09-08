@@ -413,12 +413,22 @@ an unrelated HTTP request timed out against the starved pool and answered `401`.
   invalidated by every write and keyed on the FRAME clock, checked from both
   sides so a backdated MYR-394 poll frame forces a re-read rather than extending
   the window.
-- Every remaining read is bounded by `Config.Timeout` and every edge by
-  `Config.EdgeTimeout`, which is what that field's documentation always claimed
-  and did not deliver on this path.
+- **The whole frame is bounded ONCE, at `Detector.handleFrame`, by
+  `Config.FrameTimeout` (20 s).** The budget used to be applied at each store
+  call — six of them — and the seventh, the VIN→vehicle resolution, had none at
+  all: on a cache miss it was an unbounded query on the delivery goroutine, so
+  the sentence this list used to end with was not true. The question the budget
+  answers is *"how long may one frame occupy the bus goroutine"*, which is a
+  property of the entrance rather than of any statement inside it, and a
+  wrapper at the entrance is a rule the next call site cannot forget. It is
+  sized for the most expensive legitimate frame — a candidate refresh, a VIN
+  resolution, an open-leg read AND a leg edge with its APNs pushes — because a
+  frame carrying an edge is the one frame that must not be cut short.
+  `Config.Timeout` and `Config.EdgeTimeout` now bound the SWEEPER only.
 
-`TestUnderwayFramesDoNotQueryPerFrame` pins the cost, because the property is
-invisible to every functional test — which is how it regressed.
+`TestUnderwayFramesDoNotQueryPerFrame` pins the cost and `TestEveryFrameIsBounded`
+pins the deadline, because both properties are invisible to every functional
+test — which is how they regressed.
 
 ### The four claims
 

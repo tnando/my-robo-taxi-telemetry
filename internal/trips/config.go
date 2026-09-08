@@ -80,10 +80,32 @@ type Config struct {
 	// probe then timed out against.
 	LegReadTTL time.Duration
 
-	// Timeout bounds every store call the sweeper or the detector makes, so
-	// neither a stalled claim nor a stalled candidate read can wedge the frame
-	// path or hold a pass past its own interval.
+	// Timeout bounds every store call the SWEEPER makes, so a stalled claim
+	// cannot hold a pass past its own interval.
+	//
+	// The frame path does not use it — see FrameTimeout.
 	Timeout time.Duration
+
+	// FrameTimeout bounds ONE FRAME's whole journey through the detector, and
+	// it is the only deadline the per-frame path has (MYR-612 review).
+	//
+	// ⚠ ONE PLACE, AT THE CHOKEPOINT, because the property that matters is
+	// about the BUS GOROUTINE and not about any one statement: every frame is
+	// handled on the single goroutine the event bus delivers on, so anything
+	// that blocks in here blocks every other subscriber of every other car.
+	// The budget used to be applied at each store call instead — six of them —
+	// and the seventh, the VIN→vehicle resolution, had no budget at all: on a
+	// cache miss it was an unbounded query on that goroutine, which is exactly
+	// the shape the architecture doc claims cannot exist. A wrapper per call
+	// site is a rule the next call site can forget; a wrapper at the entrance
+	// is a rule it cannot.
+	//
+	// Sized for the most expensive legitimate frame — a candidate refresh, a
+	// VIN resolution, an open-leg read AND a leg edge with its APNs pushes —
+	// because a frame carrying an edge is the one frame that must not be cut
+	// short. It is a CEILING on damage, not a target: an ordinary frame
+	// touches nothing at all.
+	FrameTimeout time.Duration
 
 	// EdgeTimeout bounds ONE claimed trip's post-claim work in a sweeper pass
 	// — its audience read, its open legs' endings, its card pushes and its
@@ -150,6 +172,12 @@ const (
 
 	defaultTimeout = 5 * time.Second
 
+	// The whole per-frame path, edge included — see Config.FrameTimeout. The
+	// same twenty seconds one trip's edge gets in a sweeper pass, because it
+	// bounds the same work: a frame that opens or closes a leg does exactly
+	// what a claimed trip's edge does.
+	defaultFrameTimeout = 20 * time.Second
+
 	// One trip's whole closing or opening edge, pushes included. Twenty
 	// seconds is three times the budget its longest single statement gets and
 	// a third of the interval, so a stalled edge is abandoned well before the
@@ -179,6 +207,7 @@ func DefaultConfig() Config {
 		StillnessMeters:     defaultStillnessMeters,
 		MaxStillnessGap:     defaultMaxStillnessGap,
 		Timeout:             defaultTimeout,
+		FrameTimeout:        defaultFrameTimeout,
 		EdgeTimeout:         defaultEdgeTimeout,
 		RevalidateTimeout:   defaultRevalidateTimeout,
 	}
@@ -186,11 +215,17 @@ func DefaultConfig() Config {
 
 // withDefaults replaces zero-valued knobs with their defaults.
 //
-// Dwell is the one field where zero is a LEGITIMATE value — tests use it to
-// fire on the first qualifying frame — so it is left alone, exactly as
-// arrival.Config does for the same field and for the same reason. Every other
-// zero would be a misconfiguration rather than a choice.
+// Every zero but Dwell's would be a misconfiguration rather than a choice; the
+// two halves say which is which.
 func (c Config) withDefaults() Config {
+	return c.withScheduleDefaults().withArrivalDefaults()
+}
+
+// withScheduleDefaults fills the CLOCK — every knob that is a duration or a
+// batch size. Split from the arrival thresholds because they are two unrelated
+// sets that happen to live on one struct, and one function filling both is a
+// list long enough to trip the complexity gate.
+func (c Config) withScheduleDefaults() Config {
 	d := DefaultConfig()
 	if c.SweepInterval <= 0 {
 		c.SweepInterval = d.SweepInterval
@@ -213,6 +248,27 @@ func (c Config) withDefaults() Config {
 	if c.LegReadTTL <= 0 {
 		c.LegReadTTL = d.LegReadTTL
 	}
+	if c.Timeout <= 0 {
+		c.Timeout = d.Timeout
+	}
+	if c.FrameTimeout <= 0 {
+		c.FrameTimeout = d.FrameTimeout
+	}
+	if c.EdgeTimeout <= 0 {
+		c.EdgeTimeout = d.EdgeTimeout
+	}
+	if c.RevalidateTimeout <= 0 {
+		c.RevalidateTimeout = d.RevalidateTimeout
+	}
+	return c
+}
+
+// withArrivalDefaults fills the thresholds that decide whether a car has
+// arrived. Dwell is deliberately absent: zero is a LEGITIMATE value for it —
+// tests use it to fire on the first qualifying frame — exactly as
+// arrival.Config leaves the same field alone for the same reason.
+func (c Config) withArrivalDefaults() Config {
+	d := DefaultConfig()
 	if c.ArrivalRadiusMeters <= 0 {
 		c.ArrivalRadiusMeters = d.ArrivalRadiusMeters
 	}
@@ -224,15 +280,6 @@ func (c Config) withDefaults() Config {
 	}
 	if c.MaxStillnessGap <= 0 {
 		c.MaxStillnessGap = d.MaxStillnessGap
-	}
-	if c.EdgeTimeout <= 0 {
-		c.EdgeTimeout = d.EdgeTimeout
-	}
-	if c.RevalidateTimeout <= 0 {
-		c.RevalidateTimeout = d.RevalidateTimeout
-	}
-	if c.Timeout <= 0 {
-		c.Timeout = d.Timeout
 	}
 	return c
 }

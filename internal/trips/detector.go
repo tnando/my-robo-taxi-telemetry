@@ -132,12 +132,24 @@ func (d *Detector) Stop() error {
 }
 
 // handleFrame is the per-frame path.
+//
+// ⚠ THE FRAME'S WHOLE DEADLINE IS SET HERE, ONCE, AND NOWHERE ELSE (MYR-612
+// review). Every frame runs on the SINGLE goroutine the event bus delivers on,
+// so anything that blocks in here blocks every other subscriber of every other
+// car — which makes "how long may one frame take" a property of this function
+// rather than of any statement it happens to reach. The budget used to be
+// applied at each store call instead, six of them, and the seventh — the
+// VIN→vehicle resolution two lines below — had no budget at all: on a cache
+// miss it was an unbounded query on the delivery goroutine, exactly the shape
+// docs/architecture/trips.md claims cannot exist. A wrapper per call site is a
+// rule the next call site can forget; a wrapper at the entrance is not.
 func (d *Detector) handleFrame(evt events.Event) {
 	te, ok := evt.Payload.(events.VehicleTelemetryEvent)
 	if !ok || te.VIN == "" {
 		return
 	}
-	ctx := d.frameCtx()
+	ctx, cancel := context.WithTimeout(d.frameCtx(), d.cfg.FrameTimeout)
+	defer cancel()
 
 	byVehicle, fresh := d.trips.ensure(ctx, d.svc.now())
 	if fresh {

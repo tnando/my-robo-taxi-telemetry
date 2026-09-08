@@ -395,8 +395,21 @@ func (f *fakeRevalidator) count() int {
 	return f.calls
 }
 
-type fakeVINResolver struct{ byVIN map[string]string }
+type fakeVINResolver struct {
+	byVIN map[string]string
+	// deadline records whether the context this resolution ran under carried
+	// one. On a VIN-cache miss this is a real query on the single bus
+	// goroutine, and it had no budget at all until MYR-612's review.
+	deadline  bool
+	sawCtx    bool
+	remaining time.Duration
+}
 
-func (f *fakeVINResolver) ResolveID(_ context.Context, vin string) (string, error) {
+func (f *fakeVINResolver) ResolveID(ctx context.Context, vin string) (string, error) {
+	f.sawCtx = true
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadline = true
+		f.remaining = time.Until(dl)
+	}
 	return f.byVIN[vin], nil
 }

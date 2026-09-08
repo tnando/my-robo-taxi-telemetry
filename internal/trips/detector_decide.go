@@ -53,9 +53,7 @@ func (d *Detector) decide(
 	// Still under way. Refresh the card only when this frame's arrival estimate
 	// has earned a push — see vehicleState.dueForCard.
 	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
-		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
-		defer cancel()
-		d.svc.updateLeg(edgeCtx, leg, f, minutes)
+		d.svc.updateLeg(ctx, leg, f, minutes)
 	}
 }
 
@@ -80,9 +78,7 @@ func (d *Detector) decideIdle(
 		return
 	}
 	if state.driving && state.destination != "" && (!drivingBefore || destBefore == "") {
-		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
-		defer cancel()
-		d.svc.openLeg(edgeCtx, tv, state.destination, f.at)
+		d.svc.openLeg(ctx, tv, state.destination, f.at)
 		state.forgetLegRead()
 	}
 }
@@ -221,10 +217,7 @@ func (d *Detector) openLegFor(ctx context.Context, state *vehicleState, vehicleI
 	if fresh := at.Sub(state.legReadAt); !state.legReadAt.IsZero() && fresh >= 0 && fresh < d.cfg.LegReadTTL {
 		return state.legRead, nil
 	}
-	readCtx, cancel := context.WithTimeout(ctx, d.cfg.Timeout)
-	defer cancel()
-
-	leg, err := d.svc.legs.OpenLegForVehicle(readCtx, vehicleID)
+	leg, err := d.svc.legs.OpenLegForVehicle(ctx, vehicleID)
 	if err != nil {
 		return Leg{}, fmt.Errorf("trips.openLegFor(vehicle=%s): %w", vehicleID, err)
 	}
@@ -252,18 +245,14 @@ func (d *Detector) openLegFor(ctx context.Context, state *vehicleState, vehicleI
 func (d *Detector) closeLegNow(
 	ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, arrived bool,
 ) bool {
-	readCtx, cancelRead := context.WithTimeout(ctx, d.cfg.Timeout)
-	audience, err := d.svc.trips.TripAudienceFor(readCtx, tv.TripID)
-	cancelRead()
+	audience, err := d.svc.trips.TripAudienceFor(ctx, tv.TripID)
 	if err != nil {
 		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
 			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
 		return false
 	}
 
-	edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
-	defer cancel()
-	if !d.svc.closeLeg(edgeCtx, leg, audience, arrived) {
+	if !d.svc.closeLeg(ctx, leg, audience, arrived) {
 		// EndLeg failed. The row is still open, so the next qualifying frame
 		// must be allowed to try again — see the note above.
 		return false

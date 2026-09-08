@@ -117,3 +117,34 @@ func TestALegEdgeStillReadsTheAudience(t *testing.T) {
 func f64Value(v float64) events.TelemetryValue {
 	return events.TelemetryValue{FloatVal: f64(v)}
 }
+
+// TestEveryFrameIsBounded — MYR-612 review.
+//
+// The budget used to be applied at each store call, and the VIN→vehicle
+// resolution had none: on a cache miss it was an UNBOUNDED query on the single
+// goroutine the bus delivers every subscriber's frames on. Bounding it at each
+// call site is a rule the next call site can forget, so the deadline is set
+// once, at the entrance, and this asserts the frame path actually carries it.
+func TestEveryFrameIsBounded(t *testing.T) {
+	d, _, _, _, _ := newTestDetector(t)
+	vins, ok := d.vins.(*fakeVINResolver)
+	if !ok {
+		t.Fatalf("unexpected resolver %T", d.vins)
+	}
+
+	feed(d, []frame{{0, map[string]events.TelemetryValue{
+		string(telemetry.FieldSpeed): speed(35),
+	}}})
+
+	if !vins.sawCtx {
+		t.Fatal("the frame never reached the VIN resolution")
+	}
+	if !vins.deadline {
+		t.Fatal("the VIN resolution ran with no deadline; on a cache miss that is " +
+			"an unbounded query on the bus delivery goroutine")
+	}
+	if vins.remaining <= 0 || vins.remaining > d.cfg.FrameTimeout {
+		t.Errorf("remaining budget = %v, want (0, %v] — the frame's own ceiling",
+			vins.remaining, d.cfg.FrameTimeout)
+	}
+}
