@@ -123,7 +123,7 @@
         "name",
         "userIsSelf"
       ],
-      "description": "ONE PERSON ON THE TRIP. Participants are chosen from the vehicle's ACCEPTED share grants and from nowhere else: a trip cannot reach somebody the car is not already shared with, so adding a stranger is a share invite first and a trip edit second. EVERYBODY SEES THE WHOLE LIST — an owner sees all participants and a participant sees all participants, deliberately, because they are on a trip together and a card showing 'and 3 others' would make a shared window feel like a broadcast. The OWNER IS NOT IN THIS ARRAY: they are named by the sibling Trip.ownerFirstName and identified by Trip.role, so a client renders the owner separately rather than hunting for them among the participants. A REVOKED SHARE REMOVES THE PARTICIPANT — trip access can never outlive the grant it was drawn from — and a participant who leaves disappears from the array on the next read. Neither departure is distinguishable here from 'was never added', by design: this is a membership snapshot, not an audit log.",
+      "description": "ONE PERSON ON THE TRIP. Participants are chosen from the vehicle's ACCEPTED share grants and from nowhere else: a trip cannot reach somebody the car is not already shared with, so adding a stranger is a share invite first and a trip edit second. EVERYBODY SEES THE WHOLE LIST — an owner sees all participants and a participant sees all participants, deliberately, because they are on a trip together and a card showing 'and 3 others' would make a shared window feel like a broadcast. The OWNER IS NOT IN THIS ARRAY: they are named by the sibling Trip.ownerFirstName and identified by Trip.role, so a client renders the owner separately rather than hunting for them among the participants. A REVOKED SHARE REMOVES THE PARTICIPANT — trip access can never outlive the grant it was drawn from — and a participant who leaves disappears from the array on the next read. Neither departure is distinguishable here from 'was never added', by design: this is a membership snapshot, not an audit log. Since MYR-618 each row also carries `addedByName` — the confirmed first name of whoever added this person — because the roster's writer is no longer necessarily the owner.",
       "properties": {
         "participantId": {
           "type": "string",
@@ -147,6 +147,18 @@
           "x-classification": "P0",
           "examples": [
             true
+          ]
+        },
+        "addedByName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "WHO PUT THIS PERSON ON THE TRIP, as a confirmed FIRST name, or null (MYR-618). It exists because the actor is no longer constant: until MYR-618 only a trip's OWNER could widen a roster, so \"who let this person see my car\" answered itself; a LIVE PARTICIPANT may now add anybody who already holds an accepted, unsuspended grant on the trip's vehicle (UpdateTripRequest.addParticipantIds), and the owner's trip sheet renders \"Added by {addedByName}\" against the row. Resolved server-side through the SAME three-rung ladder and the SAME MYR-583 confirmation gate as Trip.ownerFirstName, and reduced to a first token by the same helper — a client MUST render it as given and MUST NOT re-derive the ladder or split a surname off it. ALWAYS PRESENT, NULLABLE, NEVER ABSENT: null is one value for three causes deliberately collapsed into one — a membership written before the attribution existed, an adder who has not been through the naming prompt, and an adder whose account is gone. All three mean the same thing to somebody reading a roster (there is nothing to show), and distinguishing them would disclose more about a third party than this row is entitled to; a consumer renders no attribution rather than a placeholder. EVERYONE ON THE TRIP SEES IT, not only the owner, because since MYR-618 everyone on the trip can BE the answer — an attribution shown only to the owner would be a private ledger of who invited whom. P1: this names a PERSON. Redact it in logs, never place it in a URL or a query string, and never emit it outside the trip's own party. It is NOT a user id and MUST NOT be matched on: two people on one trip can share a first name.",
+          "x-classification": "P1",
+          "examples": [
+            "Nabil",
+            null
           ]
         }
       }
@@ -479,6 +491,53 @@
           "examples": [
             true
           ]
+        }
+      }
+    },
+    "TripAddablePerson": {
+      "title": "TripAddablePerson",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "shareId",
+        "displayName"
+      ],
+      "description": "ONE PERSON WHO COULD STILL BE ADDED TO A TRIP: somebody who already holds an accepted, unsuspended share grant on the trip's vehicle and is NOT already on the trip's live roster (GET /api/trips/{tripId}/addable-people, rest-api.md §7.30.11, MYR-618). IT IS THE PICKER'S ROW AND NOTHING MORE. This read is admitted to PARTICIPANTS and not only to the owner — a participant who may add people needs to know who is addable — while the owner's own grant listing (vehicle-sharing.schema.json ShareInvite) stays owner-only, because it carries invite CODES, email addresses, pending invitations, per-grant permissions and the owner's private label for why each person holds a key. TWO FIELDS is therefore the contract rather than an economy: anything more would be a share surface reached through a trip. THE LIST CARRIES THE FULL LIVE-GRANT PREDICATE — accepted, not suspended, redeemed by an account, not the owner, not already aboard — not because a read grants anything, but because its rows are what a client posts straight back to UpdateTripRequest.addParticipantIds; offering a suspended grant would produce a `participant_not_shared` refusal the person could not explain, having just been shown the name. Somebody who LEFT the trip appears again, which is what makes a re-invite possible; the trip's OWNER never appears, holding no grant on their own car.",
+      "properties": {
+        "shareId": {
+          "type": "string",
+          "description": "The SHARE GRANT's id — the same value TripParticipant.participantId carries and the same value UpdateTripRequest.addParticipantIds takes, so a person picked here round-trips into the add with no translation and no mapping table on the client. Opaque: consumers MUST NOT parse it, and MUST NOT assume it is stable across a revoke-and-reinvite of the same person.",
+          "x-classification": "P0",
+          "examples": [
+            "clshc1234567890abcdef"
+          ]
+        },
+        "displayName": {
+          "type": "string",
+          "description": "WHO TO SHOW, already resolved by the server under the ROSTER's own rule (MYR-581): the accepting account's confirmed FIRST name when there is one, falling back to the OWNER-TYPED label for the grant when there is not. Identical ladder, identical fallback and identical first-names-only policy as TripParticipant.name, deliberately — a person must not be called one thing in the picker and another thing on the trip they were added to one tap later. NO CODE, NO EMAIL, NO STATUS, NO PERMISSION, NO USER ID. P1: this names a PERSON.",
+          "x-classification": "P1",
+          "examples": [
+            "Joey"
+          ]
+        }
+      }
+    },
+    "TripAddablePeopleResponse": {
+      "title": "TripAddablePeopleResponse",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "people"
+      ],
+      "description": "Envelope returned by GET /api/trips/{tripId}/addable-people (rest-api.md §7.30.11, MYR-618) — the trip vehicle's live grant-holders who are not yet on the trip, for a caller who owns the trip or is on it. DELIBERATELY NOT THE CURSOR ENVELOPE and deliberately not a bare array: a car has a handful of share-holders, not a feed, so there is no `nextCursor` and no `hasMore`, and an SDK pagination helper MUST NOT mistake this for a page and go looking for a cursor that will never be there. The `people` wrapper is part of the wire contract — consumers MUST NOT strip it silently — and it is what lets this shape grow a sibling field later without breaking a decoder. AN EMPTY ARRAY IS A 200, NOT A 404: \"there is nobody left to add\" is a legitimate state of a trip the caller is on, and the client renders \"Everyone with access to {car} is already on this trip.\" A caller who is on NEITHER side of the trip gets 404 `not_found` — the same answer an unknown trip id gets — because an empty list would otherwise be indistinguishable from a stranger's refusal. Ordered by `displayName` with the share id as a total tie-break, so a picker showing two people the owner labelled the same does not reshuffle them between reads.",
+      "properties": {
+        "people": {
+          "type": "array",
+          "description": "The addable people, possibly empty. See TripAddablePerson.",
+          "items": {
+            "$ref": "#/$defs/TripAddablePerson"
+          },
+          "x-classification": "P1"
         }
       }
     }

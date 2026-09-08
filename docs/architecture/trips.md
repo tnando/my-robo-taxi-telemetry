@@ -443,6 +443,76 @@ whole of its metadata. **It is the only record the participants have.**
 Normatively specified in [`data-lifecycle.md`](../contracts/data-lifecycle.md)
 §3.6 and §4.2.
 
+## 10B. A participant may bring somebody along (MYR-618)
+
+**The roster has a second writer.** A LIVE PARTICIPANT of a scheduled or active
+trip may add anybody who already holds an accepted, unsuspended grant on the
+trip's vehicle — `PATCH /api/trips/{tripId}` with `addParticipantIds` and
+NOTHING else ([`rest-api.md`](../contracts/rest-api.md) §7.30.4). Removing,
+renaming, moving the window, ending and deleting all stay with the owner.
+
+**WHY THAT IS SAFE, AND IT IS ONE SENTENCE: A TRIP MINTS NOTHING.** Its
+participants are drawn from the car's already-accepted grants and from nowhere
+else, so the widest thing a participant can do is move somebody the OWNER
+already trusted with the car from *"sees it whenever the owner shares it"* to
+*"sees it during this window"*. They cannot create a grant, cannot invite a
+stranger, and the window they widen is one the owner opened.
+
+**THE SEPARATION IS THE ENFORCEMENT, not a flag.** `TripRepo.Update` refuses
+everybody but the owner in its first statement and every statement after it is
+owner-scoped; threading a *"sometimes the caller is a participant"* boolean
+through it would put the widest gate on this surface behind a branch.
+`TripRepo.AddParticipants` is a separate entry point that **can only ever widen a
+roster, because widening a roster is the only statement it contains** — a
+handler bug that reached it with the wrong caller cannot become a removal. The
+owner's own add goes through the same shared body, so an owner's add and a
+participant's add differ in **who may ask** and in nothing that reaches the
+database.
+
+| | Owner | Live participant | Stranger |
+|---|---|---|---|
+| `addParticipantIds` | ✅ | ✅ | `404` |
+| `removeParticipantIds` / `name` / `endsAt` | ✅ | `403 permission_denied`, **whole request refused** | `404` |
+| `GET .../addable-people` | ✅ | ✅ | `404` |
+
+**`403` IS THE ONE PLACE THIS SURFACE ANSWERS ANYTHING BUT `404`, and it is not
+a crack in the rule.** The 404-not-403 rule exists so a trip id cannot be
+probed; this caller has already been resolved as a member, so there is nothing
+left to conceal and a `404` would only be a lie about a resource they are
+demonstrably on. **The role is resolved BEFORE the body is interpreted** — a
+participant sending a malformed `endsAt` is told they may not move the window,
+not that their date is malformed.
+
+**THE ATTRIBUTION IS A COLUMN AND A ROW, and they are not substitutes.**
+`go_trip_participants.added_by_user_id` (migration **0060**, nullable, **not
+backfilled**) records the resulting STATE and is what the trip sheet reads to
+say *"Added by Amruth"*; the `trip.participant_added` AuditLog row records the
+ACT and is what an operator reads years later. A roster row is read on every
+trip card and must answer without joining a table that is pruned on a retention
+schedule. **A pre-0060 row stays NULL**: every one of them was written by the
+owner, so a backfill would be correct and would also record, indistinguishably
+from a real observation, an act nobody observed.
+
+**⚠ THE UPSERT PRESERVES AN EXISTING ATTRIBUTION and overwrites it only on a
+genuine revival, and that asymmetry is a security property rather than a
+nicety.** Re-adding somebody already aboard is a no-op `200`; without the
+preserve arm, any participant could claim credit for the owner's own additions
+simply by adding the same person a second time.
+
+**THE PICKER IS ITS OWN ROUTE.** `GET /api/trips/{tripId}/addable-people`
+(§7.30.11) returns `{shareId, displayName}` for the vehicle's live grant-holders
+not yet aboard — because §7.5's grant listing is owner-only and must stay that
+way: it carries invite codes, email addresses, statuses, permissions and the
+owner's private label for each person. The owner reads the same route, so the
+two pickers cannot come to offer different people.
+
+**ONE PUSH IS NEW AND IT GOES TO THE OWNER ALONE**: `trip_participant_added`, a
+sixth event on the existing `trips` category with **no new preference**. It is
+the only push here whose audience is the owner, and it exists because a
+participant's add is the one thing on the platform that changes who may watch an
+owner's car without the owner acting. **The owner's own add sends it to
+nobody.** The people added hear the ordinary `trip_added` either way.
+
 ## 11. Kill switch
 
 `TRIPS_ENABLED` (default true) is read at **composition** time: false constructs
