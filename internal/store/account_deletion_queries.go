@@ -16,9 +16,14 @@ package store
 // 0020): the owner's audit trail of who could see their car outlives the
 // viewer's account. `status <> 'revoked'` makes a re-run affect zero rows
 // instead of re-stamping revoked_at, so the step is idempotent.
+// `revoked_by = 'grantee'` (migration 0051, MYR-609): the person holding the
+// grant ended it, by deleting their account. It is the same author the §7.5.7
+// leave stamps and for the same reason — this is the grantee's own act — and it
+// is inert for the §7.5.8 extend gate that reads the column, since the owner
+// can no longer name a grantee who does not exist.
 const queryRevokeSharesReceived = `
 UPDATE go_vehicle_shares
-SET status = 'revoked', revoked_at = NOW()
+SET status = 'revoked', revoked_at = NOW(), revoked_by = 'grantee'
 WHERE accepted_by_user_id = $1 AND status <> 'revoked'`
 
 // queryScrubSharesReceivedLabel erases the owner-typed label from every share

@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // The rider side of MYR-184 vehicle sharing: redeeming a code, and the two
@@ -67,11 +66,27 @@ func (r *VehicleShareRepo) RedeemCode(ctx context.Context, code, redeemerID stri
 		return nil, ErrShareSelfRedeem
 	}
 
+	// PER-ROW ACCEPT (MYR-609). Retire the rows that CANNOT become grants
+	// before trying to accept any of them — see supersedeCollidingRows.
+	superseded, err := supersedeCollidingRows(ctx, tx, ids, redeemerID)
+	if err != nil {
+		return nil, err
+	}
+
 	grants, err := acceptLockedRows(ctx, tx, ids, redeemerID)
 	if err != nil {
 		return nil, err
 	}
 	if len(grants) == 0 {
+		if superseded > 0 {
+			// EVERY row in the code collided with a grant this person
+			// already holds. Nothing was granted and nothing is left to
+			// grant, which is the already-shared conflict — the same 409
+			// the single-vehicle case has always produced, now reached
+			// only when it is the whole truth about the code rather than
+			// the fate of one row in it.
+			return nil, ErrShareAlreadyGranted
+		}
 		// The rows were locked and pending a statement ago; zero updated
 		// means the expiry boundary was crossed mid-transaction.
 		return nil, ErrShareNotFound
@@ -117,10 +132,15 @@ func lockPendingRows(ctx context.Context, tx pgx.Tx, code string) (ids []string,
 // granted. A unique violation here is the partial-unique accepted-grant index
 // refusing a SECOND grant of the same vehicle to the same person through a
 // different invite — a conflict, not a failure.
+//
+// supersedeCollidingRows has already retired every row this transaction could
+// see colliding, so reaching this mapping means a CONCURRENT redemption or
+// extend won the index between the two statements. The mapping stays because
+// that race is real; it is now the only way to get here.
 func acceptLockedRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID string) ([]ShareGrant, error) {
 	rows, err := tx.Query(ctx, queryAcceptSharesByID, ids, redeemerID)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isUniqueViolationOn(err, constraintAcceptedGrant) {
 			return nil, ErrShareAlreadyGranted
 		}
 		return nil, fmt.Errorf("store.RedeemCode: accept: %w", err)
@@ -129,18 +149,12 @@ func acceptLockedRows(ctx context.Context, tx pgx.Tx, ids []string, redeemerID s
 
 	grants, err := scanGrants(rows)
 	if err != nil {
-		if isUniqueViolation(err) {
+		if isUniqueViolationOn(err, constraintAcceptedGrant) {
 			return nil, ErrShareAlreadyGranted
 		}
 		return nil, fmt.Errorf("store.RedeemCode: accept: %w", err)
 	}
 	return grants, nil
-}
-
-// isUniqueViolation reports whether err is a Postgres 23505.
-func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation
 }
 
 // alreadyRedeemed serves the idempotent re-redeem: rows this same person

@@ -196,6 +196,11 @@ func TestSetupHTTPHandlers_RouteSurface(t *testing.T) {
 		{"share invite create (MYR-184, §7.5)", "/api/vehicles/clxyz1234567890abcdef/invites"},
 		{"share invite resend (MYR-184, §7.5)", "/api/invites/csh0123456789abcdef0123456789abcd/resend"},
 		{"share invite redeem (MYR-184, §7.5)", "/api/invites/redeem"},
+		// MYR-609 share extend (§7.5.8). Three segments deep under the same
+		// /api/vehicles/{vehicleId}/ prefix the create route claims, and one
+		// segment past the DELETE .../share leave route — so mounting it is
+		// also the assertion that neither sibling swallows it.
+		{"share extend (MYR-609, §7.5.8)", "/api/vehicles/clxyz1234567890abcdef/share/extend"},
 		// MYR-602 trips (§7.30). The create route lives under
 		// /api/vehicles/{vehicleId}/ and is served by the TRIP handler, which
 		// is exactly the cross-surface wiring mistake this test class exists

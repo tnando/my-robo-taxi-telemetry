@@ -59,7 +59,7 @@ func (r *VehicleShareRepo) CreateInvite(ctx context.Context, in CreateShareInvit
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if err := verifyOwnsAll(ctx, tx, in.OwnerUserID, in.VehicleIDs); err != nil {
+	if err := verifyOwnsAll(ctx, tx, "store.CreateInvite", in.OwnerUserID, in.VehicleIDs); err != nil {
 		return VehicleShare{}, err
 	}
 
@@ -123,38 +123,6 @@ func validateCreateInput(in CreateShareInviteInput) error {
 		}
 	}
 	return fmt.Errorf("store.CreateInvite: vehicle set omits path vehicle %s", in.PathVehicleID)
-}
-
-// verifyOwnsAll fails unless every requested vehicle belongs to the owner. It
-// compares COUNTS of distinct ids rather than checking membership one by one:
-// a duplicate id in the request must not let a foreign id slip through the
-// tally.
-func verifyOwnsAll(ctx context.Context, tx pgx.Tx, ownerID string, vehicleIDs []string) error {
-	want := make(map[string]struct{}, len(vehicleIDs))
-	for _, id := range vehicleIDs {
-		want[id] = struct{}{}
-	}
-
-	rows, err := tx.Query(ctx, queryShareOwnedVehicleIDs, vehicleIDs, ownerID)
-	if err != nil {
-		return fmt.Errorf("store.CreateInvite(owner=%s): ownership check: %w", ownerID, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return fmt.Errorf("store.CreateInvite(owner=%s): ownership scan: %w", ownerID, err)
-		}
-		delete(want, id)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("store.CreateInvite(owner=%s): ownership iterate: %w", ownerID, err)
-	}
-	if len(want) > 0 {
-		return ErrShareVehicleNotOwned
-	}
-	return nil
 }
 
 // mintUnusedShareCode draws codes until one is not already backing a live
@@ -298,15 +266,27 @@ func scanShare(row rowScanner) (VehicleShare, error) {
 	// that ever leaves this repository is the first-names-only one — the same
 	// discipline the vehicle catalog's owner name keeps.
 	var acceptedByName *string
+	// `expires_at` is NULLABLE since migration 0052: a row born ACCEPTED by
+	// §7.5.8 extend has no deadline because it has no credential. Scanned
+	// through a pointer and flattened to the ZERO time, which is the absence
+	// every reader already handles — `toShareInviteWire` omits `expiresAt`
+	// when it is zero, and the pending branch that reads it cannot run on a
+	// row that has none (the migration's CHECK requires both on a pending
+	// row). Widening the struct field to *time.Time instead would have made
+	// every caller learn a nil case for a value only one status ever has.
+	var expiresAt *time.Time
 	err := row.Scan(
 		&s.ID, &s.VehicleID, &s.OwnerUserID, &s.Label, &s.Permission,
 		&s.AllowRides, &s.SuspendedAt,
-		&s.Code, &s.Status, &s.CreatedAt, &s.ExpiresAt, &s.AcceptedAt,
+		&s.Code, &s.Status, &s.CreatedAt, &expiresAt, &s.AcceptedAt,
 		&s.AcceptedByUserID, &s.RevokedAt,
 		&acceptedByName,
 	)
 	if err != nil {
 		return VehicleShare{}, fmt.Errorf("scan vehicle share: %w", err)
+	}
+	if expiresAt != nil {
+		s.ExpiresAt = *expiresAt
 	}
 	s.AcceptedByName = ownerFirstNameToken(acceptedByName)
 	return s, nil

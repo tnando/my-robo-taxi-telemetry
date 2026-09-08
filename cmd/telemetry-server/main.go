@@ -591,6 +591,14 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 	if _, err := newShareAccessDispatcher(hub, shareAccessLogger).Subscribe(bus); err != nil {
 		return fmt.Errorf("subscribe share_access_revoked dispatcher: %w", err)
 	}
+	// MYR-609: the WIDENING mirror. Same shutdown properties as the
+	// revocation pipeline above — hub.Stop has already emptied the client set
+	// by the time step 2 drains, so a widening arriving at shutdown finds no
+	// sessions and returns 0, and it touches no pool.
+	shareAccessWidener := newShareWidenBusNotifier(bus, shareAccessLogger)
+	if _, err := newShareWidenDispatcher(hub, shareAccessLogger).Subscribe(bus); err != nil {
+		return fmt.Errorf("subscribe share_access_widened dispatcher: %w", err)
+	}
 
 	// The BACKSTOP: a periodic sweep that re-derives every connected user's
 	// access set from the database and closes anyone holding a vehicle they
@@ -821,6 +829,8 @@ func run() error { //nolint:funlen,cyclop,gocognit // composition root — seque
 		accessInvalidator: accessInvalidator,
 		// MYR-373: and the live-socket teardown that the cache bust cannot do.
 		shareAccessNotifier: shareAccessNotifier,
+		// MYR-609: and its widening mirror, for the same reason in reverse.
+		shareAccessWidener: shareAccessWidener,
 		// The same authenticator also owns the user-existence cache the
 		// account-deletion endpoint must drop (MYR-355).
 		sessionInvalidator: sessionInvalidator,
