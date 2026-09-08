@@ -52,25 +52,46 @@ import "time"
 // Charging is not consumption at all and must be excluded. The discriminator is
 // two-part, and the cheap half is authoritative:
 //
-//  1. THE CAR SAYS SO. `chargeState` (proto 179 DetailedChargeState) reads
-//     "Charging" or "Starting" while the pack is taking power from a cable. When
-//     the frame carries it, it decides, and no rate arithmetic is consulted.
-//  2. A RATE BOUND, for the frames that do not. `chargeState` is emitted on
-//     change with a 120s resend, so a gain can arrive on a frame that says
-//     nothing about charging. A gain is credited as regen only while it is
-//     within what regenerative braking could physically have returned over the
-//     elapsed interval; anything beyond that is treated as charging, dropped,
+//  1. THE CAR SAYS SO, AND IT IS THE LOAD-BEARING HALF. `chargeState` (proto
+//     179 DetailedChargeState) reads "Charging" or "Starting" while the pack is
+//     taking power from a cable. The value is LATCHED on the vehicle rather than
+//     read off the frame that carried the energy sample — the two fields stream
+//     on different cadences and only about one energy frame in four carries a
+//     charge state, so reading per frame answered the question three times out
+//     of four with silence (see lastChargeState in state.go). When the latch
+//     says charging, it decides, and no rate arithmetic is consulted.
+//  2. A RATE BOUND, AS A BACKSTOP FOR DC FAST CHARGING. It covers the window
+//     between a car starting to charge and the next `chargeState` the car
+//     emits — at most one 120s resend period — and it can only catch a session
+//     that adds MORE than regen physically could, which in practice means DC
+//     fast charging. An AC session is inside the allowance and is caught by
+//     rule 1 alone; that is why rule 1 is load-bearing rather than an
+//     optimisation. A gain beyond the bound is treated as charging, dropped,
 //     and the baseline rebased.
 const (
-	// maxRegenKw bounds the power regenerative braking can return to the pack.
-	// Tesla's own regen ceiling is in the 60-70 kW region across the S/3/X/Y
-	// line (higher on Plaid, which this bound is deliberately generous enough
-	// to cover). It is an UPPER bound used to reject charging, not an estimate
-	// of typical regen: being generous here costs a mis-credited gain on a car
-	// that is DC-charging below 70 kW while the drive is still open, and being
-	// stingy would silently discard real downhill regen on every mountain
-	// drive. The asymmetry favours generosity because rule 1 above catches the
-	// charging case outright whenever the car says anything at all.
+	// maxRegenKw bounds the AVERAGE power regenerative braking could have
+	// returned to the pack ACROSS AN INTERVAL, not the peak it can hit for an
+	// instant. Two consecutive energy samples are 30s apart at best, and the
+	// allowance below multiplies this figure by up to 60s of elapsed time, so
+	// what it has to cover is a whole minute of sustained braking averaged out —
+	// a descent that regenerates at 70 kW peak averages well under that once
+	// the level stretches are included. Tesla's own regen ceiling is in the
+	// 60-70 kW region across the S/3/X/Y line and higher on Plaid, so as an
+	// average-over-a-minute bound 70 is generous by design.
+	//
+	// WHAT IT IS FOR is rejecting DC FAST CHARGING in the window before the car
+	// next reports its charge state — a 150 kW session puts ~1.25 kWh in per
+	// 30s step against an allowance of ~0.58 kWh, so it is refused on the first
+	// step. WHAT IT CANNOT DO is catch AC charging: 11 kW is ~0.09 kWh per step,
+	// entirely inside the allowance, and no bound that admits real regen can
+	// exclude it. The car's own latched `chargeState` (rule 1 above) is what
+	// catches that case, which is why this is a backstop and not the
+	// discriminator.
+	//
+	// THE ASYMMETRY IS DELIBERATE. Being generous costs a mis-credited gain on a
+	// car DC-charging below 70 kW that has not reported a charge state yet;
+	// being stingy would silently discard real downhill regen on every mountain
+	// drive, on every car, forever.
 	maxRegenKw = 70.0
 
 	// maxRegenWindow caps how much elapsed time one gain may be credited
