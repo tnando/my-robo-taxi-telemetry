@@ -10,17 +10,29 @@ package store
 //
 // ── WHY ANOTHER COPY ────────────────────────────────────────────────────────
 //
-// This is the platform's FIFTH spelling of the same three-rung ladder, beside
-// ownerNameLadderExpr (keyed on `"Vehicle"."userId"`), acceptedByNameExpr
-// (`accepted_by_user_id`), queryTripOwnerFirstName's (`go_trips.owner_user_id`)
-// and the two ungated ride ladders. Every one of them exists because the
-// embedding statements are `const`: a Go constant cannot take the key column as
-// a parameter, and turning these into runtime-formatted SQL to save the copies
-// would put string concatenation next to statements that decide who may see a
-// car. The duplication is CHECKED rather than trusted —
-// TestConfirmationGateIsSharedAndScoped asserts this one carries the
-// confirmation probe, and TestEveryNameLadderTrimsEveryRung asserts every rung
-// is TRIM-guarded, both in owner_name_test.go.
+// This is the platform's SIXTH spelling of the same three-rung ladder, and the
+// FOURTH that carries MYR-583's confirmation gate. The full inventory, because
+// two different counts are quoted around this code and each is right about a
+// different set:
+//
+//  1. ownerNameLadderExpr        `"Vehicle"."userId"`      GATED
+//  2. acceptedByNameExpr         `accepted_by_user_id`     GATED
+//  3. queryTripOwnerFirstName    `go_trips.owner_user_id`  GATED (inline probe)
+//  4. requesterIdentitySelect    the ride surfaces         ungated, deliberately
+//  5. queryOwnerFirstNameSources the redeem screen         ungated, deliberately
+//  6. addedByNameExpr            `p.added_by_user_id`      GATED  ← this one
+//
+// So: SIXTH of six ladders, FOURTH of four gated ones. owner_name_test.go's
+// TestConfirmationGateIsSharedAndScoped counts the gated set (hence "fourth")
+// and TestEveryNameLadderTrimsEveryRung counts all six.
+//
+// Every one of them exists because the embedding statements are `const`: a Go
+// constant cannot take the key column as a parameter, and turning these into
+// runtime-formatted SQL to save the copies would put string concatenation next
+// to statements that decide who may see a car. The duplication is CHECKED
+// rather than trusted — TestConfirmationGateIsSharedAndScoped asserts this one
+// carries the confirmation probe, and TestEveryNameLadderTrimsEveryRung asserts
+// every rung of all six is TRIM-guarded, both in owner_name_test.go.
 //
 // ── SAME GATE, SAME REDUCTION, SAME ABSENCE ─────────────────────────────────
 //

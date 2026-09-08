@@ -128,18 +128,9 @@ func (h *TripHandler) ServeAddablePeople(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// `{people: [...]}` with NO cursor, the same envelope decision §7.30.2
-	// makes: a car has a handful of share-holders, not a feed, and an SDK
-	// pagination helper must not mistake this for a page and go looking for a
-	// cursor that will never be there.
-	items := make([]map[string]any, 0, len(people))
-	for _, p := range people {
-		items = append(items, map[string]any{
-			"shareId":     p.ShareID,
-			"displayName": p.Name,
-		})
-	}
-	h.writeJSON(w, http.StatusOK, map[string]any{"people": items})
+	// The envelope, and the argument for its shape, live in trip_wire.go beside
+	// every other wire projection on this surface.
+	h.writeJSON(w, http.StatusOK, addablePeopleWire(people))
 }
 
 // participantNameFor returns the roster name of one user, or "" when they are

@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -129,8 +128,11 @@ func lockTripForOwner(ctx context.Context, tx pgx.Tx, tripID, ownerUserID string
 	return vehicleID, nil
 }
 
-// tripDeletedAuditMetadata is the `trip.deleted` row's metadata: TWO OPAQUE
-// CUIDS ACROSS THE WHOLE ROW AND NOTHING ELSE (CG-DL-5, P0-only).
+// tripDeletedAuditMetadata is the `trip.deleted` row's metadata: ONE OPAQUE
+// CUID IN THE `metadata` COLUMN, which is TWO across the whole row once
+// `targetId` (the trip) is counted — the figure rest-api.md §7.30.10 and
+// data-lifecycle.md §4.2 quote. P0 throughout (CG-DL-5). Its MYR-618 sibling
+// carries one more, the share id, and its comment counts the same two ways.
 //
 // Deliberately NOT the trip name — P1 user content sealed at rest
 // (data-classification.md §1.25), and an audit row is a place a value reaches
@@ -142,27 +144,9 @@ type tripDeletedAuditMetadata struct {
 }
 
 // insertTripDeletedAudit writes the user-initiated `trip.deleted` AuditLog row
-// inside the deletion transaction, reusing the same-package queryAuditInsert
-// column list (single source of truth shared with AuditRepo — keeps CG-DL-8
-// column parity automatic).
+// inside the deletion transaction and BEFORE the deletes (CG-DL-3), through the
+// shared writer in trip_audit.go.
 func insertTripDeletedAudit(ctx context.Context, tx pgx.Tx, ownerUserID, tripID, vehicleID string) error {
-	meta, err := json.Marshal(tripDeletedAuditMetadata{VehicleID: vehicleID})
-	if err != nil {
-		return fmt.Errorf("marshal audit metadata: %w", err)
-	}
-	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, queryAuditInsert,
-		newProvisionID(),               // id (cuid)
-		ownerUserID,                    // userId (the owner who deleted it)
-		now,                            // timestamp
-		string(AuditActionTripDeleted), // action
-		auditTargetTypeTrip,            // targetType
-		tripID,                         // targetId
-		auditInitiatorUser,             // initiator
-		meta,                           // metadata (one opaque cuid)
-		now,                            // createdAt
-	); err != nil {
-		return fmt.Errorf("insert audit: %w", err)
-	}
-	return nil
+	return insertTripAudit(ctx, tx, AuditActionTripDeleted, ownerUserID, tripID,
+		tripDeletedAuditMetadata{VehicleID: vehicleID})
 }

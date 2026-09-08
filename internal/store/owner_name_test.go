@@ -124,9 +124,11 @@ func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
 	gated := map[string]struct{ sql, probe string }{
 		"ownerNameLadderExpr": {ownerNameLadderExpr, ownerNameConfirmedExpr},
 		"acceptedByNameExpr":  {acceptedByNameExpr, acceptedByNameConfirmedExpr},
-		// MYR-618's fourth ladder: the name of whoever ADDED a roster entry to a
-		// trip. Same counterparty argument as its neighbour — a name shown to
-		// people who are not its owner — so it gets the same gate.
+		// MYR-618's ladder, the FOURTH GATED one of the platform's six (the
+		// full inventory is in trip_added_by_name.go's header). The name of
+		// whoever ADDED a roster entry to a trip: same counterparty argument as
+		// its neighbour — a name shown to people who are not its owner — so it
+		// gets the same gate.
 		"addedByNameExpr": {addedByNameExpr, addedByNameConfirmedExpr},
 	}
 	for name, g := range gated {
@@ -137,6 +139,19 @@ func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
 			}
 		})
 	}
+
+	// THE FOURTH GATED LADDER, asserted separately because its probe is INLINE
+	// rather than a named constant: `queryTripOwnerFirstName` is a whole
+	// statement, not an expression spliced into one, so there is no shared
+	// `…ConfirmedExpr` for it to acquire and the map above cannot hold it. It
+	// is gated all the same, and losing that would publish an unconfirmed name
+	// on the trip card exactly as losing any of the three above would.
+	t.Run("queryTripOwnerFirstName carries the confirmation probe", func(t *testing.T) {
+		if !strings.Contains(queryTripOwnerFirstName, "go_profile_name_confirmations") {
+			t.Error("queryTripOwnerFirstName no longer requires a confirmation — the trip " +
+				"card would name an owner who never went through the naming prompt (MYR-583)")
+		}
+	})
 
 	// The pair the wire and the gate share: both must reach the confirmation
 	// through the ladder, not around it.
@@ -174,14 +189,17 @@ func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
 // TestEveryNameLadderTrimsEveryRung is the CROSS-LADDER invariant, and it is the
 // one assertion in this file that spans files.
 //
-// The platform resolves "what is this person called?" through five sibling SQL
+// The platform resolves "what is this person called?" through SIX sibling SQL
 // ladders — this package's `ownerNameLadderExpr` (the vehicle catalog + the
 // offerability gate), `acceptedByNameExpr` (the share listing),
+// `queryTripOwnerFirstName` (the trip card's own owner),
 // `requesterIdentitySelect` (the ride surfaces), `queryOwnerFirstNameSources`
 // (the redeem screen and the push copy) and `addedByNameExpr` (MYR-618's trip
-// roster attribution). They cannot yet be ONE constant: each
-// keys its subselects on a different column, and the statements that embed them
-// are `const`, so a key-parameterized helper would force them all to `var`.
+// roster attribution). The inventory, and which four are confirmation-gated, is
+// written out once in trip_added_by_name.go's header. They cannot yet be ONE
+// constant: each keys its subselects on a different column, and the statements
+// that embed them are `const`, so a key-parameterized helper would force them
+// all to `var`.
 //
 // What they CAN be is identical in spelling, and this test is what holds that.
 // Until MYR-581 the two older ladders omitted `TRIM`, which is not cosmetic: a top
@@ -196,6 +214,7 @@ func TestEveryNameLadderTrimsEveryRung(t *testing.T) {
 		"requesterIdentitySelect":    requesterIdentitySelect,
 		"queryOwnerFirstNameSources": queryOwnerFirstNameSources,
 		"addedByNameExpr":            addedByNameExpr,
+		"queryTripOwnerFirstName":    queryTripOwnerFirstName,
 	}
 	for name, sql := range ladders {
 		t.Run(name, func(t *testing.T) {

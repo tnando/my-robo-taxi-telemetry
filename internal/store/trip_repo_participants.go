@@ -2,12 +2,9 @@ package store
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // MYR-618: THE ROSTER, WIDENED TO EVERYBODY ON THE TRIP.
@@ -32,58 +29,6 @@ import (
 // remove anybody and cannot end anything. Every one of those stays owner-only,
 // enforced in the handler by refusing the whole request and here by the fact
 // that this file contains no statement that could do any of them.
-
-// tripAccessRow is the cheap role probe's result: the caller's relationship to
-// a trip plus the three columns that decide whether the trip is still live.
-//
-// Deliberately NOT a TripView. The full read decrypts a name, resolves a trim,
-// counts drives and reads a leg — five round trips to answer a question that is
-// "may this person act on this trip, and is it over?". A gate that costs that
-// much is a gate somebody eventually caches.
-type tripAccessRow struct {
-	VehicleID   string
-	OwnerUserID string
-	StartsAt    time.Time
-	EndsAt      time.Time
-	EndedAt     *time.Time
-	Role        string
-}
-
-// ended reports whether the window has closed, by the SAME rule Trip.StatusAt
-// applies: a stamped `ended_at` is terminal on its own, and otherwise the
-// scheduled end decides.
-func (r tripAccessRow) ended(now time.Time) bool {
-	if r.EndedAt != nil {
-		return true
-	}
-	return !now.Before(r.EndsAt)
-}
-
-// tripAccessFor resolves the caller's role on one trip, or ErrTripNotFound.
-//
-// ONE ANSWER FOR "NO SUCH TRIP" AND "NOT YOUR TRIP", the 404-not-403 rule this
-// surface is built on, applied through the same `tripRoleExpr` every other read
-// uses rather than through a second predicate that could drift from it.
-func tripAccessFor(ctx context.Context, q tripQuerier, tripID, userID string) (tripAccessRow, error) {
-	var (
-		row  tripAccessRow
-		role *string
-	)
-	err := q.QueryRow(ctx, queryTripRoleForUser, userID, tripID).Scan(
-		&row.VehicleID, &row.OwnerUserID, &row.StartsAt, &row.EndsAt, &row.EndedAt, &role,
-	)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return tripAccessRow{}, ErrTripNotFound
-	case err != nil:
-		return tripAccessRow{}, fmt.Errorf("trip access probe: %w", err)
-	}
-	if role == nil || *role == "" {
-		return tripAccessRow{}, ErrTripNotFound
-	}
-	row.Role = *role
-	return row, nil
-}
 
 // AddParticipants admits people to an existing trip on behalf of ANY live
 // member — the owner or a participant (MYR-618, §7.30.4).
@@ -286,45 +231,32 @@ func liveParticipantUserIDs(ctx context.Context, q tripQuerier, tripID string) (
 }
 
 // tripParticipantAddedAuditMetadata is the `trip.participant_added` row's
-// metadata: TWO OPAQUE CUIDS AND NOTHING ELSE (CG-DL-5, P0-only).
+// metadata: TWO OPAQUE CUIDS AND NOTHING ELSE IN THE `metadata` COLUMN, which
+// is THREE across the whole row once `targetId` (the trip) is counted — that is
+// the number rest-api.md §7.30.4 and data-lifecycle.md §4.2 quote, and the two
+// figures differ only in scope. P0 throughout (CG-DL-5).
 //
 // The SHARE id rather than the added person's user id, deliberately. The share
 // already names them to anybody entitled to ask this question — it is a row on
 // the car's own grant list — while a user id would be a durable cross-surface
 // identifier for a third party who is not the subject of this row. No trip
 // name (P1 user content, sealed at rest) and no names of any kind.
+//
+// The `userId` column is the ACTOR and is not counted among the three: it is
+// who the row is FILED UNDER, not something the row discloses.
 type tripParticipantAddedAuditMetadata struct {
 	VehicleID string `json:"vehicleId"`
 	ShareID   string `json:"shareId"`
 }
 
-// insertTripParticipantAddedAudit writes one `trip.participant_added` row inside
-// the roster transaction, reusing the same-package queryAuditInsert column list
-// (the single source of truth AuditRepo writes through — which is what keeps
-// CG-DL-8 column parity automatic).
+// insertTripParticipantAddedAudit writes one `trip.participant_added` row
+// inside the roster transaction, through the shared writer in trip_audit.go.
 //
 // `userId` IS THE ACTOR, and that is the entire point of the row: since MYR-618
 // the person who widened a roster is no longer necessarily its owner.
 func insertTripParticipantAddedAudit(
 	ctx context.Context, tx tripQuerier, actorUserID, tripID, vehicleID, shareID string,
 ) error {
-	meta, err := json.Marshal(tripParticipantAddedAuditMetadata{VehicleID: vehicleID, ShareID: shareID})
-	if err != nil {
-		return fmt.Errorf("marshal audit metadata: %w", err)
-	}
-	now := time.Now().UTC()
-	if _, err := tx.Exec(ctx, queryAuditInsert,
-		newProvisionID(),                        // id (cuid)
-		actorUserID,                             // userId — the OWNER or the PARTICIPANT who added
-		now,                                     // timestamp
-		string(AuditActionTripParticipantAdded), // action
-		auditTargetTypeTrip,                     // targetType
-		tripID,                                  // targetId
-		auditInitiatorUser,                      // initiator
-		meta,                                    // metadata (two opaque cuids)
-		now,                                     // createdAt
-	); err != nil {
-		return fmt.Errorf("insert audit: %w", err)
-	}
-	return nil
+	return insertTripAudit(ctx, tx, AuditActionTripParticipantAdded, actorUserID, tripID,
+		tripParticipantAddedAuditMetadata{VehicleID: vehicleID, ShareID: shareID})
 }

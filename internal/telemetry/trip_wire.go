@@ -59,6 +59,38 @@ func tripStatusOf(t TripData, now time.Time) string {
 	}
 }
 
+// addablePeopleWire projects §7.30.11's response envelope.
+//
+// It lives here beside `tripWire` rather than inline in the handler, so every
+// shape this surface puts on the wire is written in one file and a reader
+// checking the contract against the code has one place to look — which is the
+// same reason `tripWire` is here and not in `trip_detail_handler.go`.
+//
+// `{people: [...]}` WITH NO CURSOR, the same envelope decision §7.30.2 makes: a
+// car has a handful of share-holders, not a feed, and an SDK pagination helper
+// must not mistake this for a page and go looking for a cursor that will never
+// be there.
+//
+// **EMPTY RATHER THAN NULL**, and the `make` with a zero length is what
+// guarantees it: everybody being aboard is a legitimate state of a trip the
+// caller is on, and `"people": null` would make a client branch on a case that
+// means exactly what the empty array means.
+//
+// TWO KEYS PER ROW AND NOTHING ELSE — no code, no email, no status, no
+// permission, no user id. The projection that produces them is narrow in the
+// store as well (see queryTripAddablePeople), so this is the second of two
+// places the same restriction holds rather than the only one.
+func addablePeopleWire(people []TripAddablePersonData) map[string]any {
+	items := make([]map[string]any, 0, len(people))
+	for _, p := range people {
+		items = append(items, map[string]any{
+			"shareId":     p.ShareID,
+			"displayName": p.Name,
+		})
+	}
+	return map[string]any{"people": items}
+}
+
 // tripWire projects one trip for one caller.
 //
 // callerID decides `userIsSelf` on each roster row and NOTHING ELSE. Everyone
