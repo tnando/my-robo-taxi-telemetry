@@ -55,8 +55,10 @@ func (r tripAccessRow) ended(now time.Time) bool {
 // tripAccessFor resolves the caller's role on one trip, or ErrTripNotFound.
 //
 // ONE ANSWER FOR "NO SUCH TRIP" AND "NOT YOUR TRIP", the 404-not-403 rule this
-// surface is built on, applied through the same `tripRoleExpr` every other read
-// uses rather than through a second predicate that could drift from it.
+// surface is built on. A caller whose grant on the car is suspended or revoked
+// falls into the same answer as a stranger, because the role resolves through
+// `tripMemberRoleExpr` — see this file's header, and the two expressions'
+// comments in trip_participant_queries.go.
 func tripAccessFor(ctx context.Context, q tripQuerier, tripID, userID string) (tripAccessRow, error) {
 	var (
 		row  tripAccessRow
