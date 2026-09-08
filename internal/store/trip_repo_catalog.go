@@ -19,9 +19,15 @@ import (
 // ActiveTripVehicleIDs returns the vehicles of the caller's OPEN windows, each
 // with the id of the trip that opens it.
 //
-// PARTICIPANT ROWS ONLY. An owner's own cars are the first leg of the catalog
-// already; re-emitting them here would produce duplicates the merge discards
-// anyway, and the owner's `activeTripId` is resolved per row instead.
+// PARTICIPANT ROWS ONLY, and that is right for THIS question: an owner's own
+// cars are the first leg of the catalog already, so re-emitting them here would
+// produce duplicates the merge discards anyway.
+//
+// ⚠ IT IS THE WRONG ANSWER TO THE OTHER QUESTION, which is what MYR-612 turned
+// on. "Which cars does a trip ADD to your catalog" and "which of your cars have
+// a window open right now" are different sets, and an owner's own car is in the
+// second and never in the first. ActiveTripIDsForUser answers that one; do not
+// point it back here.
 //
 // Returned as a map because the caller's next move is a lookup, and because a
 // caller on two open trips on the SAME car (legal — two owners cannot both own
@@ -54,6 +60,44 @@ func (r *TripRepo) ActiveTripVehicleIDs(ctx context.Context, userID string) (map
 	if err := rows.Err(); err != nil {
 		r.metrics.IncQueryError(op)
 		return nil, fmt.Errorf("TripRepo.ActiveTripVehicleIDs(%s): rows: %w", userID, err)
+	}
+	return out, nil
+}
+
+// ActiveTripIDsForUser returns vehicleID → tripID for EVERY open window the
+// caller is party to, INCLUDING the ones on cars they own.
+//
+// THE OWNER ARM IS THE POINT (MYR-612). This used to be served by
+// ActiveTripVehicleIDs above — the participant-only merge leg — so an owner's
+// own car never carried `activeTripId`. The iOS client registers its ActivityKit
+// push-to-start token for the trips it reads out of the catalog, so the owner of
+// the car on the trip registered nothing and got no leg card on their own trip.
+// The two questions look alike and are not: that one is "which cars does a trip
+// ADD", this one is "which of my cars have a window open".
+func (r *TripRepo) ActiveTripIDsForUser(ctx context.Context, userID string) (map[string]string, error) {
+	const op = "trip.active_ids"
+	start := time.Now()
+	defer func() { r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds()) }()
+
+	rows, err := r.pool.Query(ctx, queryActiveTripIDsForUser, userID)
+	if err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("TripRepo.ActiveTripIDsForUser(%s): %w", userID, err)
+	}
+	defer rows.Close()
+
+	out := make(map[string]string, 2)
+	for rows.Next() {
+		var vehicleID, tripID string
+		if err := rows.Scan(&vehicleID, &tripID); err != nil {
+			r.metrics.IncQueryError(op)
+			return nil, fmt.Errorf("TripRepo.ActiveTripIDsForUser(%s): scan: %w", userID, err)
+		}
+		out[vehicleID] = tripID
+	}
+	if err := rows.Err(); err != nil {
+		r.metrics.IncQueryError(op)
+		return nil, fmt.Errorf("TripRepo.ActiveTripIDsForUser(%s): rows: %w", userID, err)
 	}
 	return out, nil
 }

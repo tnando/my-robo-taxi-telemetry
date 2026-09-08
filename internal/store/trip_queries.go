@@ -476,6 +476,47 @@ WHERE t.vehicle_id = $2
 ORDER BY t.starts_at DESC
 LIMIT 1`
 
+// queryActiveTripIDsForUser answers "which of the cars in this caller's catalog
+// — however they got there — have a window open right now?".
+//
+// ⚠ IT IS NOT THE SAME QUESTION AS THE MERGE LEG BELOW, AND CONFLATING THEM WAS
+// MYR-612. That statement lists the cars a trip ADDS to the catalog, which is
+// participant rows only — an owner's cars are the catalog's first leg already.
+// This one ANNOTATES rows that are already there, and an owner's own car is the
+// row a trip is most often opened on. One statement served both, so `VehicleSummary.activeTripId`
+// was never present on an owner's own row: the app registers its ActivityKit
+// push-to-start token from `activeTripIDsForActivityTokens`, which reads the
+// catalog, so the owner of the car on the trip never registered a token and
+// never got a leg card. Nabil, 2026-09-08.
+//
+// The owner arm carries no share join — an owner holds no grant — and the
+// participant arm carries the full live-share predicate, so the field can never
+// name a trip whose access the caller does not actually have. It is the same
+// two-armed shape as queryActiveTripIDForUserVehicle, widened from one vehicle
+// to all of them, and the window predicate is spelled the one way it is spelled
+// everywhere (trips.md §2).
+//
+// DISTINCT ON (vehicle_id) with the newest window first: a car cannot legally
+// carry two open windows — the create endpoint's overlap probe refuses it — but
+// the catalog must project ONE id per row whatever the table holds.
+const queryActiveTripIDsForUser = `
+SELECT DISTINCT ON (vehicle_id) vehicle_id, id FROM (
+	SELECT t.vehicle_id, t.id, t.starts_at
+	FROM go_trips t
+	WHERE t.owner_user_id = $1
+	  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+	UNION ALL
+	SELECT t.vehicle_id, t.id, t.starts_at
+	FROM go_trip_participants p
+	JOIN go_trips t ON t.id = p.trip_id
+	JOIN go_vehicle_shares s
+	  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+	 AND s.status = 'accepted' AND s.suspended_at IS NULL
+	WHERE p.user_id = $1 AND p.left_at IS NULL
+	  AND t.starts_at <= NOW() AND NOW() < COALESCE(t.ended_at, t.ends_at)
+) w
+ORDER BY vehicle_id, starts_at DESC`
+
 // queryActiveTripVehiclesForUser is the CATALOG's third merge leg: the vehicles
 // of the caller's open windows, as catalog rows, with the trip id attached.
 //
