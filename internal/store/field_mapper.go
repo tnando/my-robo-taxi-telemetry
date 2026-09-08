@@ -32,7 +32,7 @@ var fieldAppliers = map[telemetry.FieldName]fieldApplier{
 	telemetry.FieldFSDMiles:         applyFloat(func(u *VehicleUpdate) **float64 { return &u.FsdMilesSinceReset }),
 	telemetry.FieldGear:             applyString(func(u *VehicleUpdate) **string { return &u.GearPosition }),
 	telemetry.FieldLocation:         applyLocation,
-	telemetry.FieldDestinationName:  applyString(func(u *VehicleUpdate) **string { return &u.DestinationName }),
+	telemetry.FieldDestinationName:  applyDestinationName,
 	telemetry.FieldDestLocation:     applyDestLocation,
 	telemetry.FieldOriginLocation:   applyOriginLocation,
 	telemetry.FieldMinutesToArrival: applyFloatAsInt(func(u *VehicleUpdate) **int { return &u.EtaMinutes }),
@@ -173,6 +173,38 @@ func applyFloat(target func(u *VehicleUpdate) **float64) fieldApplier {
 		*target(u) = val.FloatVal
 		return true
 	}
+}
+
+// applyDestinationName folds the car's navigation destination, and IGNORES A
+// PRESENT-BUT-EMPTY ONE (MYR-612 review).
+//
+// ⚠ AN EMPTY NAME IS NOT A CANCELLED ROUTE. Tesla streams DELTAS, and on
+// 2026-09-08 a car four minutes into a leg sent a frame whose destination name
+// was present-but-empty while its `minutesToArrival` still read 98 and the dash
+// still showed the place. Through applyString that empty value was a real
+// write: `destinationNameEnc` was NULLed and its retired plaintext scrubbed, so
+// the snapshot and every WebSocket subscriber said "no destination" while the
+// leg's Live Activity, whose detector debounces exactly this delta
+// (Config.LegClearGrace), still said the car was en route to a named place. Two
+// surfaces of one fact, disagreeing, from one frame.
+//
+// THE CANCEL HAS ITS OWN CHANNEL AND IS UNAFFECTED: a car that really ends
+// navigation marks the field INVALID, which reaches the writer through
+// ClearFields (navFieldColumns above) and still NULLs the column. So the
+// column keeps its last non-empty name until either that signal arrives or the
+// driver sets a new destination — which is the debounce's rule, applied to the
+// row rather than to the leg.
+//
+// SCOPED TO THIS FIELD deliberately. `gear` and `chargeState` have the same
+// latent shape and neither has produced a defect; widening the rule to every
+// string would change the behaviour of columns this issue has no evidence
+// about.
+func applyDestinationName(u *VehicleUpdate, val events.TelemetryValue) bool {
+	if val.StringVal == nil || *val.StringVal == "" {
+		return false
+	}
+	u.DestinationName = val.StringVal
+	return true
 }
 
 // applyString returns an applier that assigns a string value to the field

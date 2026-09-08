@@ -499,3 +499,47 @@ func ptrVal[T any](p *T) any {
 	}
 	return *p
 }
+
+// TestAnEmptyDestinationNameIsNotACancel — MYR-612 review.
+//
+// Tesla streams DELTAS, and the incident's frame carried a present-but-EMPTY
+// destination name while its arrival estimate still read 98 minutes. Written
+// through, that empty value NULLed `destinationNameEnc` and scrubbed its
+// retired plaintext, so the snapshot and every WebSocket subscriber said "no
+// destination" while the leg card — whose detector debounces exactly this delta
+// — still said the car was en route to a named place.
+func TestAnEmptyDestinationNameIsNotACancel(t *testing.T) {
+	empty := mapTelemetryToUpdate(map[string]events.TelemetryValue{
+		string(telemetry.FieldDestinationName): {StringVal: strPtr("")},
+		string(telemetry.FieldMinutesToArrival): {FloatVal: func() *float64 {
+			v := 98.0
+			return &v
+		}()},
+	})
+	if empty == nil {
+		t.Fatal("the frame carried an arrival estimate; it is not an empty update")
+	}
+	if empty.DestinationName != nil {
+		t.Errorf("DestinationName = %q, want unset — an empty delta is not a cancel, "+
+			"and writing it blanks the row while the leg card still says en route",
+			ptrVal(empty.DestinationName))
+	}
+	if slices.Contains(empty.ClearFields, "destinationName") {
+		t.Error("an empty name reached ClearFields; only the car marking the field " +
+			"INVALID means navigation was cancelled")
+	}
+
+	// THE REAL CANCEL IS UNTOUCHED, and so is a real name.
+	cancelled := mapTelemetryToUpdate(map[string]events.TelemetryValue{
+		string(telemetry.FieldDestinationName): {Invalid: true},
+	})
+	if cancelled == nil || !slices.Contains(cancelled.ClearFields, "destinationName") {
+		t.Errorf("an invalid destinationName no longer clears the column: %+v", cancelled)
+	}
+	named := mapTelemetryToUpdate(map[string]events.TelemetryValue{
+		string(telemetry.FieldDestinationName): {StringVal: strPtr("Element by Marriott Sedona")},
+	})
+	if named == nil || ptrVal(named.DestinationName) != "Element by Marriott Sedona" {
+		t.Errorf("a real destination no longer applies: %+v", named)
+	}
+}
