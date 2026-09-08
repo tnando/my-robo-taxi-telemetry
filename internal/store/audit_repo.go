@@ -137,6 +137,28 @@ const (
 	// two opaque cuids across the row and its metadata, no VIN (P1), and no list
 	// of the shares that were revoked.
 	AuditActionDriverLinkSupersededByOwner AuditAction = "vehicle.driver_link_superseded_by_owner"
+
+	// AuditActionTripDeleted records that a trip's OWNER deleted it
+	// (MYR-607, rest-api.md §7.30.10, DELETE /api/trips/{tripId}).
+	//
+	// IT IS THE ONLY RECORD THE PARTICIPANTS HAVE. Everything else about the
+	// window goes: the roster, the legs, the tokens and the trip row itself,
+	// in one transaction — so if somebody asks why a trip they were on
+	// vanished from their list, this row is the answer, and it is written by
+	// the same rule that gave the Go server `vehicle_deleted`: this server
+	// owns the endpoint, so it owns the row.
+	//
+	// Written inside the deletion transaction and BEFORE the deletes (CG-DL-3).
+	// `targetType='trip'`, `targetId`=the trip's cuid, `userId`=the owner,
+	// `initiator='user'`, `metadata={vehicleId}` — TWO OPAQUE CUIDS ACROSS THE
+	// WHOLE ROW AND NOTHING ELSE (CG-DL-5). Deliberately no trip NAME (P1 user
+	// content sealed at rest, data-classification.md §1.25) and no participant
+	// list: who was on somebody's road trip is a fact about those people, and
+	// they are not the subject of this row.
+	//
+	// DOTTED, like `vehicle.owner_approval_acknowledged`: it reads as a
+	// trip-scoped sub-action rather than as a platform lifecycle verb.
+	AuditActionTripDeleted AuditAction = "trip.deleted"
 )
 
 // AuditLog targetType / initiator enum values used by Go-emitted rows
@@ -155,6 +177,13 @@ const (
 	// grouped by the car they belong to, and the drive ids it covers no longer
 	// exist by the time anyone reads it (data-lifecycle.md §5.4).
 	auditTargetTypeDrive = "drive"
+	// auditTargetTypeTrip marks a trip window as the affected entity — used by
+	// the `trip.deleted` row (MYR-607), whose targetId is the trip's own cuid.
+	// A trip is a Go-owned aggregate rather than a Prisma record, which is why
+	// this member arrives later than its three neighbours: nothing before
+	// MYR-602 could be the subject of an audit row that was not a vehicle, a
+	// user or a batch of drives.
+	auditTargetTypeTrip = "trip"
 	// auditInitiatorUser marks an action the end user triggered via UI/API.
 	auditInitiatorUser = "user"
 	// auditInitiatorSystemPruner marks an action initiated by the background
