@@ -2,6 +2,16 @@ package store
 
 // EVERY STATEMENT THAT READS OR WRITES go_trip_participants, in one file.
 //
+// ⚠ IT INHERITS trip_queries.go's DELIBERATE EXCEPTION TO THE 300-LINE FILE CAP
+// (CLAUDE.md "File Rules"), and claims it explicitly rather than by proximity.
+// The parent file's argument applies verbatim: the cap exists so a file has one
+// subject, this file's subject is "the membership statements, together", and the
+// invariants are properties OF THE SET. Splitting it further — the upsert here,
+// the departures there, the picker somewhere else — is precisely the split by
+// operation the parent header argues against, and it would put the statement
+// that decides whether an owner's removal is reversible in a different file from
+// the one that reverses it.
+//
 // A SIBLING OF trip_queries.go RATHER THAN A DEPARTURE FROM IT. That file's
 // header states the rule this one obeys: the statements are kept together so
 // the authorization-relevant set can be read at once, and the three invariants
