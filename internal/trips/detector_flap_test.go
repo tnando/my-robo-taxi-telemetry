@@ -331,3 +331,45 @@ func TestARouteClearedWhileParkedOpensNoPhantomLeg(t *testing.T) {
 		t.Errorf("push-to-start fan-outs = %d, want 1", got)
 	}
 }
+
+// TestAClearArrivingWithItsOwnEstimateStillCloses is the incident's OWN frame
+// shape, run forward to the ending it was supposed to reach (MYR-612 review).
+//
+// Tesla sent the empty name and `minutesToArrival` in ONE frame, so the clear
+// stamp and the estimate stamp were the same instant. The confirmation rule
+// asked whether the last estimate came STRICTLY BEFORE the clear, which for
+// equal stamps is false — and false for ever after, since any later frame
+// carrying an estimate pushed the estimate stamp past the clear. A route the
+// driver really did cancel could then never close its leg: the card sat on the
+// lock screen until the window itself lapsed.
+//
+// The rule is staleness, and staleness alone: no estimate for a whole grace.
+func TestAClearArrivingWithItsOwnEstimateStillCloses(t *testing.T) {
+	d, _, legs, _, activities := newTestDetector(t)
+	grace := int(d.cfg.LegClearGrace.Seconds())
+
+	feed(d, []frame{
+		underway(),
+		// The incident's frame: both facts in one delta, same timestamp.
+		{230, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName):  dest(""),
+			string(telemetry.FieldSpeed):            speed(60),
+			string(telemetry.FieldMinutesToArrival): speed(98),
+		}},
+		// Then silence on both — the shape of a real cancellation.
+		{230 + grace + 1, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed): speed(60),
+		}},
+	})
+
+	open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 0 {
+		t.Fatalf("open legs = %d, want 0 — a cancelled route must still close its leg", len(open))
+	}
+	if len(activities.ends) != 1 {
+		t.Fatalf("cards ended = %d, want 1 — the card outlived the route", len(activities.ends))
+	}
+	if got := activities.ends[0].Status; got != tripStatusCompleted {
+		t.Errorf("final card status = %q, want %q", got, tripStatusCompleted)
+	}
+}

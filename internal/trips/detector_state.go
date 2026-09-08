@@ -378,9 +378,22 @@ func (v *vehicleState) clearConfirmed(f fix, cfg Config) bool {
 	if f.at.Sub(v.destClearedAt) < cfg.LegClearGrace {
 		return false
 	}
-	// An estimate seen since the clear began, or recently enough to still speak
-	// for the route, holds the leg open.
-	return v.etaSeenAt.Before(v.destClearedAt) && f.at.Sub(v.etaSeenAt) >= cfg.LegClearGrace
+	// THE RULE IS "NO ESTIMATE RECENTLY", NOT "NO ESTIMATE SINCE THE CLEAR".
+	//
+	// This used to carry a second conjunct, `etaSeenAt.Before(destClearedAt)`,
+	// and it made a confirmed clear IMPOSSIBLE on the very sequence the
+	// debounce exists for. The incident's own frame carried the empty name and
+	// `minutesToArrival = 98` TOGETHER, so the two stamps were equal and
+	// `Before` was false; any later frame carrying an estimate pushed etaSeenAt
+	// past the clear for good. A genuinely cancelled route whose car had ever
+	// reported an estimate at or after the clear could then never close its leg
+	// — the card would sit on the lock screen until the window itself lapsed.
+	//
+	// Staleness is the whole question, and it is asked of the estimate alone: a
+	// car that has not said how long it has to go for a full grace has stopped
+	// claiming to be going anywhere. A zero etaSeenAt (a car that never
+	// reported one) is arbitrarily stale, which is the right answer for it.
+	return f.at.Sub(v.etaSeenAt) >= cfg.LegClearGrace
 }
 
 // clearPending reports whether the car is inside the debounce window.
