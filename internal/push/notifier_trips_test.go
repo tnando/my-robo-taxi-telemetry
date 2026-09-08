@@ -297,6 +297,24 @@ func TestNotifyTrip_ParticipantAddedCopy(t *testing.T) {
 			actorName: "", addedNames: []string{""},
 			wantTitle: "Someone added someone to your trip",
 		},
+		{
+			// ⚠ REVIEW FINDING 5. THE COUNT IS OVER THE PEOPLE ADDED, NOT OVER
+			// THE NAMES THAT RESOLVED. Three people gained live access to this
+			// owner's car; a banner reading "2 people" because one of them has
+			// not been through the naming prompt under-reports the one number
+			// this push exists to carry, and the gate that produces the empty
+			// name is common rather than exotic.
+			name:      "an unresolved name still counts",
+			actorName: "Nabil", addedNames: []string{"Joey", "", "Amruth"},
+			wantTitle: "Nabil added 3 people to your trip",
+		},
+		{
+			// And a SINGLE unresolved addition falls back rather than borrowing
+			// the count: "1 people" is not a sentence.
+			name:      "one unresolved addition is someone",
+			actorName: "Nabil", addedNames: []string{"  "},
+			wantTitle: "Nabil added someone to your trip",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -121,7 +121,8 @@
       "required": [
         "participantId",
         "name",
-        "userIsSelf"
+        "userIsSelf",
+        "addedByName"
       ],
       "description": "ONE PERSON ON THE TRIP. Participants are chosen from the vehicle's ACCEPTED share grants and from nowhere else: a trip cannot reach somebody the car is not already shared with, so adding a stranger is a share invite first and a trip edit second. EVERYBODY SEES THE WHOLE LIST — an owner sees all participants and a participant sees all participants, deliberately, because they are on a trip together and a card showing 'and 3 others' would make a shared window feel like a broadcast. The OWNER IS NOT IN THIS ARRAY: they are named by the sibling Trip.ownerFirstName and identified by Trip.role, so a client renders the owner separately rather than hunting for them among the participants. A REVOKED SHARE REMOVES THE PARTICIPANT — trip access can never outlive the grant it was drawn from — and a participant who leaves disappears from the array on the next read. Neither departure is distinguishable here from 'was never added', by design: this is a membership snapshot, not an audit log. Since MYR-618 each row also carries `addedByName` — the confirmed first name of whoever added this person — because the roster's writer is no longer necessarily the owner.",
       "properties": {

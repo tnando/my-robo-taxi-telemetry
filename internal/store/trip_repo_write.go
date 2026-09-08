@@ -124,6 +124,19 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // contract does not define that case, so the server picks the answer that
 // grants less.
 //
+// ⚠ AN ID IN BOTH LISTS IS SUBTRACTED FROM THE ADD SET BEFORE THE ADD RUNS,
+// not merely overwritten by the remove that follows (review finding 7). The
+// end STATE was already right — the remove lands second — but the add wrote a
+// `trip.participant_added` AuditLog row for a person the very same request took
+// off, and an audit row for an act that did not survive its own transaction is
+// exactly the record CG-DL-3 exists to keep from being written. It would also
+// have stamped the attribution column and put the person on the roster the
+// handler diffs for its push fan-out, so the owner could have been told
+// somebody joined a trip they were never on.
+//
+// The subtraction is what makes the documented rule ("ends up REMOVED") true of
+// everything the request touches rather than only of the roster.
+//
 // Split out of Update purely for the cognitive-complexity budget, but the seam
 // is a real one: this is the whole of "who is on the trip", and Update is the
 // whole of "what the trip is".
@@ -135,7 +148,8 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // allowed to make the request, and in nothing that reaches the database. The
 // REMOVE half has no counterpart and never will: removal stays owner-only.
 func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID, ownerUserID string, in UpdateTripInput) error {
-	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, true, in.AddParticipantIDs); err != nil {
+	adds := subtractStrings(in.AddParticipantIDs, in.RemoveParticipantIDs)
+	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, true, adds); err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
 			return err
 		}
@@ -188,6 +202,32 @@ func (r *TripRepo) resolvePatch(current TripView, in UpdateTripInput, now time.T
 		return "", time.Time{}, err
 	}
 	return sealed, endsAt, nil
+}
+
+// subtractStrings returns the members of `from` that are not in `remove`,
+// preserving order and skipping the empty string.
+//
+// Written here rather than as a general helper because its ONE caller is the
+// contradictory-request rule above, and its semantics are that rule: the
+// removal wins. A general set-difference in a utility file would be reached for
+// by something that meant the opposite.
+func subtractStrings(from, remove []string) []string {
+	if len(remove) == 0 {
+		return from
+	}
+	drop := make(map[string]bool, len(remove))
+	for _, id := range remove {
+		if id != "" {
+			drop[id] = true
+		}
+	}
+	out := make([]string, 0, len(from))
+	for _, id := range from {
+		if !drop[id] {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // removeParticipantsByShare marks the named memberships left. Keyed on the

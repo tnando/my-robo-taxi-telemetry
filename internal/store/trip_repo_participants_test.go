@@ -765,3 +765,52 @@ func TestTripRepo_AddablePeopleRefusesAnEndedTrip(t *testing.T) {
 		}
 	}
 }
+
+// TestTripRepo_AddAndRemoveInOnePatchAuditsNothing is review finding 7.
+//
+// The documented rule is that an id in BOTH lists ends up REMOVED, and the end
+// state was always right because the remove lands second. What was wrong is
+// everything the add did on its way past: a `trip.participant_added` audit row
+// for a person the same request took off, the attribution column stamped, and
+// the person momentarily on the roster the handler diffs for its push fan-out —
+// so the owner could have been told somebody joined a trip they were never on.
+func TestTripRepo_AddAndRemoveInOnePatchAuditsNothing(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	shareTwo := seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareOne})
+
+	view, err := repo.Update(ctx, trip.ID, shareOwnerA, store.UpdateTripInput{
+		AddParticipantIDs:    []string{shareTwo},
+		RemoveParticipantIDs: []string{shareTwo},
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	for _, p := range view.Participants {
+		if p.ParticipantID == shareTwo {
+			t.Fatalf("the contradictory id is on the roster: %+v", view.Participants)
+		}
+	}
+	if rows := participantAddedAuditRows(t, trip.ID); len(rows) != 0 {
+		t.Fatalf("audit rows = %+v, want none — the add never survived its own transaction", rows)
+	}
+	// The membership row must not exist at all: the add was skipped, so there
+	// was nothing for the remove to tombstone either.
+	var exists bool
+	if err := testPool.QueryRow(ctx, `
+SELECT EXISTS (SELECT 1 FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2)`,
+		trip.ID, shareViewer2).Scan(&exists); err != nil {
+		t.Fatalf("probe membership: %v", err)
+	}
+	if exists {
+		t.Error("the add wrote a membership row the same request removed")
+	}
+}

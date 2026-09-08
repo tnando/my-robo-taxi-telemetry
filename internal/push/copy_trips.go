@@ -123,23 +123,32 @@ func participantAddedAlert(car, actorName string, addedNames []string) alert {
 // past it; the count is legible at any length and the sheet behind the deep
 // link has the actual roster. One name is the overwhelmingly common case and is
 // worth spelling out.
+//
+// ⚠ THE COUNT IS OVER THE PEOPLE ADDED, NOT OVER THE NAMES THAT RESOLVED, and
+// the review round moved it: it counted the trimmed slice, so an add of three
+// people one of whom has not been through the naming prompt announced
+// "2 people" — a banner that under-reports how many people just gained live
+// access to the owner's car, which is the one number this push exists to carry.
+// Names can be absent (the MYR-583 confirmation gate is why, and it is common),
+// the COUNT never is.
+//
+// The single-addition arm therefore falls back rather than borrowing the count:
+// "someone" for one unresolved name, because "1 people" is not a sentence and
+// "1 person" would be a stranger way of saying the same thing.
 func addedPeopleLabel(names []string) string {
-	trimmed := make([]string, 0, len(names))
-	for _, n := range names {
-		if s := strings.TrimSpace(n); s != "" {
-			trimmed = append(trimmed, s)
-		}
-	}
-	switch len(trimmed) {
-	case 0:
-		// Every name failed to resolve, or the caller passed none. "someone"
-		// is still a true sentence, and the count would be a lie.
+	if len(names) == 0 {
+		// The caller passed none. Only reachable if the fan-out ran with an
+		// empty diff, which the handler guards against; "someone" is still a
+		// true sentence and a count would be a lie.
 		return "someone"
-	case 1:
-		return truncateLabel(trimmed[0])
-	default:
-		return strconv.Itoa(len(trimmed)) + " people"
 	}
+	if len(names) == 1 {
+		if only := strings.TrimSpace(names[0]); only != "" {
+			return truncateLabel(only)
+		}
+		return "someone"
+	}
+	return strconv.Itoa(len(names)) + " people"
 }
 
 // tripVehicleLabel is vehicleLabel with a DIFFERENT fallback, and the
