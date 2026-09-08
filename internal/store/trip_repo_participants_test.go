@@ -576,3 +576,192 @@ func TestTripRepo_RevokedParticipantCannotActOnTheTrip(t *testing.T) {
 		t.Errorf("AddablePeople err = %v, want ErrTripNotFound for a revoked grant-holder", err)
 	}
 }
+
+// TestTripRepo_OwnersRemoveSticks is the MYR-618 REVIEW FIX for the roster's
+// second hole: the upsert REVIVES a departed membership, so before migration
+// 0061 any participant could undo the owner's remove — the one roster verb this
+// feature deliberately kept owner-only — simply by re-sending the same share id.
+func TestTripRepo_OwnersRemoveSticks(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	shareTwo := seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour),
+		[]string{shareOne, shareTwo})
+
+	// The OWNER removes viewer 2.
+	if _, err := repo.Update(ctx, trip.ID, shareOwnerA, store.UpdateTripInput{
+		RemoveParticipantIDs: []string{shareTwo},
+	}); err != nil {
+		t.Fatalf("Update(remove): %v", err)
+	}
+
+	t.Run("the marker is on the row", func(t *testing.T) {
+		var removedByOwner bool
+		if err := testPool.QueryRow(ctx, `
+SELECT removed_by_owner FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+			trip.ID, shareViewer2).Scan(&removedByOwner); err != nil {
+			t.Fatalf("read marker: %v", err)
+		}
+		if !removedByOwner {
+			t.Fatal("removed_by_owner = false after an owner's remove")
+		}
+	})
+
+	t.Run("a participant cannot add them back", func(t *testing.T) {
+		_, err := repo.AddParticipants(ctx, trip.ID, shareViewer1, []string{shareTwo})
+		if !errors.Is(err, store.ErrTripParticipantOwnerRemoved) {
+			t.Fatalf("err = %v, want ErrTripParticipantOwnerRemoved", err)
+		}
+		// AND NOTHING WAS APPLIED — the refusal is all-or-nothing, so the
+		// transaction rolled back and the row is still departed.
+		var leftAt *time.Time
+		if err := testPool.QueryRow(ctx, `
+SELECT left_at FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+			trip.ID, shareViewer2).Scan(&leftAt); err != nil {
+			t.Fatalf("read membership: %v", err)
+		}
+		if leftAt == nil {
+			t.Fatal("the refused add revived the row anyway")
+		}
+	})
+
+	t.Run("a participant's picker does not offer them", func(t *testing.T) {
+		people, err := repo.AddablePeople(ctx, trip.ID, shareViewer1)
+		if err != nil {
+			t.Fatalf("AddablePeople(participant): %v", err)
+		}
+		for _, p := range people {
+			if p.ShareID == shareTwo {
+				t.Fatalf("a participant's picker offered an owner-removed person: %+v", people)
+			}
+		}
+	})
+
+	t.Run("the OWNER's picker still offers them", func(t *testing.T) {
+		// Otherwise the removal would be irreversible: the owner is the only
+		// person who may undo it, and a picker that hid the row would strand it.
+		people, err := repo.AddablePeople(ctx, trip.ID, shareOwnerA)
+		if err != nil {
+			t.Fatalf("AddablePeople(owner): %v", err)
+		}
+		found := false
+		for _, p := range people {
+			if p.ShareID == shareTwo {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("the owner's picker withheld their own removal: %+v", people)
+		}
+	})
+
+	t.Run("the OWNER re-adds them, and the marker clears", func(t *testing.T) {
+		if _, err := repo.Update(ctx, trip.ID, shareOwnerA, store.UpdateTripInput{
+			AddParticipantIDs: []string{shareTwo},
+		}); err != nil {
+			t.Fatalf("Update(re-add): %v", err)
+		}
+		var removedByOwner bool
+		var leftAt *time.Time
+		if err := testPool.QueryRow(ctx, `
+SELECT removed_by_owner, left_at FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+			trip.ID, shareViewer2).Scan(&removedByOwner, &leftAt); err != nil {
+			t.Fatalf("read row: %v", err)
+		}
+		if removedByOwner || leftAt != nil {
+			t.Fatalf("after the owner's re-add: removed_by_owner=%v left_at=%v, want false/nil",
+				removedByOwner, leftAt)
+		}
+
+		// And a participant may now re-add them freely, which is the proof the
+		// gate is about the OWNER'S DECISION and not about the person.
+		if _, err := repo.Leave(ctx, trip.ID, shareViewer2); err != nil {
+			t.Fatalf("Leave: %v", err)
+		}
+		if _, err := repo.AddParticipants(ctx, trip.ID, shareViewer1, []string{shareTwo}); err != nil {
+			t.Fatalf("AddParticipants after a self-leave: %v", err)
+		}
+	})
+}
+
+// TestTripRepo_SelfLeaveIsNotARemoval pins the other side of migration 0061: a
+// person who walks away has NOT been removed, so any member may invite them
+// back. Stamping the marker on a self-leave would make leaving irreversible by
+// anybody but the owner, which is the opposite of what leaving means.
+func TestTripRepo_SelfLeaveIsNotARemoval(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	shareTwo := seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour),
+		[]string{shareOne, shareTwo})
+
+	if _, err := repo.Leave(ctx, trip.ID, shareViewer2); err != nil {
+		t.Fatalf("Leave: %v", err)
+	}
+	var removedByOwner bool
+	if err := testPool.QueryRow(ctx, `
+SELECT removed_by_owner FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+		trip.ID, shareViewer2).Scan(&removedByOwner); err != nil {
+		t.Fatalf("read marker: %v", err)
+	}
+	if removedByOwner {
+		t.Fatal("a self-leave stamped removed_by_owner")
+	}
+
+	people, err := repo.AddablePeople(ctx, trip.ID, shareViewer1)
+	if err != nil {
+		t.Fatalf("AddablePeople: %v", err)
+	}
+	found := false
+	for _, p := range people {
+		if p.ShareID == shareTwo {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("somebody who LEFT is not offered again: %+v", people)
+	}
+	if _, err := repo.AddParticipants(ctx, trip.ID, shareViewer1, []string{shareTwo}); err != nil {
+		t.Fatalf("AddParticipants after a self-leave: %v", err)
+	}
+}
+
+// TestTripRepo_AddablePeopleRefusesAnEndedTrip is review finding 4: the probe
+// already knew the window had closed and threw the answer away, so the picker
+// listed names the very next PATCH would refuse with `trip_ended`.
+func TestTripRepo_AddablePeopleRefusesAnEndedTrip(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareOne})
+	if _, err := repo.End(ctx, trip.ID, shareOwnerA); err != nil {
+		t.Fatalf("End: %v", err)
+	}
+
+	for _, actor := range []struct{ name, userID string }{
+		{"owner", shareOwnerA},
+		{"participant", shareViewer1},
+	} {
+		if _, err := repo.AddablePeople(ctx, trip.ID, actor.userID); !errors.Is(err, store.ErrTripEnded) {
+			t.Errorf("AddablePeople(%s) err = %v, want ErrTripEnded", actor.name, err)
+		}
+	}
+}

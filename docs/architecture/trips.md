@@ -499,12 +499,50 @@ nicety.** Re-adding somebody already aboard is a no-op `200`; without the
 preserve arm, any participant could claim credit for the owner's own additions
 simply by adding the same person a second time.
 
+**⚠ AN OWNER'S REMOVE STICKS, AND THAT NEEDED A SECOND COLUMN (migration
+0061).** The upsert behind an add REVIVES a departed membership — right for
+somebody who left, wrong for somebody the owner took off — so without a marker,
+removal would have been the one owner-only verb any participant could reverse,
+immediately and as often as they liked, by re-sending the same share id.
+`go_trip_participants.removed_by_owner` is written by the owner's
+`removeParticipantIds` **and by nothing else**: not by a self-leave (walking
+away is not being removed, and any member may invite that person back), and not
+by the revoked-share cascade (one statement serves both an owner's revoke and a
+grantee's own leave and cannot tell them apart — and a person whose grant is
+gone is refused by the live-grant predicate long before the marker is read).
+**Only the owner clears it, by adding the person back**, which is why an owner
+never sees the refusal, and why the owner's picker still lists somebody a
+participant's picker withholds: hiding the row from the owner would strand their
+own removal forever. A participant who sends the id anyway gets **`409 conflict /
+participant_owner_removed`, all-or-nothing** and deliberately unspecific about
+which person.
+
+**⚠ THE TWO CAPABILITY ROUTES RE-JOIN THE LIVE GRANT IN THEIR ROLE PROBE, and
+the display reads deliberately do not.** `tripMemberRoleExpr` is `tripRoleExpr`
+plus §3's `status = 'accepted' AND suspended_at IS NULL` conjunction, and
+`queryTripRoleForUser` — the probe in front of the add and the picker — is its
+only user. A membership row is **not** rewritten when the grant behind it is
+suspended or revoked: the cascade below (§6) is a display repair by its own
+documentation and nothing runs it on a suspend at all. Without the conjunction a
+grant-holder the owner had already cut off would keep resolving `participant`,
+their map dark, still able to widen the owner's roster and enumerate the car's
+grant-holders by name. **Narrowing the DISPLAY reads the same way would be the
+opposite error** — a suspended participant's trip card would vanish mid-window,
+which is the "silently dropped mid-drive" failure §11 forbids. The two
+expressions answer two questions: *is this person on the roster* and *may this
+person act as a member*.
+
 **THE PICKER IS ITS OWN ROUTE.** `GET /api/trips/{tripId}/addable-people`
 (§7.30.11) returns `{shareId, displayName}` for the vehicle's live grant-holders
 not yet aboard — because §7.5's grant listing is owner-only and must stay that
-way: it carries invite codes, email addresses, statuses, permissions and the
-owner's private label for each person. The owner reads the same route, so the
-two pickers cannot come to offer different people.
+way: it carries invite CODES, email addresses, pending invitations, per-grant
+permissions, statuses and user ids, none of which appear here. **The
+`displayName` fallback IS the owner's label for the grant** — the same ladder
+and the same fallback the roster uses, so a person cannot be called one thing in
+the picker and another on the trip they were added to one tap later. The owner
+reads the same route, so the two pickers offer the same people **except for the
+ones the owner removed** (above). It also refuses on an ENDED trip (`409
+trip_ended`), because §7.30.4's add refuses one.
 
 **ONE PUSH IS NEW AND IT GOES TO THE OWNER ALONE**: `trip_participant_added`, a
 sixth event on the existing `trips` category with **no new preference**. It is

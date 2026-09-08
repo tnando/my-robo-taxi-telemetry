@@ -128,8 +128,9 @@ func (r *TripRepo) AddParticipants(ctx context.Context, tripID, actorUserID stri
 		return TripView{}, ErrTripEnded
 	}
 
-	if err := addAndAuditParticipants(ctx, tx, tripID, access.VehicleID, actorUserID, shareIDs); err != nil {
-		if !errors.Is(err, ErrTripParticipantNotShared) {
+	if err := addAndAuditParticipants(ctx, tx, tripID, access.VehicleID, actorUserID,
+		access.Role == tripRoleOwner, shareIDs); err != nil {
+		if !errors.Is(err, ErrTripParticipantNotShared) && !errors.Is(err, ErrTripParticipantOwnerRemoved) {
 			r.metrics.IncQueryError(op)
 		}
 		return TripView{}, err
@@ -160,7 +161,8 @@ func (r *TripRepo) AddParticipants(ctx context.Context, tripID, actorUserID stri
 // transaction, would let a concurrent leave land between the two and produce an
 // audit row for an add nobody was told about.
 func addAndAuditParticipants(
-	ctx context.Context, tx tripQuerier, tripID, vehicleID, actorUserID string, shareIDs []string,
+	ctx context.Context, tx tripQuerier, tripID, vehicleID, actorUserID string,
+	actorIsOwner bool, shareIDs []string,
 ) error {
 	resolved, err := resolveShareParticipants(ctx, tx, vehicleID, shareIDs)
 	if err != nil {
@@ -171,6 +173,13 @@ func addAndAuditParticipants(
 	}
 	if len(resolved) == 0 {
 		return nil
+	}
+
+	if err := refuseOwnerRemoved(ctx, tx, tripID, actorIsOwner, resolved); err != nil {
+		if errors.Is(err, ErrTripParticipantOwnerRemoved) {
+			return err
+		}
+		return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 	}
 
 	present, err := liveParticipantUserIDs(ctx, tx, tripID)
@@ -189,6 +198,67 @@ func addAndAuditParticipants(
 		if err := insertTripParticipantAddedAudit(ctx, tx, actorUserID, tripID, vehicleID, p.ParticipantID); err != nil {
 			return fmt.Errorf("add participants(trip=%s): %w", tripID, err)
 		}
+	}
+	return nil
+}
+
+// refuseOwnerRemoved is the review round's gate: A PARTICIPANT MAY NOT UNDO AN
+// OWNER'S REMOVE (migration 0061).
+//
+// ── WHY THE ROSTER NEEDED THIS ──────────────────────────────────────────────
+//
+// The upsert REVIVES a departed membership, which is right for somebody who
+// left and wrong for somebody the owner took off. Without this gate the owner's
+// remove — the one roster verb MYR-618 deliberately kept owner-only — would
+// have been the one verb any participant could reverse, immediately and as
+// often as they liked, by re-sending the same share id.
+//
+// ── IT RUNS BEFORE THE UPSERT, NOT AS A CONSTRAINT ON IT ────────────────────
+//
+// The refusal has to be ALL-OR-NOTHING across the request, the way
+// `participant_not_shared` is: a request naming three people, one of whom the
+// owner removed, must add none of them rather than two. A predicate inside the
+// upsert would silently skip the row instead, and the caller would get a 200
+// carrying a roster missing somebody they asked for.
+//
+// ── AN OWNER SKIPS IT ENTIRELY ──────────────────────────────────────────────
+//
+// Not "an owner passes it" — the statement is not issued at all. An owner's add
+// is the act that CLEARS the marker (see queryUpsertTripParticipant), so asking
+// the question would be asking whether they may undo their own decision.
+//
+// ── DELIBERATELY UNSPECIFIC ABOUT WHO ───────────────────────────────────────
+//
+// The error names nobody, exactly as `participant_not_shared` names nobody:
+// which of several people the owner removed is a fact about the owner's own
+// decisions, and the client's next move is the same either way — tell the
+// person to ask the owner.
+func refuseOwnerRemoved(
+	ctx context.Context, q tripQuerier, tripID string, actorIsOwner bool, resolved []TripParticipantView,
+) error {
+	if actorIsOwner || len(resolved) == 0 {
+		return nil
+	}
+	userIDs := make([]string, 0, len(resolved))
+	for _, p := range resolved {
+		userIDs = append(userIDs, p.UserID)
+	}
+
+	rows, err := q.Query(ctx, queryTripOwnerRemovedUserIDs, tripID, userIDs)
+	if err != nil {
+		return fmt.Errorf("read owner-removed roster: %w", err)
+	}
+	defer rows.Close()
+
+	removed := false
+	for rows.Next() {
+		removed = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read owner-removed roster: rows: %w", err)
+	}
+	if removed {
+		return ErrTripParticipantOwnerRemoved
 	}
 	return nil
 }

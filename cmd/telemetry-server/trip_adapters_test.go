@@ -37,6 +37,7 @@ func TestTranslateTripErrorCoversEveryStoreSentinel(t *testing.T) {
 		{"window invalid", store.ErrTripWindowInvalid, telemetry.ErrTripWindowInvalid},
 		{"name invalid", store.ErrTripNameInvalid, telemetry.ErrTripNameInvalid},
 		{"already ended", store.ErrTripEnded, telemetry.ErrTripEnded},
+		{"owner removed them", store.ErrTripParticipantOwnerRemoved, telemetry.ErrTripParticipantOwnerRemoved},
 	}
 
 	for _, tc := range cases {
@@ -123,6 +124,7 @@ func TestTripSentinelListIsComplete(t *testing.T) {
 		"ErrTripNotFound": true, "ErrTripOverlap": true,
 		"ErrTripParticipantNotShared": true, "ErrTripWindowInvalid": true,
 		"ErrTripNameInvalid": true, "ErrTripEnded": true,
+		"ErrTripParticipantOwnerRemoved": true,
 	}
 	for _, name := range declared {
 		if translated[name] {

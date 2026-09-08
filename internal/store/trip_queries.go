@@ -124,16 +124,66 @@ WHERE vehicle_id = $1
 // any participant could claim credit for the owner's own additions by adding
 // them a second time. `go_trip_participants.left_at` inside DO UPDATE is the
 // EXISTING row's value, which is what makes that distinction expressible.
+//
+// `removed_by_owner = FALSE` (migration 0061) CLEARS AN OWNER'S REMOVAL, and it
+// is unconditional here because the only caller that may reach a removed row is
+// the owner: addAndAuditParticipants refuses a PARTICIPANT's add of an
+// owner-removed person before this statement runs. An owner re-adding somebody
+// is the act that undoes their own removal, and it is the only act that may.
+// On every other row the assignment is a no-op — a live row's marker is already
+// FALSE, because the only way to set it is the owner's remove and the only way
+// to leave it set is to stay removed.
 const queryUpsertTripParticipant = `
 INSERT INTO go_trip_participants (trip_id, user_id, share_id, added_by_user_id)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (trip_id, user_id) DO UPDATE
 SET left_at = NULL,
+    removed_by_owner = FALSE,
     share_id = EXCLUDED.share_id,
     added_by_user_id = CASE
         WHEN go_trip_participants.left_at IS NULL THEN go_trip_participants.added_by_user_id
         ELSE EXCLUDED.added_by_user_id
     END`
+
+// queryTripOwnerRemovedUserIDs is the MYR-618 review round's gate: of the users
+// being added, which ones did the trip's OWNER remove?
+//
+// Read inside the roster transaction, and only when the actor is NOT the owner
+// — an owner add is what clears the marker, so asking would be asking whether
+// they may undo their own decision.
+//
+// It returns USER IDS RATHER THAN SHARE IDS on purpose: the refusal that
+// follows is deliberately unspecific about WHICH person (the same non-oracle
+// reasoning `participant_not_shared` is built on), so the caller needs only to
+// know that the set is non-empty. The projection exists so the statement can
+// stay a plain `= ANY($2)` rather than an EXISTS the caller cannot read.
+const queryTripOwnerRemovedUserIDs = `
+SELECT user_id FROM go_trip_participants
+WHERE trip_id = $1
+  AND user_id = ANY($2::text[])
+  AND removed_by_owner
+  AND left_at IS NOT NULL`
+
+// queryRemoveTripParticipant is the OWNER's §7.30.4 remove, keyed on the SHARE
+// id — which is what the wire calls `participantId`.
+//
+// ⚠ IT IS THE ONE STATEMENT THAT SETS `removed_by_owner` (migration 0061), and
+// that is what makes an owner's removal STICK. Without the marker the upsert's
+// revival arm would let any other participant undo it by re-sending the same
+// share id, which would make the one verb MYR-618 kept owner-only the one verb
+// a participant could reverse.
+//
+// Idempotent by the `left_at IS NULL` guard, so a double-tap updates zero rows
+// and the marker already written by the first call stands.
+//
+// It lived inline in trip_repo_write.go until the review round; it is here
+// because this file's whole premise is that the authorization-relevant
+// statement set can be read in one place, and a statement that decides whether
+// a removal is reversible is squarely in that set.
+const queryRemoveTripParticipant = `
+UPDATE go_trip_participants
+SET left_at = NOW(), removed_by_owner = TRUE
+WHERE trip_id = $1 AND share_id = $2 AND left_at IS NULL`
 
 // queryTripLiveParticipantUserIDs is the roster's USER IDS ONLY, read inside the
 // roster transaction so the add path can tell a genuine arrival from a re-send.
@@ -184,9 +234,23 @@ WHERE t.id = $2`
 // its permissions — is owner-only for reasons that have not changed.
 //
 // The OWNER is excluded because an owner holds no grant on their own car and
-// therefore cannot appear here anyway; the `NOT EXISTS` clause is what excludes
-// people already on the trip, and it tests the live roster (`left_at IS NULL`)
-// so somebody who LEFT can be re-invited.
+// therefore cannot appear here anyway; the first `NOT EXISTS` clause is what
+// excludes people already on the trip, and it tests the live roster
+// (`left_at IS NULL`) so somebody who LEFT can be re-invited.
+//
+// ⚠ THE SECOND `NOT EXISTS` IS THE ONE PLACE THIS LIST DIFFERS BY CALLER, and
+// it is the review round's owner-removal rule (migration 0061). Somebody the
+// OWNER removed is withheld from a PARTICIPANT's picker — offering them would
+// be offering a name that §7.30.4 will refuse with `participant_owner_removed`,
+// which is the exact "a refusal the person could not explain" this statement's
+// live-grant predicate exists to prevent.
+//
+// **THE OWNER STILL SEES THEM** ($2 = 'owner' switches the clause off), because
+// the owner is the only person who may undo their own removal and a picker that
+// hid the row would strand it forever. It is a deliberate, narrow departure
+// from §7.30.11's "one list, so the two pickers cannot offer different people":
+// the pickers now differ by exactly the set of people the owner has removed,
+// and the alternative was a rule with no way to reverse it.
 //
 // ORDERED BY SHARE ID HERE AND BY DISPLAY NAME IN GO, deliberately. The name a
 // caller reads is `COALESCE(confirmed first name, label)` and the first half of
@@ -209,12 +273,28 @@ WHERE t.id = $1
           AND p.user_id = s.accepted_by_user_id
           AND p.left_at IS NULL
   )
+  AND (
+        $2 = 'owner'
+        OR NOT EXISTS (
+              SELECT 1 FROM go_trip_participants p
+              WHERE p.trip_id = t.id
+                AND p.user_id = s.accepted_by_user_id
+                AND p.removed_by_owner
+        )
+  )
 ORDER BY s.id`
 
-// queryLeaveTrip is BOTH the participant's own "leave" and the owner's
-// "remove", because they write the same row the same way and the difference is
-// only who was allowed to ask. Idempotent by the `left_at IS NULL` guard: a
-// second call updates zero rows and the handler still answers 204.
+// queryLeaveTrip is the participant's OWN §7.30.6 exit. Idempotent by the
+// `left_at IS NULL` guard: a second call updates zero rows and the handler
+// still answers 204.
+//
+// ⚠ IT DELIBERATELY DOES NOT TOUCH `removed_by_owner`. Until the review round
+// this statement was described as serving the owner's remove too; it never did
+// — that path is queryRemoveTripParticipant — and since migration 0061 the two
+// are not interchangeable even in principle. Somebody who walks away has not
+// been removed, and stamping the marker here would make a self-leave
+// un-reversible by anybody but the owner, which is the opposite of what leaving
+// means: a person who left may be invited back by any member.
 const queryLeaveTrip = `
 UPDATE go_trip_participants
 SET left_at = NOW()
@@ -228,6 +308,13 @@ WHERE trip_id = $1 AND user_id = $2 AND left_at IS NULL`
 // Scoped to trips that have not ENDED: rewriting the roster of a finished trip
 // would rewrite history for no benefit — the window is closed, the access is
 // already gone, and the roster is the only record of who was on it.
+//
+// ⚠ IT DOES NOT STAMP `removed_by_owner` EITHER, and the reason is that this
+// ONE statement serves BOTH severing paths — an owner's §7.5.3 revoke and a
+// grantee's own §7.5.7 leave — and cannot tell them apart. Nothing turns on the
+// choice: a person whose grant on the car is gone is refused by the add's live
+// grant predicate long before the marker would be read, so the marker would be
+// a claim with no consequence, and on the leave arm it would be a false one.
 const queryLeaveTripByShare = `
 UPDATE go_trip_participants p
 SET left_at = NOW()

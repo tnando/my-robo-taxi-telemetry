@@ -22,20 +22,36 @@ import (
 // trip where everybody is already aboard — so without the role probe the two
 // would be indistinguishable, and the endpoint would answer 200 to somebody who
 // must receive the same 404 every other per-trip route gives them.
+//
+// THE PROBE'S ANSWER IS USED THREE TIMES, not once, and two of those arrived in
+// the review round:
+//
+//   - the role decides admission (404-not-403), as it always did;
+//   - the WINDOW decides whether there is anything to pick — an ENDED trip is
+//     `ErrTripEnded`, because §7.30.4's add refuses one and a picker that
+//     listed names the very next request would reject is a refusal the person
+//     could not explain, which is the same failure the live-grant predicate in
+//     the statement exists to prevent;
+//   - the ROLE is passed to the statement, because an owner sees the people
+//     they removed and a participant does not (migration 0061).
 func (r *TripRepo) AddablePeople(ctx context.Context, tripID, userID string) ([]TripAddablePersonView, error) {
 	const op = "trip.addable_people"
 	start := time.Now()
 	defer func() { r.metrics.ObserveQueryDuration(op, time.Since(start).Seconds()) }()
 
-	if _, err := tripAccessFor(ctx, r.pool, tripID, userID); err != nil {
+	access, err := tripAccessFor(ctx, r.pool, tripID, userID)
+	if err != nil {
 		if !errors.Is(err, ErrTripNotFound) {
 			r.metrics.IncQueryError(op)
 			return nil, fmt.Errorf("TripRepo.AddablePeople(%s): %w", tripID, err)
 		}
 		return nil, ErrTripNotFound
 	}
+	if access.ended(time.Now()) {
+		return nil, ErrTripEnded
+	}
 
-	rows, err := r.pool.Query(ctx, queryTripAddablePeople, tripID)
+	rows, err := r.pool.Query(ctx, queryTripAddablePeople, tripID, access.Role)
 	if err != nil {
 		r.metrics.IncQueryError(op)
 		return nil, fmt.Errorf("TripRepo.AddablePeople(%s): %w", tripID, err)

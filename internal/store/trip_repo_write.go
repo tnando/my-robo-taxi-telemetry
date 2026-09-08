@@ -135,7 +135,7 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // allowed to make the request, and in nothing that reaches the database. The
 // REMOVE half has no counterpart and never will: removal stays owner-only.
 func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID, ownerUserID string, in UpdateTripInput) error {
-	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, in.AddParticipantIDs); err != nil {
+	if err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, true, in.AddParticipantIDs); err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
 			return err
 		}
@@ -193,15 +193,18 @@ func (r *TripRepo) resolvePatch(current TripView, in UpdateTripInput, now time.T
 // removeParticipantsByShare marks the named memberships left. Keyed on the
 // SHARE id, which is what the wire calls `participantId`.
 //
+// OWNER-ONLY, AND THE STATEMENT SAYS SO: queryRemoveTripParticipant stamps
+// `removed_by_owner` (migration 0061), which is what stops any other
+// participant reviving the row with a re-add. This function has exactly one
+// caller — applyRosterPatch, reached only through loadOwnedTripForPatch — and
+// AddParticipants contains no path to it.
+//
 // Silently tolerant of an id that names nobody on this trip: removing a person
 // who is not there is the state the caller asked for, and erroring would make
 // PATCH fail on a double-tap.
 func removeParticipantsByShare(ctx context.Context, q tripQuerier, tripID string, shareIDs []string) error {
 	for _, shareID := range dedupeStrings(shareIDs) {
-		if _, err := q.Exec(ctx, `
-UPDATE go_trip_participants
-SET left_at = NOW()
-WHERE trip_id = $1 AND share_id = $2 AND left_at IS NULL`, tripID, shareID); err != nil {
+		if _, err := q.Exec(ctx, queryRemoveTripParticipant, tripID, shareID); err != nil {
 			return fmt.Errorf("remove participant: %w", err)
 		}
 	}
