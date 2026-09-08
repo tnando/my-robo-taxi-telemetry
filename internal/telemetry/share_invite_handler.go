@@ -9,7 +9,6 @@ import (
 
 	"github.com/myrobotaxi/telemetry/internal/auth"
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
-	"github.com/myrobotaxi/telemetry/pkg/sdk"
 )
 
 // ShareInviteHandler serves the OWNER-FACING vehicle-sharing endpoints
@@ -19,6 +18,8 @@ import (
 //	GET    /api/vehicles/{vehicleId}/invites   list invites + viewers
 //	DELETE /api/invites/{inviteId}             cancel / revoke
 //	POST   /api/invites/{inviteId}/resend      new code + reset expiry
+//	POST   /api/vehicles/{vehicleId}/share/extend
+//	                                           copy an accepted grant here
 //
 // EVERY route here is owner-only, and none of them has a viewer branch. That is
 // not an oversight to be "completed" later: a viewer who could list a car's
@@ -39,6 +40,12 @@ type ShareInviteHandler struct {
 	// sockets ends the CURRENT one (MYR-373). Optional; see
 	// ShareAccessNotifier for why the cache bust alone does not cover it.
 	sockets ShareAccessNotifier
+	// widened re-handshakes the CURRENT one when access GROWS (MYR-609).
+	// The exact mirror of `sockets`, and needed for the exact mirror of the
+	// reason: the access set is frozen on the Client at handshake, so a
+	// connected grantee does not pick up an extended car until something
+	// makes them reconnect. Optional.
+	widened ShareAccessWidener
 	// links signs the `shareUrl` on pending rows (MYR-368). Nil means no
 	// signing key is configured and the field is simply omitted.
 	links  *InviteLinkSigner
@@ -57,6 +64,15 @@ type ShareInviteHandlerOption func(*ShareInviteHandler)
 // already-open WebSocket, which lapses at reconnect.
 func WithShareAccessNotifier(n ShareAccessNotifier) ShareInviteHandlerOption {
 	return func(h *ShareInviteHandler) { h.sockets = n }
+}
+
+// WithShareAccessWidener attaches the live-socket re-handshake channel used
+// when an owner extends a grant onto another car (MYR-609). Omitting it leaves
+// the grantee's REST surface correct immediately and their already-open socket
+// picking the car up at its next reconnect or at the 60-second revalidation
+// sweep — a delay, never a wrong answer.
+func WithShareAccessWidener(wd ShareAccessWidener) ShareInviteHandlerOption {
+	return func(h *ShareInviteHandler) { h.widened = wd }
 }
 
 // NewShareInviteHandler builds the owner-facing sharing handler. invalidator
@@ -107,6 +123,27 @@ func (h *ShareInviteHandler) endLiveAccess(granteeUserID, vehicleID, reason stri
 	h.sockets.ShareAccessRevoked(granteeUserID, vehicleID, reason)
 }
 
+// widenLiveAccess is the same second half for a mutation that GROWS somebody's
+// access (MYR-609): the cache bust fixes the next handshake, this one makes a
+// next handshake happen.
+//
+// ORDER MATTERS FOR THE MIRROR-IMAGE REASON and is likewise the caller's
+// responsibility — every call site busts the cache first. If the re-handshake
+// overtook the bust, the reconnect would be served the PRE-mutation set and
+// come back without the car it was sent to collect, which is a no-op that looks
+// like a fix.
+//
+// Best-effort by construction, exactly like endLiveAccess: a nil widener, an
+// empty grantee id, or a grantee who is simply not connected are all ordinary
+// no-ops. The grant has already committed and the owner's 201 does not depend
+// on anybody being online to hear about it.
+func (h *ShareInviteHandler) widenLiveAccess(granteeUserID, vehicleID, reason string) {
+	if h.widened == nil || granteeUserID == "" {
+		return
+	}
+	h.widened.ShareAccessWidened(granteeUserID, vehicleID, reason)
+}
+
 // linkCtx assembles the signing context for one request: the key plus the
 // CALLING OWNER's display name, resolved once per request rather than once per
 // row.
@@ -146,7 +183,7 @@ func (h *ShareInviteHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !h.driverAccessAllows(w, vehicle, vehicleID, userID) {
+	if !h.driverAccessAllows(w, vehicle, vehicleID, userID, "share invite create") {
 		return
 	}
 
@@ -226,94 +263,6 @@ func (h *ShareInviteHandler) ServeList(w http.ResponseWriter, r *http.Request) {
 		invites = append(invites, toShareInviteMasked(&rows[i], auth.RoleOwner, link))
 	}
 	h.writeJSON(w, http.StatusOK, shareInviteListResponse{Invites: invites})
-}
-
-// authOwner validates the bearer token and confirms the caller OWNS the path
-// vehicle, writing the appropriate error response on failure.
-//
-// An unknown vehicle is 404 and a known-but-not-yours vehicle is 403, matching
-// the rest of the per-vehicle surface. There is no viewer branch: a viewer's
-// vehicle read succeeds, so they reach the ownership check and are refused
-// exactly as an unrelated caller is.
-// It returns the ROW as well as the ids, because the MYR-599 consent gate is a
-// fact about that row and re-fetching it in the caller would mean two reads at
-// two instants answering one question.
-func (h *ShareInviteHandler) authOwner(
-	w http.ResponseWriter, r *http.Request, surface string,
-) (row VehicleSnapshotRow, vehicleID, userID string, ok bool) {
-	vehicleID = r.PathValue("vehicleId")
-	if vehicleID == "" {
-		h.writeError(w, http.StatusBadRequest, wserrors.ErrCodeInvalidRequest, "missing vehicleId")
-		return VehicleSnapshotRow{}, "", "", false
-	}
-
-	token := extractBearerToken(r)
-	if token == "" {
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "missing Authorization header")
-		return VehicleSnapshotRow{}, "", "", false
-	}
-
-	ctx := r.Context()
-	userID, err := h.auth.ValidateToken(ctx, token)
-	if err != nil {
-		h.logger.Warn(surface+": invalid token", slog.String("error", err.Error()))
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
-		return VehicleSnapshotRow{}, "", "", false
-	}
-
-	row, err = h.vehicles.GetByID(ctx, vehicleID)
-	if err != nil {
-		if errors.Is(err, sdk.ErrNotFound) {
-			h.writeError(w, http.StatusNotFound, wserrors.ErrCodeNotFound, "vehicle not found")
-			return VehicleSnapshotRow{}, "", "", false
-		}
-		h.logger.Error(surface+": vehicle lookup failed",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("error", err.Error()),
-		)
-		h.writeError(w, http.StatusInternalServerError, wserrors.ErrCodeInternalError, "internal error")
-		return VehicleSnapshotRow{}, "", "", false
-	}
-	if row.UserID != userID {
-		h.logger.Warn(surface+": not the owner",
-			slog.String("vehicle_id", vehicleID),
-			slog.String("user_id", userID),
-		)
-		h.writeError(w, http.StatusForbidden, wserrors.ErrCodeVehicleNotOwned, "you do not own this vehicle")
-		return VehicleSnapshotRow{}, "", "", false
-	}
-	return row, vehicleID, userID, true
-}
-
-// driverAccessAllows is the MYR-599 consent gate (review finding I). Returns
-// false having already written the response.
-//
-// IT GUARDS THE CREATE ONLY, and the split is the same one the fleet-config
-// surface makes. Sharing a car is an act of DISPOSAL over somebody else's
-// property — it hands a third party standing access to a vehicle whose owner
-// has not yet been recorded as agreeing the car belongs here at all — while
-// LISTING the invites on it changes nothing and is how a client renders the
-// screen it is refusing from. A driver whose acknowledgment is outstanding has
-// no invites to list anyway; refusing the read would only make the screen
-// wrong.
-//
-// 409, matching the reconnect, fleet-config and command refusals: nothing
-// failed, the caller is not forbidden, and §7.29 is the specific thing that
-// changes the answer.
-func (h *ShareInviteHandler) driverAccessAllows(
-	w http.ResponseWriter, row VehicleSnapshotRow, vehicleID, userID string,
-) bool {
-	if !row.DriverAccess.PendingAcknowledgment() {
-		return true
-	}
-	h.logger.Info("share invite create: refused, driver-access car awaiting the owner-approval acknowledgment",
-		slog.String("event", "share_invite_awaiting_owner_ack"),
-		slog.String("vehicle_id", vehicleID),
-		slog.String("user_id", userID),
-	)
-	h.writeError(w, http.StatusConflict, wserrors.ErrCodeInvalidRequest,
-		"confirm the owner approved adding this car before you can share it")
-	return false
 }
 
 // writeJSON marshals v as JSON with the given status code.

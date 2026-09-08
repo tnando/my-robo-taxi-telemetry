@@ -167,6 +167,24 @@ const (
 	// make a suspension tear down the owner's own session.
 	TopicShareAccessRevoked Topic = "share.access_revoked"
 
+	// TopicShareAccessWidened is published when an owner action GROWS a
+	// grantee's vehicle access set while they may hold a live WebSocket —
+	// today only a §7.5.8 extend (MYR-609). The payload is
+	// ShareAccessWidenedEvent. Consumer: the WS hub (re-handshake the
+	// grantee's sessions), which closes the WIDENING half of
+	// websocket-protocol.md §10 DV-09 — recorded there as a benign
+	// residual for as long as nothing produced one.
+	//
+	// A SEPARATE TOPIC FROM TopicShareAccessRevoked, not a `reason` on it,
+	// even though the hub does something close to the same thing for both.
+	// The two are opposite in the property that matters everywhere else in
+	// the system: one is a SECURITY action whose latency is a live GPS leak
+	// and which must fail closed, the other is a convenience whose worst
+	// outcome is a car appearing a reconnect later. Anything that watches,
+	// counts, alerts on, or rate-limits revocations must not have widenings
+	// silently folded into its numbers.
+	TopicShareAccessWidened Topic = "share.access_widened"
+
 	// TopicVehicleTelemetryWarning is published by the owner-inactivity
 	// sweeper on the FOURTH day of an owner's silence, one day before the
 	// vehicle's fleet-telemetry config is removed (MYR-592, rest-api.md

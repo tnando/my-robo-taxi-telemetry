@@ -84,61 +84,6 @@ FROM go_vehicle_shares
 WHERE vehicle_id = $1 AND owner_user_id = $2 AND status <> 'revoked'
 ORDER BY created_at DESC, id DESC`
 
-// queryRevokeShare is the tombstone flip. Guarded on owner_user_id (nobody
-// revokes another owner's grant) and on `status <> 'revoked'` so a repeat is a
-// no-op rather than a second revoked_at stamp. Zero rows affected means either
-// "already revoked" or "not yours / does not exist"; the caller disambiguates
-// with queryShareExistsForOwner, because those two must produce DIFFERENT
-// statuses (204 idempotent vs 404) while remaining indistinguishable from the
-// outside for a row the caller has no business seeing.
-//
-// RETURNING carries the accepted_by_user_id (empty for a pending row) so the
-// caller can bust that viewer's cached access set immediately — otherwise a
-// revoked viewer keeps resolving the vehicle for up to the cache TTL.
-//
-// It also carries vehicle_id, which is what lets the caller tear down the
-// revoked viewer's LIVE WebSocket for that one car rather than every session
-// they hold (MYR-373, websocket-protocol.md §10 DV-09). Read in the same
-// statement that did the revoking, so a concurrent edit cannot make the id and
-// the revocation disagree.
-const queryRevokeShare = `
-UPDATE go_vehicle_shares
-SET status = 'revoked', revoked_at = NOW()
-WHERE id = $1 AND owner_user_id = $2 AND status <> 'revoked'
-RETURNING COALESCE(accepted_by_user_id, ''), vehicle_id`
-
-// MYR-469 — the RIDER's own way out of a share. Tombstones every ACCEPTED
-// grant the caller redeemed on this vehicle — the same tombstone the owner's
-// revoke writes (status → revoked, revoked_at stamped; never a hard delete,
-// for the same audit reason) — and refuses ATOMICALLY while the caller has a
-// live ride on the car: the ride's telemetry access rides the grant, so a
-// leave mid-ride is the MYR-449 dark stream self-inflicted. The NOT EXISTS is
-// inside the statement so a ride created between a check and the write cannot
-// slip through the gap.
-const queryLeaveVehicleShares = `
-UPDATE go_vehicle_shares
-SET status = 'revoked', revoked_at = NOW()
-WHERE vehicle_id = $1 AND accepted_by_user_id = $2 AND status = 'accepted'
-  AND NOT EXISTS (
-    SELECT 1 FROM go_ride_requests r
-    WHERE r.vehicle_id = $1 AND r.rider_id = $2
-      AND r.status IN ('requested', 'accepted', 'arrived', 'enroute'))`
-
-// queryViewerLeaveRefused disambiguates a zero-row leave: it answers a row
-// exactly when an accepted grant EXISTS and a live ride held it in place —
-// i.e. the guard fired. BOTH conditions, deliberately: a caller with a live
-// ride and no grant at all (an owner self-riding a never-shared car) has
-// nothing to leave, and answering 409 there would be a refusal about a share
-// they do not hold. No row → nothing to leave → idempotent success.
-const queryViewerLeaveRefused = `
-SELECT 1 FROM go_vehicle_shares s
-WHERE s.vehicle_id = $1 AND s.accepted_by_user_id = $2 AND s.status = 'accepted'
-  AND EXISTS (
-    SELECT 1 FROM go_ride_requests r
-    WHERE r.vehicle_id = $1 AND r.rider_id = $2
-      AND r.status IN ('requested', 'accepted', 'arrived', 'enroute'))
-LIMIT 1`
-
 // queryShareExistsForOwner probes whether a row exists AND belongs to the
 // caller. Used only to disambiguate a zero-row conditional update.
 const queryShareExistsForOwner = `
@@ -305,11 +250,3 @@ SELECT
 		NULLIF(TRIM((SELECT a."email" FROM go_identity_apple a WHERE a.user_id = $1 ORDER BY a.last_login_at DESC LIMIT 1)), ''),
 		NULLIF(TRIM((SELECT g."email" FROM go_users g WHERE g.id = $1)), '')
 	) AS owner_email`
-
-// queryRevokeSharesForVehicle tombstones every live grant on a vehicle. Called
-// from the owner-offboarding path: a car that has left the fleet must not keep
-// appearing in its viewers' lists.
-const queryRevokeSharesForVehicle = `
-UPDATE go_vehicle_shares
-SET status = 'revoked', revoked_at = NOW()
-WHERE vehicle_id = $1 AND status <> 'revoked'`

@@ -146,6 +146,16 @@ type ShareInviteStore interface {
 	RevokeInvite(ctx context.Context, inviteID, ownerUserID string) (RevokedGrant, error)
 	// ResendInvite re-mints the code and resets the expiry on a pending row.
 	ResendInvite(ctx context.Context, inviteID, ownerUserID string) (ShareInviteRow, error)
+	// ExtendShare copies an ACCEPTED grant of the caller's onto another
+	// vehicle the caller owns (MYR-609) and returns the new row plus the
+	// GRANTEE's user id — the person whose access set just widened, so the
+	// caller can bust their cache and let the car appear immediately.
+	//
+	// Errors: sdk.ErrNotFound for a source share that is missing, foreign,
+	// pending or revoked (indistinguishably); ErrShareAlreadyGranted when
+	// that person already holds a live grant on the target vehicle;
+	// ErrShareVehicleNotOwned when the target is not the caller's.
+	ExtendShare(ctx context.Context, in ShareExtendInput) (ShareInviteRow, string, error)
 	// LeaveVehicleShares tombstones every accepted grant the CALLER redeemed
 	// on this vehicle (MYR-469 — the rider-side mirror of RevokeInvite).
 	// Idempotent; refused (without writing) while the caller has a live ride
