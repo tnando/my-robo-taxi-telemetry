@@ -81,8 +81,18 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	// prohibition, and why the refusal is printed even when it is overridden.
 	force := fs.Bool("force-unacknowledged", false,
 		"push even for a driver-linked vehicle whose owner-approval acknowledgment is outstanding")
+	// MYR-630. The fleet-wide re-push is a MODE of this subcommand rather than
+	// a subcommand of its own, because it does the same thing to every car that
+	// this does to one: same config body, same proxy, same 350-day exp.
+	allStreaming, repush := registerRepushFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *allStreaming {
+		if err := rejectSingleVINFlags(*vin, *userID); err != nil {
+			return err
+		}
+		return runFleetConfigRepush(ctx, *repush)
 	}
 	operator, err := parseFleetConfigPushInput(*vin, *userID)
 	if err != nil {
