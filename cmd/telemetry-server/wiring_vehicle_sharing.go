@@ -56,7 +56,7 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		// worked while the grantee's map does not have the car until they
 		// happen to reconnect. Nil in dev mode and in tests that do not wire
 		// a bus, which restores that delay rather than failing.
-		telemetry.WithShareAccessWidener(deps.shareAccessWidener),
+		shareInviteWidenOption(deps),
 	)
 	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/invites", inviteHandler.ServeCreate)
 	deps.srv.HandleFunc("GET /api/vehicles/{vehicleId}/invites", inviteHandler.ServeList)
@@ -83,14 +83,49 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		&sharedVehicleListerAdapter{repo: deps.vehicleRepo},
 		deps.accessInvalidator,
 		logger,
-		// MYR-601: and the live-socket half. A redeemer who tapped the invite
-		// link inside the app is CONNECTED, so the cache bust above fixes a
-		// handshake they are not about to make — their held session's access set
-		// was frozen before the grant existed. Nil in dev mode and in tests that
-		// wire no bus.
-		telemetry.WithShareRedeemWidener(deps.shareAccessWidener),
+		shareRedeemWidenOption(deps),
 	)
 	deps.srv.HandleFunc("POST /api/invites/redeem", redeemHandler.ServeHTTP)
 
 	logger.Info("vehicle sharing endpoints enabled (MYR-184)")
+}
+
+// THE THREE WIDENING SEAMS THIS FILE AND THE RIDE WIRING HAND TO HANDLERS, as
+// named functions rather than inline arguments (MYR-601 review round).
+//
+// It is a testability seam and it is worth saying why it had to be one. The
+// honest assertion for a producer is "the endpoint runs and a real socket
+// re-handshakes", and for the provisioning hook that test exists end to end.
+// For these three it cannot: `setupVehicleSharingEndpoints` and
+// `setupRideRequestEndpoints` build their store adapters over concrete
+// `*store.VehicleShareRepo` / `*store.RideRequestRepo` values, so an
+// authenticated request that gets far enough to widen anything needs a live
+// Postgres, which no test in this package has.
+//
+// So the e2e tests build the handler with fake stores and THESE functions —
+// the same line production runs — over a real bus, a real dispatcher and a
+// real WebSocket client. What would otherwise regress unnoticed is somebody
+// deleting the option from the wiring while every handler-level test, which
+// passes its own recording widener, kept passing.
+
+// shareRedeemWidenOption is the live-socket half of a §7.5.5 redemption. A
+// redeemer who tapped the invite link inside the app is CONNECTED, so the
+// cache bust beside it fixes a handshake they are not about to make — their
+// held session's access set was frozen before the grant existed. Nil widener
+// in dev mode and in tests that wire no bus.
+func shareRedeemWidenOption(deps httpRouteDeps) telemetry.ShareRedeemOption {
+	return telemetry.WithShareRedeemWidener(deps.shareAccessWidener)
+}
+
+// shareInviteWidenOption is the same half for the owner routes: §7.5.8 extend
+// (MYR-609) and the un-suspending §7.5.4 PATCH (MYR-601).
+func shareInviteWidenOption(deps httpRouteDeps) telemetry.ShareInviteHandlerOption {
+	return telemetry.WithShareAccessWidener(deps.shareAccessWidener)
+}
+
+// rideJoinWidenOption is the same half for the §7.24 group-ride join, so the
+// ride's car reaches the session the join's 200 sends the member straight into
+// rather than the next one they happen to open.
+func rideJoinWidenOption(deps httpRouteDeps) telemetry.RideRequestOption {
+	return telemetry.WithRideAccessWidener(deps.shareAccessWidener)
 }
