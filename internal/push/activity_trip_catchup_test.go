@@ -140,3 +140,40 @@ func TestA410DeletesTheRowAndReleasesNothing(t *testing.T) {
 		t.Errorf("released = %v, want none — the row is deleted", released)
 	}
 }
+
+// TestACancelledSendReleasesThePerDeviceClaim — MYR-612 review.
+//
+// CLAIM BEFORE SEND is what keeps the two senders from raising two cards, and
+// its whole cost is that a claim which is not followed by a card is permanent:
+// no sender tries that device again for the rest of the leg. A context
+// cancellation is the most likely transient failure of all — the catch-up runs
+// off a request a suspending phone abandons — and the least deserving of that
+// consequence, so it releases like any other failure that might succeed later.
+func TestACancelledSendReleasesThePerDeviceClaim(t *testing.T) {
+	store := &fakeTripActivityStore{tokens: []ActivityStartToken{{UserID: "user-a", Token: "pts-a"}}}
+	n, sender := newTripActivityNotifier(t, store, DefaultPrefs())
+	sender.Err = context.Canceled
+	tc := tripLegFixture()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := n.StartLegForUser(ctx, tc, "user-a"); got != 0 {
+		t.Fatalf("started %d cards on a cancelled send, want 0", got)
+	}
+
+	want := tc.TripID + "/user-a/" + tc.LegID
+	if len(store.released) != 1 || store.released[0] != want {
+		t.Fatalf("released = %v, want [%s] — the claim outlived a card that was "+
+			"never raised, and nothing will send to that phone again this leg",
+			store.released, want)
+	}
+
+	// And the release is real: a later attempt can claim and send.
+	sender.Err = nil
+	if got := n.StartLegForUser(context.Background(), tc, "user-a"); got != 1 {
+		t.Fatalf("the retry started %d cards, want 1", got)
+	}
+	if len(sender.Sent()) != 2 {
+		t.Errorf("pushes = %d, want 2 (the cancelled attempt and the retry)", len(sender.Sent()))
+	}
+}

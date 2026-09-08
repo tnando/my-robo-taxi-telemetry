@@ -1,7 +1,9 @@
 package telemetry
 
 import (
+	"context"
 	"net/http"
+	"time"
 
 	"github.com/myrobotaxi/telemetry/internal/wserrors"
 )
@@ -45,6 +47,13 @@ type registerTripActivityBody struct {
 // before anything tries to send it.
 const tripActivityTokenMaxLen = 256
 
+// tripActivityCatchUpTimeout bounds the catch-up push, which runs AFTER the
+// response on a context detached from the request's. Detached means nothing
+// else would ever stop it, so it needs a deadline of its own; generous, because
+// it covers one claim statement plus one APNs round trip and its only cost on
+// expiry is a card that the leg's next update raises anyway.
+const tripActivityCatchUpTimeout = 15 * time.Second
+
 // ServeRegisterActivityToken handles POST — 204, upsert.
 //
 // UPSERT, NOT INSERT, because ActivityKit ROTATES the push-to-start token. A
@@ -84,6 +93,16 @@ func (h *TripHandler) ServeRegisterActivityToken(w http.ResponseWriter, r *http.
 		h.failTrip(w, "register activity token", tripID, err)
 		return
 	}
+	// NO BODY, deliberately: the response carries no token, because the value
+	// is P1 and the caller already knows what it sent. Echoing it would only
+	// put it in every client log and proxy trace — the same reasoning §7.21's
+	// response gives for carrying no token.
+	w.WriteHeader(http.StatusNoContent)
+	// Flushed so the catch-up below cannot hold the 204 behind an APNs round
+	// trip. A ResponseWriter that cannot flush is not an error — the answer is
+	// then delivered when this handler returns, exactly as it was before.
+	_ = http.NewResponseController(w).Flush()
+
 	// THE CATCH-UP (MYR-612). A leg that is ALREADY under way gets its card
 	// raised on THIS phone now, because the leg-open fan-out ran before this
 	// row existed — which is the normal order of events, since registering is
@@ -91,17 +110,20 @@ func (h *TripHandler) ServeRegisterActivityToken(w http.ResponseWriter, r *http.
 	// that lands three seconds late means no card for the whole leg, and on
 	// 2026-09-08 that was every card on the trip.
 	//
-	// AFTER THE COMMIT AND BEFORE THE 204, synchronously, like every other
-	// notifier call on this handler: the row is already stored whatever
-	// happens here, so there is no error to report, and the send is one
-	// claim plus one APNs push. It returns nothing by design.
-	h.notifier.ActivityTokenRegistered(ctx, tripID, userID)
-
-	// NO BODY, deliberately: the response carries no token, because the value
-	// is P1 and the caller already knows what it sent. Echoing it would only
-	// put it in every client log and proxy trace — the same reasoning §7.21's
-	// response gives for carrying no token.
-	w.WriteHeader(http.StatusNoContent)
+	// ⚠ AFTER THE 204, AND ON A CONTEXT THE CLIENT CANNOT CANCEL (MYR-612
+	// review). It used to run on the request's own context before the response,
+	// which made a background app's abandoned POST — a phone that registers as
+	// it is being suspended, which is the exact circumstance this catch-up
+	// exists for — cancel the very push it had just asked for. Worse, the send
+	// is CLAIM-BEFORE-SEND: a cancellation landing between the claim and the
+	// APNs write stamped `started_leg_id` for a card that was never raised, and
+	// no other sender would try that device again for the rest of the leg.
+	// Detached, with its own deadline, it is the same shape
+	// releasePushToStartClaim already uses for the same reason.
+	catchUpCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(ctx), tripActivityCatchUpTimeout)
+	defer cancel()
+	h.notifier.ActivityTokenRegistered(catchUpCtx, tripID, userID)
 }
 
 // ServeDeleteActivityToken handles DELETE — 204, idempotent.

@@ -243,6 +243,13 @@ func (t *TripActivityNotifier) startOne(ctx context.Context, tc TripLegContext, 
 		t.dropPushToStartToken(ctx, tok.Token)
 		return 0
 	default:
+		// EVERY OTHER FAILURE RELEASES THE CLAIM, CANCELLATION INCLUDED
+		// (MYR-612 review). This is claim-before-send: the row already says
+		// this device has been sent this leg's card, and if that is not true
+		// no sender will ever try it again for the rest of the leg. A context
+		// deadline or cancellation is not a special case here — it is the most
+		// likely transient failure of all, and the least deserving of a
+		// permanent consequence.
 		t.logger.Warn("trip activity: push-to-start failed",
 			slog.String("leg_id", tc.LegID),
 			slog.String("push_to_start_token_prefix", tokenPrefix(tok.Token)),
