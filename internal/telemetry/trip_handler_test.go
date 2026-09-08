@@ -524,13 +524,14 @@ func TestTripWireDropsEveryParticipantUserID(t *testing.T) {
 		t.Fatalf("participants = %v, want one entry", body["participants"])
 	}
 	row, _ := participants[0].(map[string]any)
-	for _, key := range []string{"participantId", "name", "userIsSelf"} {
+	for _, key := range []string{"participantId", "name", "userIsSelf", "addedByName"} {
 		if _, present := row[key]; !present {
 			t.Errorf("roster row is missing %q: %v", key, row)
 		}
 	}
-	if len(row) != 3 {
-		t.Errorf("roster row carries %d keys, want exactly the three the contract declares: %v", len(row), row)
+	if len(row) != 4 {
+		t.Errorf("roster row carries %d keys, want exactly the four the contract declares "+
+			"(MYR-618 added addedByName): %v", len(row), row)
 	}
 	// The CALLER is the owner, not the participant, so userIsSelf is false —
 	// which also proves the flag is computed rather than hard-coded true.

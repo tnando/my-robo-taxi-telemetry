@@ -223,11 +223,17 @@ type updateTripBody struct {
 // ownerOnlyFieldPresent reports whether the body carries anything a live
 // participant may not change (MYR-618).
 //
-// PRESENCE, NOT VALUE. `{"name": null}` and `{"removeParticipantIds": []}` both
-// count: they are the client asking to exercise an owner's verb, and the answer
-// to that question must not depend on whether the request happened to be a
-// no-op. A rule that refused only the requests that would have DONE something
-// would be a rule nobody could state.
+// PRESENCE, NOT VALUE: `{"removeParticipantIds": []}` counts. It is the client
+// asking to exercise an owner's verb, and the answer to that must not depend on
+// whether the request happened to be a no-op — a rule that refused only the
+// requests that would have DONE something would be a rule nobody could state.
+//
+// An explicit JSON `null` is the one spelling that does NOT count, and that is
+// the contract's own doing: §7.30.4 defines an absent key as UNCHANGED, the
+// owner's own path treats `{"name": null}` identically to omitting it, and the
+// schema permits null on none of these fields. Refusing it here would make the
+// participant branch stricter than the owner branch about a value that means
+// nothing on either.
 func (b updateTripBody) ownerOnlyFieldPresent() bool {
 	return b.Name != nil || b.EndsAt != nil || b.RemoveParticipantIDs != nil
 }
