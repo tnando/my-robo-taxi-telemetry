@@ -30,7 +30,12 @@ type ShareRedeemHandler struct {
 	// access busts the redeemer's cached vehicle set so the car they just
 	// joined appears on the very next request.
 	access AccessCacheInvalidator
-	logger *slog.Logger
+	// widened makes the redeemer's ALREADY-OPEN sockets re-handshake, so the
+	// car they just joined reaches the session they are holding rather than
+	// only the next one they open (MYR-601). Optional; nil restores the
+	// pre-MYR-601 behavior.
+	widened ShareAccessWidener
+	logger  *slog.Logger
 }
 
 // NewShareRedeemHandler builds the redeem handler with the default per-user
@@ -42,8 +47,9 @@ func NewShareRedeemHandler(
 	vehicles SharedVehicleLister,
 	invalidator AccessCacheInvalidator,
 	logger *slog.Logger,
+	opts ...ShareRedeemOption,
 ) *ShareRedeemHandler {
-	return &ShareRedeemHandler{
+	h := &ShareRedeemHandler{
 		auth:     tokens,
 		redeem:   redeem,
 		vehicles: vehicles,
@@ -51,6 +57,10 @@ func NewShareRedeemHandler(
 		access:   invalidator,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeHTTP handles POST /api/invites/redeem.
@@ -138,6 +148,23 @@ func (h *ShareRedeemHandler) writeGrants(ctx context.Context, w http.ResponseWri
 	if h.access != nil {
 		h.access.InvalidateVehicles(userID)
 	}
+
+	// AND THE SOCKET THEY ARE ALREADY HOLDING (MYR-601). Same order and the
+	// same argument as §7.5.8 extend: the bust fixes the next handshake, this
+	// makes a next handshake happen, and a re-handshake that overtook the bust
+	// would be served the pre-redemption set and come back without the car.
+	//
+	// ONE SIGNAL FOR THE WHOLE REDEMPTION even when the invite granted several
+	// cars. The hub re-handshakes every session the user holds — it cannot find
+	// them by a vehicle they are not yet authorized for, which is the whole
+	// reason WidenUserAccess exists — so one publish already covers every car
+	// this redemption granted, and the id it carries is for the log alone.
+	//
+	// `grants[0]` is safe because the `len(grants) == 0` guard at the top of
+	// this function has already returned — the same guard the OwnerFirstName
+	// lookup below leans on. Stated because it is an index on a slice whose
+	// emptiness is refused thirty lines away rather than beside it.
+	publishAccessWidened(h.widened, userID, grants[0].VehicleID, "redeemed")
 
 	vehicleIDs := make([]string, 0, len(grants))
 	for _, g := range grants {

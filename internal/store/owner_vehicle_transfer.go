@@ -158,10 +158,25 @@ func (p *OwnerProvisioner) resolveCrossUserConflict(
 		return VehicleUpsertResult{Outcome: VehicleSkippedCrossUser}, nil
 	}
 
-	if err := p.transferDriverProvisionedVehicle(ctx, tx, in, name, vehicleID, previousUserID); err != nil {
+	revoked, err := p.transferDriverProvisionedVehicle(ctx, tx, in, name, vehicleID, previousUserID)
+	if err != nil {
 		return VehicleUpsertResult{}, err
 	}
-	return VehicleUpsertResult{Outcome: VehicleOwnedByTransfer, VehicleID: vehicleID}, nil
+	// BOTH LISTS OF LOSERS TRAVEL BACK WITH THE OUTCOME (MYR-601). The caller
+	// has to bust each account's cached access set and end their live sockets,
+	// and this transaction is the only place either id is known: the former
+	// DRIVER, who held the row, and every THIRD-PARTY GRANTEE whose share the
+	// teardown just tombstoned. They are separate fields because they are
+	// separate facts — one account lost a car it had linked, the others lost a
+	// share somebody else had given them — and a caller that only knew about
+	// the first would leave the rest streaming live GPS from a car that is no
+	// longer theirs in any sense.
+	return VehicleUpsertResult{
+		Outcome:           VehicleOwnedByTransfer,
+		VehicleID:         vehicleID,
+		PreviousUserID:    previousUserID,
+		RevokedGranteeIDs: revoked,
+	}, nil
 }
 
 // transferDriverProvisionedVehicle hands one driver-provisioned car to its
@@ -197,24 +212,25 @@ func (p *OwnerProvisioner) resolveCrossUserConflict(
 // of it.
 func (p *OwnerProvisioner) transferDriverProvisionedVehicle(
 	ctx context.Context, tx pgx.Tx, in OwnedVehicleInput, name, vehicleID, previousUserID string,
-) error {
+) ([]string, error) {
 	if err := insertDriverLinkSupersededAudit(ctx, tx, previousUserID, vehicleID, in.UserID); err != nil {
-		return err
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, queryTransferVehicleToOwner,
 		vehicleID, in.UserID, in.VIN, name, vin.Model(in.VIN), vin.ModelYear(in.VIN)); err != nil {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s): transfer vehicle: %w", in.UserID, err)
+		return nil, fmt.Errorf("store.UpsertOwnedVehicle(user=%s): transfer vehicle: %w", in.UserID, err)
 	}
 	if _, err := tx.Exec(ctx, queryDeleteDriverAccessByVehicle, vehicleID); err != nil {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s): clear superseded driver access: %w", in.UserID, err)
+		return nil, fmt.Errorf("store.UpsertOwnedVehicle(user=%s): clear superseded driver access: %w", in.UserID, err)
 	}
 	if _, err := tx.Exec(ctx, queryTeardownDeleteFleetConfigAttempts, vehicleID); err != nil {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s): clear superseded fleet-config schedule: %w", in.UserID, err)
+		return nil, fmt.Errorf("store.UpsertOwnedVehicle(user=%s): clear superseded fleet-config schedule: %w", in.UserID, err)
 	}
-	if _, err := tx.Exec(ctx, queryRevokeSharesForVehicle, vehicleID); err != nil {
-		return fmt.Errorf("store.UpsertOwnedVehicle(user=%s): revoke superseded shares: %w", in.UserID, err)
+	revoked, err := revokeSharesReturningGrantees(ctx, tx, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("store.UpsertOwnedVehicle(user=%s): revoke superseded shares: %w", in.UserID, err)
 	}
-	return nil
+	return revoked, nil
 }
 
 // insertDriverLinkSupersededAudit writes the `vehicle.driver_link_superseded_by_owner`

@@ -456,9 +456,23 @@ func TestOwnerProvisioner_UpsertOwnedVehicle(t *testing.T) {
 		if out.Outcome != store.VehicleOwned {
 			t.Errorf("outcome = %q, want owned", out.Outcome)
 		}
+		// `Inserted` IS LOAD-BEARING SINCE MYR-601: it is what separates a car
+		// ARRIVING in somebody's access set — which re-handshakes their live
+		// sockets — from the passive AfterLink sync walking over a car they have
+		// had for months. If it were always true, every Tesla re-consent would
+		// disconnect every session the owner holds.
+		if !out.Inserted {
+			t.Error("Inserted = false on the FIRST provision of this teslaVehicleId; the " +
+				"access-set widening announcement branches on it")
+		}
 		in.Name = "Renamed" // must not clobber an existing non-empty name
-		if _, err := prov.UpsertOwnedVehicle(ctx, in); err != nil {
+		second, err := prov.UpsertOwnedVehicle(ctx, in)
+		if err != nil {
 			t.Fatalf("second upsert: %v", err)
+		}
+		if second.Inserted {
+			t.Error("Inserted = true on a RECONCILE; every re-link would then re-handshake " +
+				"every session the owner holds, for cars that never moved")
 		}
 		var count int
 		var name string

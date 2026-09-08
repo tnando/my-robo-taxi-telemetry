@@ -95,6 +95,23 @@ func (h *ShareInviteHandler) ServePatch(w http.ResponseWriter, r *http.Request) 
 	// false and closes nothing — restoring access has no socket to end.
 	if row.Grant.Suspended {
 		h.endLiveAccess(granteeID, row.VehicleID, "suspended")
+	} else if patch.Suspended != nil && !*patch.Suspended {
+		// LIFTING A SUSPENSION IS A WIDENING (MYR-601), and it is the exact
+		// mirror of the branch above rather than an afterthought: suspension is
+		// the one flag on this endpoint that moves the vehicle in or out of the
+		// grantee's access set, so restoring it puts the car back — and the
+		// grantee's already-open socket, whose set was frozen while they were
+		// suspended, would otherwise stay dark until it reconnected.
+		//
+		// The condition is READ OFF THE REQUEST, not off the row, and that is
+		// the one asymmetry with the narrowing above. `row.Grant.Suspended ==
+		// false` is also true of a patch that only touched allowRides, and
+		// re-handshaking a viewer over a flag with no WebSocket effect at all
+		// would be a disconnect bought with nothing. Only a patch that ASKED to
+		// un-suspend widens; an un-suspend of an already-live grant is a
+		// harmless extra reconnect, which is the same trade the narrowing makes
+		// in its direction.
+		publishAccessWidened(h.widened, granteeID, row.VehicleID, "unsuspended")
 	}
 
 	// The invite id and what changed — never the label (P1), and there is no

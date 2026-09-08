@@ -123,27 +123,6 @@ func (h *ShareInviteHandler) endLiveAccess(granteeUserID, vehicleID, reason stri
 	h.sockets.ShareAccessRevoked(granteeUserID, vehicleID, reason)
 }
 
-// widenLiveAccess is the same second half for a mutation that GROWS somebody's
-// access (MYR-609): the cache bust fixes the next handshake, this one makes a
-// next handshake happen.
-//
-// ORDER MATTERS FOR THE MIRROR-IMAGE REASON and is likewise the caller's
-// responsibility — every call site busts the cache first. If the re-handshake
-// overtook the bust, the reconnect would be served the PRE-mutation set and
-// come back without the car it was sent to collect, which is a no-op that looks
-// like a fix.
-//
-// Best-effort by construction, exactly like endLiveAccess: a nil widener, an
-// empty grantee id, or a grantee who is simply not connected are all ordinary
-// no-ops. The grant has already committed and the owner's 201 does not depend
-// on anybody being online to hear about it.
-func (h *ShareInviteHandler) widenLiveAccess(granteeUserID, vehicleID, reason string) {
-	if h.widened == nil || granteeUserID == "" {
-		return
-	}
-	h.widened.ShareAccessWidened(granteeUserID, vehicleID, reason)
-}
-
 // linkCtx assembles the signing context for one request: the key plus the
 // CALLING OWNER's display name, resolved once per request rather than once per
 // row.

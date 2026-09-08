@@ -121,7 +121,7 @@ func (h *ShareInviteHandler) ServeExtend(w http.ResponseWriter, r *http.Request)
 	// worked, the grantee's map does not have the car, and neither of them can
 	// see why. `next handshake reads the widened set` was the mechanism; what
 	// was missing was anything that causes a next handshake.
-	h.widenLiveAccess(granteeID, vehicleID, "extended")
+	publishAccessWidened(h.widened, granteeID, vehicleID, "extended")
 
 	// Ids only: the new grant, the source it was copied from, the car and both
 	// parties. Never the label (P1) and never the code — which on an accepted

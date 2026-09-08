@@ -406,7 +406,8 @@ func setupHTTPHandlers(deps httpRouteDeps) {
 
 	setupFleetConfigEndpoint(deps.cfg, deps.srv, deps.authenticator, deps.vinCache, deps.accountRepo, deps.vehicleRepo, deps.logger)
 
-	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor, deps.fleetConfigReconciler, deps.logger)
+	setupTeslaLinkEndpoints(deps.cfg, deps.srv, deps.authenticator, deps.pool, deps.encryptor,
+		deps.fleetConfigReconciler, ownerStreamAccessFrom(deps), deps.logger)
 
 	// Per-feature endpoint groups, each in its own wiring_*.go.
 	setupVehicleTeardownEndpoint(deps)
@@ -491,6 +492,10 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// so bust their cached one — the redeem path's rule, for the redeem
 		// path's reason.
 		telemetry.WithRideAccessInvalidator(deps.accessInvalidator),
+		// MYR-601: and make their already-open socket re-handshake. See
+		// rideJoinWidenOption (wiring_vehicle_sharing.go) for why the three
+		// widening seams are named functions.
+		rideJoinWidenOption(deps),
 	}
 	// MYR-556: the dispatch-now seam, wired only when reservation dispatch was
 	// actually composed. Passing an adapter over a nil sweeper would turn a

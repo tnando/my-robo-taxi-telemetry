@@ -18,6 +18,7 @@ package store_test
 
 import (
 	"context"
+	"sort"
 	"testing"
 
 	"github.com/myrobotaxi/telemetry/internal/store"
@@ -28,6 +29,10 @@ const (
 	transferOwner  = "cxfer_owner001"
 	transferVID    = "vid-xfer-1"
 	transferVIN    = "5YJ3E1EA7KF000601"
+	// The driver's own viewers — third parties whose access the transfer
+	// revokes in the same statement (MYR-601).
+	transferViewerA = "cxfer_viewer_a"
+	transferViewerB = "cxfer_viewer_b"
 )
 
 // seedDriverProvisionedCar builds the state a driver's AfterLink leaves behind:
@@ -52,12 +57,20 @@ func seedDriverProvisionedCar(t *testing.T, vehicleID string) {
 		vehicleID, store.SetupOutcomeAwaitingOwnerAck); err != nil {
 		t.Fatalf("seed fleet-config schedule: %v", err)
 	}
+	// TWO REDEEMED VIEWERS AND ONE UNREDEEMED INVITE (MYR-601). The viewers are
+	// the people the transfer's teardown cuts who never linked anything — they
+	// are simply watching a car somebody shared with them, and their sessions
+	// are the ones most likely to be open. The pending row carries a NULL
+	// grantee and must not reach the caller as one.
 	if _, err := testPool.Exec(ctx,
 		`INSERT INTO go_vehicle_shares
-			(id, vehicle_id, owner_user_id, label, permission, code, status, expires_at)
-		 VALUES ('shr_xfer', $1, $2, 'A friend', 'rides', 'XFERCODE', 'accepted', NOW() + INTERVAL '7 days')`,
-		vehicleID, transferDriver); err != nil {
-		t.Fatalf("seed share: %v", err)
+			(id, vehicle_id, owner_user_id, accepted_by_user_id, label, permission, code, status, expires_at)
+		 VALUES
+			('shr_xfer',   $1, $2, $3,   'A friend',   'rides',  'XFERCODE', 'accepted', NOW() + INTERVAL '7 days'),
+			('shr_xfer_2', $1, $2, $4,   'Another',    'live',   'XFERCOD2', 'accepted', NOW() + INTERVAL '7 days'),
+			('shr_xfer_3', $1, $2, NULL, 'Not yet in', 'live',   'XFERCOD3', 'pending',  NOW() + INTERVAL '7 days')`,
+		vehicleID, transferDriver, transferViewerA, transferViewerB); err != nil {
+		t.Fatalf("seed shares: %v", err)
 	}
 }
 
@@ -78,6 +91,8 @@ func TestOwnerProvisioner_OwnerWinsTransfer(t *testing.T) {
 		cleanTransferTables(t)
 		seedOwnerUser(t, transferDriver, "", "")
 		seedOwnerUser(t, transferOwner, "", "")
+		seedOwnerUser(t, transferViewerA, "", "")
+		seedOwnerUser(t, transferViewerB, "", "")
 		const vehicleID = "veh_xfer_1"
 		seedDriverProvisionedCar(t, vehicleID)
 
@@ -100,6 +115,27 @@ func TestOwnerProvisioner_OwnerWinsTransfer(t *testing.T) {
 		if out.VehicleID != vehicleID {
 			t.Errorf("vehicle id = %q, want the EXISTING row %q — a transfer moves a row, "+
 				"it does not create a second one", out.VehicleID, vehicleID)
+		}
+		// MYR-601: the transfer is TWO access-set changes, and the second one is
+		// only actionable if the caller is told whose it was. The former driver's
+		// cached set has to be busted and their live sockets closed — the same
+		// account this transaction just revoked every share of — and this is the
+		// only place that id is known.
+		if out.PreviousUserID != transferDriver {
+			t.Errorf("previous user = %q, want the FORMER DRIVER %q — without it their cached "+
+				"access set stays warm for the TTL and their open socket keeps streaming the "+
+				"car's live GPS", out.PreviousUserID, transferDriver)
+		}
+		// AND EVERY THIRD PARTY THE SAME STATEMENT CUT (MYR-601). The linker is
+		// not the only loser: `queryRevokeSharesForVehicle` tombstones every
+		// live grant on the car, so the driver's viewers lose access too — and
+		// nothing else in the system would ever tell the hub about them.
+		if got := sortedCopy(out.RevokedGranteeIDs); len(got) != 2 ||
+			got[0] != transferViewerA || got[1] != transferViewerB {
+			t.Errorf("revoked grantees = %v, want both redeemed viewers [%s %s] and NOT the "+
+				"pending invite's NULL — a viewer nobody names keeps the car's live GPS "+
+				"until the cache TTL and the sweep catch up",
+				out.RevokedGranteeIDs, transferViewerA, transferViewerB)
 		}
 
 		var owner, name string
@@ -169,6 +205,15 @@ func TestOwnerProvisioner_OwnerWinsTransfer(t *testing.T) {
 			t.Fatalf("outcome = %q, want skipped_cross_user — OWNER WINS BOTH WAYS; a driver "+
 				"may not take an owner's row, and the owner sharing the car back is the "+
 				"documented path", out.Outcome)
+		}
+		// And a SKIP names nobody (MYR-601). A previous holder — or a grantee —
+		// reported here would have the hub close untouched sessions over a link
+		// that changed nothing.
+		if out.PreviousUserID != "" {
+			t.Errorf("previous user = %q on a skip, want empty", out.PreviousUserID)
+		}
+		if len(out.RevokedGranteeIDs) != 0 {
+			t.Errorf("revoked grantees = %v on a skip, want none", out.RevokedGranteeIDs)
 		}
 		var owner string
 		if err := testPool.QueryRow(ctx,
@@ -242,4 +287,12 @@ func cleanTransferTables(t *testing.T) {
 			t.Fatalf("clean %s: %v", table, err)
 		}
 	}
+}
+
+// sortedCopy orders a returned id list so an assertion does not depend on the
+// order Postgres happened to return the tombstoned rows in.
+func sortedCopy(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }

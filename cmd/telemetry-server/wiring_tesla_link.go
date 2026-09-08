@@ -59,6 +59,7 @@ func setupTeslaLinkEndpoints(
 	pool *pgxpool.Pool,
 	encryptor cryptox.Encryptor,
 	reconciler *telemetry.FleetConfigReconciler,
+	access ownerStreamAccess,
 	logger *slog.Logger,
 ) {
 	linkCfg := cfg.TeslaLink()
@@ -73,7 +74,7 @@ func setupTeslaLinkEndpoints(
 
 	linkLogger := logger.With(slog.String("component", "tesla-link"))
 	provisioner := store.NewOwnerProvisioner(pool, encryptor, linkLogger)
-	hook := buildOwnerStreamHook(cfg, provisioner, reconciler, linkLogger)
+	hook := buildOwnerStreamHook(cfg, provisioner, reconciler, access, linkLogger)
 	linker := &ownerLink{
 		provisioner: provisioner,
 		profiles:    identity.NewPgStore(pool),

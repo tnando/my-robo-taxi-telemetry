@@ -33,7 +33,19 @@ type fakeUpserter struct {
 	// downgrade makes the fake report AccessDowngradeObserved — the refusal the
 	// store returns when a non-OWNER signal arrives for an established owner row.
 	downgrade bool
-	err       error
+	// inserted makes the fake report that the statement CREATED the row rather
+	// than reconciling one (Postgres's `xmax = 0`). It is the fact MYR-601's
+	// announcement branches on — a car ARRIVING widens an access set, a
+	// re-linked car that has been there for months does not — so it defaults
+	// false and the tests that care set it.
+	inserted bool
+	// previousUserID is the account a VehicleOwnedByTransfer took the car FROM.
+	previousUserID string
+	// revokedGranteeIDs are the THIRD PARTIES whose shares the same transfer
+	// tombstoned (MYR-601) — the driver's viewers, who never linked anything
+	// and whose sessions nothing else in the system would name.
+	revokedGranteeIDs []string
+	err               error
 	// seededVINs / seededOutcomes record the link-time setup-state seed
 	// (MYR-491, widened by MYR-517), so a test can assert both that the row is
 	// written on EVERY door and that it carries the honest outcome.
@@ -72,6 +84,9 @@ func (f *fakeUpserter) UpsertOwnedVehicle(_ context.Context, in store.OwnedVehic
 	return store.VehicleUpsertResult{
 		Outcome:                 out,
 		VehicleID:               "veh_" + in.VIN,
+		Inserted:                f.inserted,
+		PreviousUserID:          f.previousUserID,
+		RevokedGranteeIDs:       f.revokedGranteeIDs,
 		DriverAccessPresent:     present,
 		DriverAccessPending:     present && !f.driverAcknowledged,
 		AccessDowngradeObserved: f.downgrade,

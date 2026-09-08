@@ -99,6 +99,14 @@ func (h *RideRequestHandler) ServeJoin(w http.ResponseWriter, r *http.Request) {
 		if h.access != nil {
 			h.access.InvalidateVehicles(userID)
 		}
+		// AND THE SOCKET THEY ARE ALREADY HOLDING (MYR-601). A joiner who
+		// tapped the link inside the app is CONNECTED, and their session's
+		// access set was frozen before the membership row existed — so without
+		// this the very tracking surface the 200 sends them to cannot subscribe
+		// to the car until they happen to reconnect. Published after the bust,
+		// for the reason every widening path states: a re-handshake served from
+		// the pre-join set comes back without the car.
+		publishAccessWidened(h.widened, userID, rec.VehicleID, "ride_joined")
 		h.logger.Info("ride join: member joined",
 			slog.String("ride_request_id", rec.ID),
 			slog.String("user_id", userID),
@@ -175,5 +183,15 @@ func (h *RideRequestHandler) writeJoinError(w http.ResponseWriter, userID string
 func WithRideAccessInvalidator(invalidator AccessCacheInvalidator) RideRequestOption {
 	return func(h *RideRequestHandler) {
 		h.access = invalidator
+	}
+}
+
+// WithRideAccessWidener wires the live-socket half of that same join (MYR-601).
+// The invalidator fixes the joiner's next handshake; this makes a next
+// handshake happen. Nil leaves an already-open socket without the ride's car
+// until it reconnects or the 60-second revalidation sweep catches it.
+func WithRideAccessWidener(wd ShareAccessWidener) RideRequestOption {
+	return func(h *RideRequestHandler) {
+		h.widened = wd
 	}
 }

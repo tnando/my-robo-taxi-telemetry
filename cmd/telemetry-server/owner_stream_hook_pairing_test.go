@@ -117,7 +117,7 @@ func TestLinkTimePairingSignalIsOptional(t *testing.T) {
 // hook's own `pairing == nil` guard would sail past it into a nil-receiver
 // channel send on the first car that links.
 func TestBuildOwnerStreamHookGuardsTheNilReconciler(t *testing.T) {
-	hook := buildOwnerStreamHook(&config.Config{}, &fakeUpserter{}, nil, testLogger())
+	hook := buildOwnerStreamHook(&config.Config{}, &fakeUpserter{}, nil, ownerStreamAccess{}, testLogger())
 	if hook.pairing != nil {
 		t.Fatal("pairing notifier is non-nil for a nil reconciler; that is the typed-nil trap")
 	}
