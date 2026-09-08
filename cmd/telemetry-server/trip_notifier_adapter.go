@@ -72,6 +72,21 @@ func (a *tripNotifierAdapter) TripEnded(ctx context.Context, trip telemetry.Trip
 	}
 }
 
+// TripDeleted settles a trip the owner is about to delete (MYR-607): it ends
+// every open leg and its Live Activities, then fans out `trip_ended` carrying
+// `deleted: true`.
+//
+// SAME SHAPE AS TripEnded AND FOR THE SAME REASON — the settlement is the work,
+// the banner is a side effect of it — with the one difference that this one is
+// the LAST moment the trip can be read at all. The handler calls it before the
+// delete; nothing after the delete could end a card, because nothing after the
+// delete can name the device holding it.
+func (a *tripNotifierAdapter) TripDeleted(ctx context.Context, trip telemetry.TripData, _ []string) {
+	if err := a.svc.NotifyTripDeleted(ctx, trip.ID); err != nil {
+		a.log(ctx, "trip_deleted", trip.ID, err)
+	}
+}
+
 // log records a failed announcement at WARN. Not ERROR: the state change it was
 // about has already committed and is correct, and the sweeper reaches the same
 // edge again on its next pass for both boundary events.

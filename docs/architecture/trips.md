@@ -9,6 +9,7 @@
 - **2026-09-05, the narrowing:** *"you should really only see live location during an active trip shared with a user"* (or an accepted active ride). This **supersedes** [MYR-435](https://linear.app/myrobotaxi/issue/MYR-435)'s 2026-08-02 decision to keep the navigation group on a plain `viewer` — see §4.
 - **2026-09-05, access is the window:** a participant's access is **not** conditioned on a driving leg being underway, on the car's status, or on a destination being set. A parked car inside an open window streams to its participants exactly as it does to its owner. Legs govern the Live Activity and nothing else.
 - **2026-09-06, the owner is in the Activity:** the owner may register a push-to-start token and is included in the per-leg Live Activity, even though the owner receives none of the three REST-caused pushes.
+- **2026-09-07, the trip is deletable:** *"please allow the creator of a trip to go back and add more people, and have the ability delete the trip at anytime"* ([MYR-607](https://linear.app/myrobotaxi/issue/MYR-607)). Adding people later was already `PATCH`'s `addParticipantIds`; deleting was not, and **"at anytime" is taken literally — every status, `ended` included.** See §10A.
 
 ---
 
@@ -371,6 +372,77 @@ person actually notices.
 `Client.roles` is an immutable map behind an atomic pointer, replaced whole and
 never edited, because it is read lock-free on the broadcast hot path.
 
+## 10A. Deleting a trip (MYR-607)
+
+**The owner may delete a trip in ANY status**, and the route is
+`DELETE /api/trips/{tripId}` ([`rest-api.md`](../contracts/rest-api.md)
+§7.30.10). It is the only mutation on this surface that can only ever REDUCE
+what people can see, which is why it carries none of §7.30.4's `trip_ended`
+refusal: that refusal exists because extending a lapsed window would resurrect
+live access, and a deletion grants nothing to anybody.
+
+**THREE PHASES, AND THE ORDER IS THE WHOLE DESIGN.**
+
+| Phase | What happens | Where |
+|---|---|---|
+| 1 — end | `ended_at` is stamped, through the §7.30.5 statement reused verbatim (owner-scoped, guarded on `ended_at IS NULL`, a no-op on an already-ended trip) | `store.TripRepo.End` |
+| 2 — settle | Every open leg is ended and its Live Activity ended; `trip_ended` is fanned out to the participants carrying **`deleted: true`**; the WS re-mask is nudged | `trips.Service.NotifyTripDeleted` |
+| 3 — delete | Five statements in one transaction: the audit row, then the leg Activities, the legs, the tokens, the roster, the window | `store.TripRepo.Delete` |
+
+**PHASE 2 READS ROWS PHASE 3 REMOVES.** Who is on the trip, which leg is open,
+which device holds which card — after phase 3 nothing in the database can name
+any of them. A settlement that ran last would end no card and tell nobody, and
+every participant's lock screen would keep a live Activity for a journey that no
+longer exists until ActivityKit's own 8-hour staleness ceiling retired it. That
+is the same hazard the `0047` down-migration's header warns about, arrived at
+from the other direction.
+
+**PHASE 1 EXISTS ONLY FOR THE HALF-DONE STATE.** On the happy path the row is
+deleted a moment later and nothing ever reads the stamp. Phase 2 takes every
+card down and tells every participant the trip is over; **without `ended_at`
+written first, a phase 3 that FAILED would leave the trip ACTIVE, so those
+people would keep the car's live location for the rest of a window they had just
+been told had closed** — told it ended, still watching. With it, the trip is
+genuinely over, the client's retry deletes it, and the only artefact is a trip
+that reads as `ended` on the owner's own list until then. The reverse ordering
+cannot offer a conservative failure at all: its failure is a stranded card on
+somebody else's phone that nothing can clear.
+
+**`NotifyTripDeleted` IS `SettleTrip` WITH TWO DIFFERENCES**, and the second is
+the one worth knowing: the banner carries the flag, and **the open legs are
+closed even when the end claim was already spent.** `SettleTrip` returns early
+on a lost claim because a second closing edge has nothing left to do; a deletion
+is the LAST moment any of it is possible, so a settlement interrupted between
+its claim and its legs (a redeploy, a crashed pass) is repaired here rather than
+never. The claim still arbitrates the BANNER, which is what makes *"announce
+only when the trip was scheduled or active"* hold without the handler passing a
+status down — every path that ends a trip stamps `ended_notified_at`.
+
+**`deleted: true` RIDES `trip_ended` RATHER THAN BEING A SIXTH EVENT.** Installed
+builds switch on `event`, and a value they have never seen routes to their
+default arm — *do nothing* for a lifecycle push — so a deleted trip would
+silently stay on the phone of exactly the people it was deleted out from under.
+The flag is a JSON boolean, absent (never `false`) on an ordinary end, so every
+push that existed before MYR-607 is byte-identical.
+
+**WHAT SURVIVES: the DRIVES**, for the reason §9 gives about account deletion —
+a trip never owned a drive, the window merely selected it — and **the SHARES**,
+because a trip creates no vehicle relationship and deleting one destroys none.
+The participants keep the plain `viewer` role their accepted grant already gave
+them.
+
+**ACCESS STOPS WHEN THE ROWS DO.** The fourth UNION leg joins `go_trips`, so a
+deleted trip grants nothing on the next lookup. A connected socket is re-masked
+by the `AccessRevalidator`'s own 60-second tick rather than by phase 1's nudge —
+that nudge is asked for while the rows still exist — which is exactly the
+mechanism §10's re-mask section describes for a window that lapses on the clock.
+
+**ONE AUDIT ROW, `trip.deleted`**, written inside the transaction and before the
+deletes (CG-DL-3): `targetType='trip'`, the owner's id, and `{vehicleId}` as the
+whole of its metadata. **It is the only record the participants have.**
+Normatively specified in [`data-lifecycle.md`](../contracts/data-lifecycle.md)
+§3.6 and §4.2.
+
 ## 11. Kill switch
 
 `TRIPS_ENABLED` (default true) is read at **composition** time: false constructs
@@ -415,15 +487,15 @@ Two smaller seams are wired the same fail-closed way and are worth knowing about
 
 ## 13. References
 
-- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the nine trip routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
+- **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the ten trip routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
 - **Schemas:** [`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json), and the MYR-602 amendments to [`vehicle-summary.schema.json`](../contracts/schemas/vehicle-summary.schema.json) (`activeTripId`, the rewritten `location` RBAC text), [`vehicle-state.schema.json`](../contracts/schemas/vehicle-state.schema.json) (the per-field MYR-602 visibility notes) and [`live-activity.schema.json`](../contracts/schemas/live-activity.schema.json) (the `ride` \| `trip` kind).
 - **Classification:** [`data-classification.md`](../contracts/data-classification.md) §1.25–§1.28, §1.18 (`trip_leg_id`), §3.1 (two new encrypted columns), §3.2 (the push-to-start token), §6 (counts).
 - **Schema:** [`internal/store/migrations/0047_trips.up.sql`](../../internal/store/migrations/0047_trips.up.sql) — the header comment carries the four-table argument and the CG-DL-9 FK reasoning.
-- **Store:** [`trip_types.go`](../../internal/store/trip_types.go), [`trip_view.go`](../../internal/store/trip_view.go), [`trip_validate.go`](../../internal/store/trip_validate.go), [`trip_queries.go`](../../internal/store/trip_queries.go) (every statement in one file, with the three invariants at the top), [`trip_repo.go`](../../internal/store/trip_repo.go), [`trip_repo_read.go`](../../internal/store/trip_repo_read.go), [`trip_repo_write.go`](../../internal/store/trip_repo_write.go), [`trip_repo_drives.go`](../../internal/store/trip_repo_drives.go), [`trip_repo_catalog.go`](../../internal/store/trip_repo_catalog.go), [`account_deletion.go`](../../internal/store/account_deletion.go) (step 8g).
+- **Store:** [`trip_types.go`](../../internal/store/trip_types.go), [`trip_view.go`](../../internal/store/trip_view.go), [`trip_validate.go`](../../internal/store/trip_validate.go), [`trip_queries.go`](../../internal/store/trip_queries.go) (every statement in one file, with the three invariants at the top), [`trip_repo.go`](../../internal/store/trip_repo.go), [`trip_repo_read.go`](../../internal/store/trip_repo_read.go), [`trip_repo_write.go`](../../internal/store/trip_repo_write.go), [`trip_repo_delete.go`](../../internal/store/trip_repo_delete.go), [`trip_repo_drives.go`](../../internal/store/trip_repo_drives.go), [`trip_repo_catalog.go`](../../internal/store/trip_repo_catalog.go), [`account_deletion.go`](../../internal/store/account_deletion.go) (step 8g).
 - **Handlers:** [`trip_handler.go`](../../internal/telemetry/trip_handler.go), [`trip_detail_handler.go`](../../internal/telemetry/trip_detail_handler.go), [`trip_drives_handler.go`](../../internal/telemetry/trip_drives_handler.go), [`trip_activity_token_handler.go`](../../internal/telemetry/trip_activity_token_handler.go), [`trip_wire.go`](../../internal/telemetry/trip_wire.go), [`trip_errors.go`](../../internal/telemetry/trip_errors.go), [`trip_types.go`](../../internal/telemetry/trip_types.go), [`trip_notifier.go`](../../internal/telemetry/trip_notifier.go), [`trip_drive_access.go`](../../internal/telemetry/trip_drive_access.go), [`vehicles_list_trip.go`](../../internal/telemetry/vehicles_list_trip.go).
 - **Access and masks:** [`internal/auth/role.go`](../../internal/auth/role.go), [`internal/auth/queries.go`](../../internal/auth/queries.go), [`internal/auth/vehicle_access.go`](../../internal/auth/vehicle_access.go), [`internal/mask/tables.go`](../../internal/mask/tables.go), [`internal/mask/sentinels.go`](../../internal/mask/sentinels.go), [`internal/mask/mask.go`](../../internal/mask/mask.go).
 - **Composition root and config:** [`cmd/telemetry-server/wiring_trips.go`](../../cmd/telemetry-server/wiring_trips.go), [`internal/config/config.go`](../../internal/config/config.go) (`TripsEnabled`).
-- **Neighbours:** [MYR-184](https://linear.app/myrobotaxi/issue/MYR-184) (shares), [MYR-369](https://linear.app/myrobotaxi/issue/MYR-369) (drives went owner-only; grant capabilities), [MYR-435](https://linear.app/myrobotaxi/issue/MYR-435) (the viewer allow-list this narrowing supersedes in part), [MYR-447](https://linear.app/myrobotaxi/issue/MYR-447) (the label encryptor), [MYR-515](https://linear.app/myrobotaxi/issue/MYR-515) (`VehicleSummary.location`), [MYR-540](https://linear.app/myrobotaxi/issue/MYR-540) (ride members), [MYR-583](https://linear.app/myrobotaxi/issue/MYR-583) (the confirmed-name gate the roster reads), [MYR-602](https://linear.app/myrobotaxi/issue/MYR-602).
+- **Neighbours:** [MYR-184](https://linear.app/myrobotaxi/issue/MYR-184) (shares), [MYR-369](https://linear.app/myrobotaxi/issue/MYR-369) (drives went owner-only; grant capabilities), [MYR-435](https://linear.app/myrobotaxi/issue/MYR-435) (the viewer allow-list this narrowing supersedes in part), [MYR-447](https://linear.app/myrobotaxi/issue/MYR-447) (the label encryptor), [MYR-515](https://linear.app/myrobotaxi/issue/MYR-515) (`VehicleSummary.location`), [MYR-540](https://linear.app/myrobotaxi/issue/MYR-540) (ride members), [MYR-583](https://linear.app/myrobotaxi/issue/MYR-583) (the confirmed-name gate the roster reads), [MYR-602](https://linear.app/myrobotaxi/issue/MYR-602), [MYR-607](https://linear.app/myrobotaxi/issue/MYR-607) (the owner's delete).
 
 ### The code map
 
@@ -434,7 +506,8 @@ Two smaller seams are wired the same fail-closed way and are worth knowing about
 | Leg detector (I/O half) | `internal/trips/detector.go` |
 | Leg detector (pure rules) | `internal/trips/detector_state.go` |
 | Leg lifecycle and its four claims | `internal/trips/legs.go` |
-| The two window transitions, `TripNotifier`, `SettleTrip` | `internal/trips/transitions.go` |
+| The two window transitions, `TripNotifier`, `SettleTrip`, `NotifyTripDeleted` | `internal/trips/transitions.go` |
+| The owner's deletion (handler / store) | `internal/telemetry/trip_delete_handler.go`, `internal/store/trip_repo_delete.go` |
 | Trip banners (`trips` category) | `internal/push/notifier_trips.go`, `copy_trips.go` |
 | Trip Live Activity | `internal/push/activity_trip_notifier.go`, `activity_trip_fanout.go`, `activity_trip_state.go` |
 | Push-to-start envelope | `internal/push/activity_apns.go` |

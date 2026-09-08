@@ -516,3 +516,85 @@ const queryDeleteTripParticipationsBy = `DELETE FROM go_trip_participants WHERE 
 //
 // #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryDeleteTripActivityTokensBy = `DELETE FROM go_trip_activity_tokens WHERE user_id = $1`
+
+// ── OWNER DELETION (MYR-607, §7.30.10) ──────────────────────────────────────
+//
+// Five statements, in the order TripRepo.Delete issues them. They are here
+// rather than in trip_repo_delete.go for the reason at the top of this file:
+// `queryLockTripForOwner` is an ACCESS-CONTROL predicate, and the set of those
+// is meant to be readable at once.
+
+// queryLockTripForOwner is the deletion's ownership gate AND its serialiser.
+//
+// `owner_user_id = $2` is invariant 1 applied to the most destructive mutation
+// on the surface: no row means an unknown trip, somebody else's trip, or a trip
+// the caller is only a PARTICIPANT of, and all three are one answer (404).
+//
+// FOR UPDATE holds the row for the length of the transaction, so two concurrent
+// deletes of one trip serialise: the second waits, finds the row gone, and its
+// caller receives the same ErrTripNotFound a stranger would. It also blocks a
+// concurrent PATCH or END from mutating a trip whose children are being
+// removed — both of those write go_trips through statements that take their own
+// row lock.
+//
+// It returns the VEHICLE because the audit row's metadata carries it and
+// nothing else: after the commit, the car is the only other nameable thing
+// about a window that no longer exists.
+const queryLockTripForOwner = `
+SELECT vehicle_id FROM go_trips
+WHERE id = $1 AND owner_user_id = $2
+FOR UPDATE`
+
+// queryDeleteTripLegActivitiesForTrip removes the LEG-ANCHORED Live Activity
+// registrations of every leg this trip ran.
+//
+// ⚠ THE ANCHOR PREDICATE IS THE SCOPE, not a filter over it: the sub-select
+// names this trip's legs, and `go_live_activities` rows with a RIDE anchor are
+// unreachable from it by construction (the CHECK on migration 0047 permits
+// exactly one anchor per row). A statement that reached a ride's registration
+// would take the sender's only address for a card that is still on a lock
+// screen — the hazard account_deletion_trip_live.go spells out at length.
+//
+// The FK from `trip_leg_id` would cascade this when the legs go, one statement
+// down. It is stated anyway: a two-link cascade is invisible at the call site,
+// and the row it silently missed would be a live capability addressed at a
+// phone.
+const queryDeleteTripLegActivitiesForTrip = `
+DELETE FROM go_live_activities
+WHERE trip_leg_id IN (SELECT id FROM go_trip_legs WHERE trip_id = $1)`
+
+// queryDeleteTripLegs removes the trip's legs.
+const queryDeleteTripLegs = `DELETE FROM go_trip_legs WHERE trip_id = $1`
+
+// queryDeleteTripActivityTokensForTrip removes every party's push-to-start
+// registration on this trip — the owner's and each participant's alike.
+//
+// #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
+const queryDeleteTripActivityTokensForTrip = `
+DELETE FROM go_trip_activity_tokens WHERE trip_id = $1`
+
+// queryDeleteTripParticipantsForTrip removes the roster.
+//
+// A HARD DELETE, unlike queryLeaveTrip's tombstone, and the asymmetry is the
+// point: `left_at` exists so "was this person ever on this trip" stays
+// answerable, and after the trip itself is gone there is no trip for that
+// question to be about.
+const queryDeleteTripParticipantsForTrip = `
+DELETE FROM go_trip_participants WHERE trip_id = $1`
+
+// queryDeleteTrip removes the window itself. Owner-scoped a second time — the
+// FOR UPDATE probe already established it — because invariant 1 is about the
+// statement that WRITES, and a predicate that is merely redundant today is what
+// keeps it true after the next edit.
+const queryDeleteTrip = `DELETE FROM go_trips WHERE id = $1 AND owner_user_id = $2`
+
+// tripDeleteChildStatements is the child-first order TripRepo.Delete issues.
+// Ordered rather than a set: the Live Activity rows hang off the legs, so they
+// go first, and a reordering that broke that would be caught by the FK rather
+// than silently.
+var tripDeleteChildStatements = []string{
+	queryDeleteTripLegActivitiesForTrip,
+	queryDeleteTripLegs,
+	queryDeleteTripActivityTokensForTrip,
+	queryDeleteTripParticipantsForTrip,
+}

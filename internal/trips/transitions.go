@@ -37,6 +37,16 @@ type TripNotifier interface {
 	// its cards, and re-masks the sockets. It is SettleTrip under the name the
 	// handler lane knows it by.
 	NotifyTripEnded(ctx context.Context, tripID string) error
+	// NotifyTripDeleted is the settlement the owner's DELETE runs BEFORE the
+	// rows go (MYR-607, §7.30.10). Same work as NotifyTripEnded, with
+	// `deleted: true` on the banner.
+	//
+	// IT MUST BE CALLED WHILE THE TRIP STILL EXISTS. Everything it does — read
+	// the audience, end the open legs, address each party's Live Activity —
+	// reads rows the delete is about to remove, and there is no second chance
+	// afterwards: nothing in the database will ever again name who was on that
+	// trip.
+	NotifyTripDeleted(ctx context.Context, tripID string) error
 }
 
 // Compile-time proof that the sweeper's own service satisfies the surface the
@@ -90,6 +100,32 @@ func (s *Service) NotifyTripStarted(ctx context.Context, tripID string) error {
 // NotifyTripEnded is SettleTrip under the name the REST lane calls it by.
 func (s *Service) NotifyTripEnded(ctx context.Context, tripID string) error {
 	return s.SettleTrip(ctx, tripID)
+}
+
+// NotifyTripDeleted settles a trip that is about to be DELETED (MYR-607).
+//
+// THE ONE DIFFERENCE FROM SettleTrip THAT IS NOT THE FLAG: the legs are closed
+// whether or not the end was claimed. SettleTrip returns early on a lost claim
+// because a second closing edge has nothing left to do — somebody already did
+// it — but a deletion is the last moment any of this is POSSIBLE. If a previous
+// settlement was interrupted between its claim and its legs (a redeploy, a
+// crashed pass), the rows that address those cards disappear thirty
+// milliseconds from now and the cards would sit on their lock screens until
+// ActivityKit's own staleness ceiling retired them.
+//
+// The claim still arbitrates the BANNER, which is what makes "emit `trip_ended`
+// when the trip was scheduled or active" hold without the handler passing a
+// status down: every path that ends a trip stamps `ended_notified_at` — the
+// owner's early end through SettleTrip, the natural expiry through the
+// sweeper — so a trip that is already `ended` cannot win the claim, and a trip
+// that is scheduled or active always does.
+func (s *Service) NotifyTripDeleted(ctx context.Context, tripID string) error {
+	claimed, err := s.trips.ClaimTripEndNow(ctx, tripID)
+	if err != nil {
+		return fmt.Errorf("trips.NotifyTripDeleted(trip=%s): %w", tripID, err)
+	}
+	s.settle(ctx, tripID, claimed, true)
+	return nil
 }
 
 // startTrip is the opening edge. Claimed by the caller when the caller is the
@@ -169,6 +205,22 @@ func (s *Service) SettleTrip(ctx context.Context, tripID string) error {
 // settleClaimed does the work of a closing edge whose stamp is already claimed.
 // The SWEEPER claims in bulk and calls this directly.
 func (s *Service) settleClaimed(ctx context.Context, tripID string) {
+	s.settle(ctx, tripID, true, false)
+}
+
+// settle is the closing edge itself, shared by the three callers that reach one:
+// the sweeper's pass, the owner's early end, and the owner's DELETE.
+//
+// `announce` is whether this caller won the end claim — false means somebody
+// already told everybody and a second banner about the same fact is how a
+// notification category gets turned off. `deleted` rides the banner it does
+// send.
+//
+// ⚠ THE LEGS ARE CLOSED EVEN WHEN NOTHING IS ANNOUNCED, and that is what lets
+// the deletion path call this on a lost claim. It costs an empty
+// OpenLegsForTrip read on the ordinary paths, which never reach here without
+// the claim.
+func (s *Service) settle(ctx context.Context, tripID string, announce, deleted bool) {
 	audience, audErr := s.trips.TripAudienceFor(ctx, tripID)
 
 	// Legs first — see SettleTrip's ordering note. A leg still open when its
@@ -177,11 +229,12 @@ func (s *Service) settleClaimed(ctx context.Context, tripID string) {
 	// carries `completed` and no `trip_leg_arrived` push fires.
 	s.endOpenLegs(ctx, tripID, audience)
 
-	if audErr != nil {
+	switch {
+	case audErr != nil:
 		s.logger.Warn("trips: trip_ended lookup failed; nobody notified",
 			slog.String("trip_id", tripID),
 			slog.String("error", audErr.Error()))
-	} else {
+	case announce:
 		s.notify(ctx, push.TripPush{
 			TripID:    tripID,
 			VehicleID: audience.VehicleID,
@@ -189,14 +242,28 @@ func (s *Service) settleClaimed(ctx context.Context, tripID string) {
 			// Participants only, same reasoning as the start: the owner either
 			// set this end themselves or set the window it just reached.
 			UserIDs: audience.ParticipantUserIDs,
+			Deleted: deleted,
 		})
 	}
 
 	// LAST, and last on purpose: this is what actually revokes the live
 	// location, and running it before the pushes would take a participant's map
 	// dark a beat before their phone told them why.
+	//
+	// ⚠ ON THE DELETION PATH THIS NUDGE IS AN ACCELERATION AND NOT THE
+	// GUARANTEE, because it is asked for while the trip rows still exist: a
+	// sweep that runs before the delete commits re-derives the role the
+	// participant already has. What actually re-masks them is the
+	// AccessRevalidator's own 60-second tick, once the rows are gone — the same
+	// mechanism, for the same reason, as a window that lapses on the clock
+	// (docs/architecture/trips.md §10: there is no mutation for the revocation
+	// nudge to hang off, so the tick is not a backstop but THE mechanism). The
+	// nudge is still asked for, because the settlement it follows is real and
+	// because a trailing sweep frequently does land after the commit.
 	s.nudgeRevalidation(ctx, "trip_ended", tripID)
-	s.logger.Info("trip window closed", slog.String("trip_id", tripID))
+	s.logger.Info("trip window closed",
+		slog.String("trip_id", tripID),
+		slog.Bool("deleted", deleted))
 }
 
 // endOpenLegs closes whatever legs a trip still has open, with no arrival

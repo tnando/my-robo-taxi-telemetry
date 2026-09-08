@@ -39,6 +39,15 @@ type fakeTripStore struct {
 	tokenCalls  int
 	deleteCalls int
 
+	// tripDeleteCalls counts DeleteTrip invocations, and deleteErr is separate
+	// from err so a test can script "the read succeeds, the delete fails" —
+	// the settle-before-delete ordering's own failure mode.
+	tripDeleteCalls int
+	deleteErr       error
+	// endCalls counts EndTrip, which the delete route calls before settling so
+	// a failed delete leaves a trip that is genuinely over.
+	endCalls int
+
 	// The LEG anchor of §7.21's per-Activity path (§7.21.7).
 	legTokenCalls  int
 	legEndCalls    int
@@ -83,11 +92,16 @@ func (f *fakeTripStore) UpdateTrip(_ context.Context, _, _ string, in TripUpdate
 	return f.trip, f.err
 }
 func (f *fakeTripStore) EndTrip(context.Context, string, string) (TripData, error) {
+	f.endCalls++
 	return f.trip, f.err
 }
 func (f *fakeTripStore) LeaveTrip(context.Context, string, string) error {
 	f.leaveCalls++
 	return f.err
+}
+func (f *fakeTripStore) DeleteTrip(context.Context, string, string) error {
+	f.tripDeleteCalls++
+	return f.deleteErr
 }
 func (f *fakeTripStore) TripDrives(context.Context, string, string, DriveListCursor, int) (DriveListPage, error) {
 	if f.err != nil {
@@ -133,6 +147,11 @@ type recordingTripNotifier struct {
 	added   [][]string
 	started [][]string
 	ended   [][]string
+	deleted [][]string
+
+	// onDeleted lets a test observe the ORDER of the two calls the delete route
+	// makes, which is the one property no status code can express.
+	onDeleted func()
 }
 
 func (n *recordingTripNotifier) TripAdded(_ context.Context, _ TripData, ids []string) {
@@ -143,6 +162,12 @@ func (n *recordingTripNotifier) TripStarted(_ context.Context, _ TripData, ids [
 }
 func (n *recordingTripNotifier) TripEnded(_ context.Context, _ TripData, ids []string) {
 	n.ended = append(n.ended, ids)
+}
+func (n *recordingTripNotifier) TripDeleted(_ context.Context, _ TripData, ids []string) {
+	n.deleted = append(n.deleted, ids)
+	if n.onDeleted != nil {
+		n.onDeleted()
+	}
 }
 
 // fixtureTrip is an ACTIVE trip owned by tripTestOwner with one participant.
@@ -190,6 +215,7 @@ func newTripTestHandler(t *testing.T, store TripStore, enabled bool, opts ...Tri
 	mux.HandleFunc("GET /api/trips", h.ServeList)
 	mux.HandleFunc("GET /api/trips/{tripId}", h.ServeGet)
 	mux.HandleFunc("PATCH /api/trips/{tripId}", h.ServePatch)
+	mux.HandleFunc("DELETE /api/trips/{tripId}", h.ServeDelete)
 	mux.HandleFunc("POST /api/trips/{tripId}/end", h.ServeEnd)
 	mux.HandleFunc("DELETE /api/trips/{tripId}/participants/me", h.ServeLeave)
 	mux.HandleFunc("GET /api/trips/{tripId}/drives", h.ServeDrives)
@@ -241,6 +267,7 @@ func TestTripsKillSwitchAnswers503OnEveryRoute(t *testing.T) {
 		{http.MethodGet, "/api/trips"},
 		{http.MethodGet, "/api/trips/" + tripTestID},
 		{http.MethodPatch, "/api/trips/" + tripTestID},
+		{http.MethodDelete, "/api/trips/" + tripTestID},
 		{http.MethodPost, "/api/trips/" + tripTestID + "/end"},
 		{http.MethodDelete, "/api/trips/" + tripTestID + "/participants/me"},
 		{http.MethodGet, "/api/trips/" + tripTestID + "/drives"},
