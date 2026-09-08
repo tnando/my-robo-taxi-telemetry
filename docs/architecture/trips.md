@@ -939,7 +939,7 @@ Three details of that statement are the review round's, and each one is load-bea
 | Thing | File |
 |---|---|
 | The accumulator, the regen/charging discriminator, the zero clamp | `internal/drives/energy.go` |
-| The idle `energyRemaining` cache (the SOC cache's twin) | `internal/drives/detector.go`, `internal/drives/state.go` |
+| The idle `energyRemaining` cache and the latched `chargeState` (the SOC cache's family) | `internal/drives/caches.go`, `internal/drives/state.go` |
 | Baseline seeding at drive start, per-sample folding | `internal/drives/transitions.go` |
 | `EnergyDelta` sourced from the accumulator | `internal/drives/stats.go` |
 | The three energy outcomes logged at drive end | `internal/drives/debounce.go` |

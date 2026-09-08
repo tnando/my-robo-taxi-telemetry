@@ -203,15 +203,3 @@ func resetToIdle(s *vehicleState) {
 	s.drive = nil
 	s.lastGear = ""
 }
-
-// latchedChargeState returns the last charge state the vehicle reported, or ""
-// when it has never reported one. "" is the honest answer for a car that has
-// never charged since we started listening: isChargingState("") is false, so
-// the energy accumulator falls through to its rate bound rather than guessing.
-// The caller must hold s.mu.
-func (s *vehicleState) latchedChargeState() string {
-	if !s.chargeStateKnown {
-		return ""
-	}
-	return s.lastChargeState
-}
