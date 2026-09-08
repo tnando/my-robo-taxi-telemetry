@@ -199,18 +199,20 @@ func (d *Detector) endDrive(state *vehicleState, vin string) {
 	d.metrics.ObserveDriveDistance(stats.Distance)
 
 	// MYR-629 — the energy fields are logged so an operator can tell the three
-	// outcomes apart WITHOUT reading the row back: a measured figure, an
+	// outcomes apart WITHOUT reading the row back: a measured figure (negative
+	// on a net-regen drive, which is a real reading and no longer clamped), an
 	// unmeasurable drive (energy_reported=false, which is what `energyUsedKwh`
 	// = 0 means and why `Trip.totalEnergyKwh` refuses to sum such a window),
-	// and a figure that had a charging interval excluded from it.
-	energyKwh, energyReported := drive.energy.total()
+	// and a figure that had a charging interval excluded from it. The figure is
+	// the one calculateStats already took from the accumulator — one total()
+	// call per drive, and the log cannot disagree with the persisted row.
 	d.logger.Info("drive ended",
 		slog.String("vin", redactVIN(vin)),
 		slog.String("drive_id", drive.id),
 		slog.Duration("duration", stats.Duration),
 		slog.Float64("distance_miles", stats.Distance),
-		slog.Float64("energy_used_kwh", energyKwh),
-		slog.Bool("energy_reported", energyReported),
+		slog.Float64("energy_used_kwh", stats.EnergyDelta),
+		slog.Bool("energy_reported", drive.energy.reported()),
 		slog.Bool("charged_inside_drive", drive.energy.chargedInside),
 	)
 

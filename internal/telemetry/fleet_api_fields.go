@@ -194,11 +194,24 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		//
 		// 300s rather than the 120s of the comfort family: this field is not
 		// gating a control tile that must be right within one screen refresh,
-		// it is warming a baseline for the next drive, and 300s is ~288
-		// messages a day against the vehicle's 5000-message buffer. WHILE THE
-		// CAR IS DRIVING the resend costs nothing at all — energy changes
-		// continuously, so on-change emission already fires every interval and
-		// the resend never triggers.
+		// it is warming a baseline for the next drive.
+		//
+		// WHAT IT COSTS, STATED AS A RATE: one extra frame every 300s from each
+		// PARKED car, or ~288 a day (86400/300). That is the number to weigh —
+		// against Tesla's streaming budget and our own ingest — and it applies
+		// to every car in the fleet whether or not anybody is reading its trips.
+		// WHILE THE CAR IS DRIVING the resend costs nothing at all: energy
+		// changes continuously, so on-change emission already fires every
+		// interval and the resend never triggers.
+		//
+		// ⚠ THE 5000-MESSAGE FIGURE IN THE HEADER IS A DEPTH, NOT AN ALLOWANCE,
+		// and comparing a daily rate against it is comparing two different
+		// things. It is the vehicle's OFFLINE store-and-forward buffer: a car
+		// that loses connectivity holds up to 5000 records and flushes them in
+		// order on reconnect. So the way this resend touches that budget is
+		// ~12 records an hour of DISCONNECTION — a car offline for a full day
+		// spends ~288 of the 5000 slots on this field alone (~6%), on top of
+		// everything else it is buffering. Neither number bounds the other.
 		//
 		// KILL-SWITCH SAFETY: this is a value in DefaultFieldConfig, so it is
 		// governed by the same fleet-config push path as every other field, and
@@ -207,7 +220,11 @@ func DefaultFieldConfig() map[string]FieldConfig {
 		// in-drive seed is what makes the old behaviour still produce a figure.
 		// NOTE: a config change only reaches a car on a re-push (POST
 		// /api/fleet-config/{vin}, `ops fleet-config push`, or the next owner
-		// link) — there is no config version/hash that re-pushes itself.
+		// link) — there is no config version/hash that re-pushes itself. ⚠ SO
+		// THIS SETTING IS DORMANT until a sweep re-pushes the fleet: every car
+		// linked before MYR-629 keeps its stored config. Filed as MYR-630
+		// rather than run here, because the frame cost above makes it an
+		// operational decision rather than a code one.
 		FleetFieldEnergyRemaining: {IntervalSeconds: 30, ResendIntervalSeconds: intPtr(300)},
 		FleetFieldPackVoltage:     {IntervalSeconds: 30},
 		FleetFieldPackCurrent:     {IntervalSeconds: 30},

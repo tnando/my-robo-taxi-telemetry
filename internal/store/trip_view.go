@@ -69,10 +69,15 @@ type TripView struct {
 	// null, and a plain SUM would mix those zeros into a real total — producing
 	// a Wh/mi computed from some drives' energy over ALL drives' miles. So the
 	// total is ALL-OR-NOTHING over the drives that moved: nil when ANY drive in
-	// the window covered distance without reporting energy, and nil when the
-	// window holds no drives at all. queryTripDriveTotals carries the full
-	// argument, including why this is also the migration rule for the windows
-	// that straddle the MYR-629 fix.
+	// the window covered distance and reported EXACTLY 0, and nil when the
+	// window holds no drives at all.
+	//
+	// A NEGATIVE DRIVE IS A MEASUREMENT, NOT AN ABSENCE — a net-regen leg —
+	// so it sums, and the floor at 0 is applied to the WINDOW once rather than
+	// to each leg. The value here is therefore never negative even though the
+	// column can be. queryTripDriveTotals carries the full argument, including
+	// why this is also the migration rule for the windows that straddle the
+	// MYR-629 fix.
 	TotalEnergyKwh *float64
 
 	// CurrentLeg is the driving leg underway, or nil. INFORMATIONAL, NEVER A

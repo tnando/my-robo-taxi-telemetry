@@ -216,16 +216,20 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 	// Seed the energy baseline the same way, and for the same reason (MYR-629):
 	// EnergyRemaining streams at 30s against gear's 1s, so the opening frame
 	// almost never carries it and the cached idle reading is the correct
-	// drive-start pack level. A fresh reading on the triggering frame wins.
-	// If neither source has one the accumulator stays cold and seeds itself
-	// from the first in-drive sample, exactly as the FSD/odometer/SOC baselines
-	// do — the drive then reports what it burned after that sample rather than
-	// nothing at all.
+	// drive-start pack level. If nothing has ever been cached the accumulator
+	// stays cold and seeds itself from the first in-drive sample, exactly as the
+	// FSD/odometer/SOC baselines do — the drive then reports what it burned
+	// after that sample rather than nothing at all.
+	//
+	// ONE SEED, NOT TWO. There is no "a fresh reading on the triggering frame
+	// wins" branch here, unlike the SOC seed above, because there is nothing for
+	// it to win over: handleTelemetry caches this frame's energy into
+	// state.lastEnergy BEFORE dispatching to handleIdle, under the SAME
+	// state.mu, and both sites reject a non-positive value. The cache is already
+	// this frame's reading whenever the frame carried one, so a second seed from
+	// te.Fields could only ever write the value just written (review finding 8).
 	if state.energyKnown {
 		drive.energy.seed(state.lastEnergy, te.CreatedAt)
-	}
-	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
-		drive.energy.seed(energy, te.CreatedAt)
 	}
 
 	state.status = StatusDriving

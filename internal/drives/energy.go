@@ -247,19 +247,34 @@ func (e *driveEnergy) regenAllowance(at time.Time) float64 {
 // that `Trip.totalEnergyKwh` refuses to sum a window containing one (see
 // queryTripDriveTotals).
 //
-// A NET-REGEN DRIVE REPORTS ZERO, not a negative. Long descents really can end
-// with more charge than they started with, and the physical figure is negative,
-// but `energyUsedKwh` is summed across a window into one total and a negative
-// leg would silently cancel another leg's real consumption — a 200-mile trip
-// reporting the efficiency of the 40 miles that happened to be uphill. Zero is
-// the clamp, and it is applied here rather than in SQL so every reader of the
-// column sees the same rule.
+// ⚠ SO `energyUsedKwh` = 0 CARRIES TWO MEANINGS AND THE VETO READS BOTH AS
+// "UNMEASURED": a drive nothing could be measured for, and a drive that
+// genuinely consumed nothing (a credited step of exactly zero — the car sat
+// still between two samples). The second is vanishingly rare on a drive that
+// covered distance, which is the only case the veto looks at, and conflating
+// them costs one window's total in exchange for a rule a client can state in a
+// sentence. Naming it here so nobody reads the SQL as claiming 0 can only mean
+// "never measured".
+//
+// A NET-REGEN DRIVE REPORTS ITS NEGATIVE, and that is the review round's
+// correction (finding 3). Long descents really can end with more charge than
+// they started with; the physical figure is negative and this is where it comes
+// from. Clamping it to 0 here MANUFACTURED the value the veto reads as "never
+// measured", so a real measurement of a downhill leg voided the whole window's
+// total — the clamp defeating the rule it was meant to protect. The window is
+// where the clamp belongs and where it now lives (`GREATEST(SUM(...), 0)` in
+// queryTripDriveTotals): a negative leg still cannot cancel another leg's
+// consumption, because the sum is floored once, after the legs are added up.
 func (e *driveEnergy) total() (float64, bool) {
 	if e.steps == 0 {
 		return 0, false
 	}
-	if e.usedKwh < 0 {
-		return 0, true
-	}
 	return e.usedKwh, true
+}
+
+// reported says whether the drive measured anything at all — the second return
+// of total(), without the figure. endDrive uses it to log the three outcomes
+// apart while taking the figure itself from the stats it already computed.
+func (e *driveEnergy) reported() bool {
+	return e.steps > 0
 }

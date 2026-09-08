@@ -822,6 +822,13 @@ func deref(s *string) string {
 // before MYR-629 carries 0, so a window straddling the fix reports null rather
 // than an understated number, and starts reporting on its own once every drive
 // in it was measured.
+//
+// ⚠ UNMEASURED IS `= 0`, NOT `<= 0` (review finding 3). A negative row is a
+// net-regen leg — a real measurement of a real descent — and the drive tracker
+// stopped clamping it, because the clamp manufactured the very zero this rule
+// reads as an absence. Negatives sum; the WINDOW is floored at 0 once, after the
+// legs are added up. And the sum is FILTERed to the rows that moved (finding 5),
+// so the set that decides the total is the same set that can veto it.
 func TestTripEnergyTotalIsAllOrNothing(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable")
@@ -920,6 +927,60 @@ func TestTripEnergyTotalIsAllOrNothing(t *testing.T) {
 		}
 		if *got != 0 {
 			t.Errorf("totalEnergyKwh = %v, want 0", *got)
+		}
+	})
+
+	t.Run("a net-regen leg is a measurement and sums beside a measured one", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_f1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+		// A long descent that ended with more charge than it began with. The
+		// drive tracker no longer clamps this to 0 (review finding 3): clamping
+		// manufactured the value the veto reads as "never measured", so a real
+		// measurement of a downhill leg voided the whole window.
+		seedDriveWithEnergy(t, "cdrv_e_f2", vehicleID, now.Add(-6*time.Hour), 20, 30, -2)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil; a negative leg is measured, not unmeasured")
+		}
+		if *got != 10.5 {
+			t.Errorf("totalEnergyKwh = %v, want 10.5", *got)
+		}
+	})
+
+	t.Run("a window that regenerated more than it used floors at 0", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_g1", vehicleID, now.Add(-12*time.Hour), 5, 10, 1)
+		seedDriveWithEnergy(t, "cdrv_e_g2", vehicleID, now.Add(-6*time.Hour), 30, 40, -4)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil, want 0")
+		}
+		// GREATEST floors the WINDOW, once, after the legs are added up — which
+		// is what stops a negative leg cancelling another leg's consumption
+		// without pretending the descent did not happen.
+		if *got != 0 {
+			t.Errorf("totalEnergyKwh = %v, want 0 — the floor is on the window", *got)
+		}
+	})
+
+	t.Run("a drive with no distance is excluded from the sum, not folded in", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_h1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+		// `Drive` is Prisma-owned and the Next.js app writes it too; nothing
+		// constrains a 0-mile row to carry 0 energy. Such a row is exempt from
+		// the veto, so it must be exempt from the SUM as well — otherwise a
+		// figure nobody vetted lands in a total the client divides by OTHER
+		// rows' miles.
+		seedDriveWithEnergy(t, "cdrv_e_h2", vehicleID, now.Add(-6*time.Hour), 0, 5, 99)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil; a stationary row must not veto")
+		}
+		if *got != 12.5 {
+			t.Errorf("totalEnergyKwh = %v, want 12.5 — the stationary row's energy is not the window's", *got)
 		}
 	})
 

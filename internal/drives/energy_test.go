@@ -176,13 +176,10 @@ func TestDriveEnergy_Accumulates(t *testing.T) {
 				t.Fatalf("reported = %v, want %v (kwh=%v)", reported, tt.wantReported, got)
 			}
 			if reported {
-				want := tt.wantKwh
-				if want < 0 {
-					// total() clamps a net-regen drive to zero; the table states
-					// the physical figure so the clamp is visible in the case.
-					want = 0
-				}
-				nearly(t, got, want, "total")
+				// The table states the PHYSICAL figure, negatives included: a
+				// net-regen drive reports its negative and the floor lives on
+				// the window total, not on the drive (review finding 3).
+				nearly(t, got, tt.wantKwh, "total")
 			}
 			if e.chargedInside != tt.wantCharged {
 				t.Errorf("chargedInside = %v, want %v", e.chargedInside, tt.wantCharged)
@@ -191,11 +188,18 @@ func TestDriveEnergy_Accumulates(t *testing.T) {
 	}
 }
 
-// TestDriveEnergy_NetRegenDriveClampsToZero pins the clamp explicitly: the
-// physical figure is negative and the reported one is zero, because these
-// values are SUMMED into Trip.totalEnergyKwh and a negative leg would cancel
-// another leg's real consumption.
-func TestDriveEnergy_NetRegenDriveClampsToZero(t *testing.T) {
+// TestDriveEnergy_NetRegenDriveReportsItsNegative pins the review round's
+// correction (finding 3). A long descent really can end with more charge than
+// it began with, and that is a MEASUREMENT — the physical figure is negative
+// and the accumulator reports it.
+//
+// The clamp this replaces manufactured a 0, which is the exact value
+// `Trip.totalEnergyKwh` reads as "this drive was never measured": a real
+// measurement of a downhill leg voided the whole window's total, the clamp
+// defeating the rule it existed to protect. The floor now sits on the window
+// sum (GREATEST in queryTripDriveTotals), where a negative leg still cannot
+// cancel another leg's consumption.
+func TestDriveEnergy_NetRegenDriveReportsItsNegative(t *testing.T) {
 	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
 	var e driveEnergy
 	e.seed(50, base)
@@ -208,7 +212,7 @@ func TestDriveEnergy_NetRegenDriveClampsToZero(t *testing.T) {
 	if !reported {
 		t.Fatal("reported = false, want true")
 	}
-	nearly(t, got, 0, "total")
+	nearly(t, got, -1, "total")
 }
 
 // ── THE REGRESSION THIS ISSUE EXISTS FOR ────────────────────────────────────

@@ -116,6 +116,11 @@ func calculateStats(drive *activeDrive) events.DriveStats {
 	// `startEnergy - lastEnergy`, whose `if startEnergy == 0 { delta = 0 }`
 	// guard discarded essentially every real drive: EnergyRemaining streams at
 	// 30s and the gear-change frame that set startEnergy streams at 1s.
+	//
+	// THE FIGURE MAY BE NEGATIVE and is persisted that way: a net-regen leg
+	// really did put charge back, and clamping it here would manufacture the 0
+	// the trip total reads as "never measured". The window sum is where the
+	// floor lives (queryTripDriveTotals).
 	energyDelta, _ := drive.energy.total()
 
 	// FSD miles is the delta of the cumulative "miles since reset" counter

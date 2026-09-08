@@ -254,9 +254,10 @@ func (r *TripRepo) loadRoster(ctx context.Context, v *TripView) error {
 // The three sums are NULLABLE and stay nullable: SUM over zero rows is NULL,
 // and that is the honest spelling of "this window has no drives yet". The
 // ENERGY sum is null under a second condition as well — any drive that moved
-// without reporting energy voids the whole total — because its column is NOT
-// NULL and a zero in it is an absence, not a measurement. See
-// queryTripDriveTotals.
+// and reported EXACTLY 0 voids the whole total — because its column is NOT NULL
+// and a zero in it is an absence, not a measurement. A NEGATIVE row is a
+// measurement (a net-regen leg) and sums like any other; the window total is
+// floored at 0 once, after the legs are added up. See queryTripDriveTotals.
 func (r *TripRepo) loadDriveTotals(ctx context.Context, v *TripView) error {
 	w := v.Window()
 	err := r.pool.QueryRow(ctx, queryTripDriveTotals, w.VehicleID, w.From, w.To).

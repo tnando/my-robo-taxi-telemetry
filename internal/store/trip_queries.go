@@ -356,23 +356,55 @@ WHERE t.id = $1`
 // real total for a window whose drives went nowhere: a drive with no distance
 // had no energy to report, so it has no opinion about the window.
 //
+// ⚠ THE UNMEASURED TEST IS `= 0`, NOT `<= 0`, AND THE DIFFERENCE IS A REVIEW
+// ROUND (finding 3). A net-regen leg — a long descent that ends with more charge
+// than it began with — is a REAL measurement whose physical value is negative,
+// and internal/drives no longer clamps it away, precisely because clamping
+// manufactured the 0 this predicate reads as "never measured". `<= 0` would
+// therefore void a window because one of its legs went downhill. A negative row
+// is measured, participates in the sum, and only the WINDOW is floored.
+//
+// ⚠ AND THE SUM IS FILTERED TO THE ROWS THAT MOVED (finding 5), which is the
+// same set the veto judges. `Drive` is a Prisma-owned table the Next.js app also
+// writes, and nothing constrains a 0-mile row to carry 0 energy; such a row is
+// exempt from the veto, so summing it would let a value nobody vetted into a
+// total the client turns into Wh/mi over OTHER rows' miles. One set of rows
+// decides the total and vetoes it.
+//
+// ⚠ `GREATEST(..., 0)` IS THE CLAMP, AND IT SITS HERE RATHER THAN ON THE DRIVE
+// because a floor applied per leg is not the same arithmetic as a floor applied
+// once. What must not happen is a negative leg cancelling another leg's
+// consumption; flooring the SUM prevents exactly that while letting a downhill
+// leg legitimately reduce the window's figure. NOTE Postgres' GREATEST IGNORES
+// NULLs — `GREATEST(NULL, 0)` is 0, not NULL — which is why the NULL arms are
+// spelled as their own WHEN branches above it rather than left to fall out of an
+// empty SUM.
+//
 // THIS IS ALSO THE MIGRATION RULE, not only a correctness one. Every drive
 // recorded before this issue carries 0, so a trip window straddling the fix
 // reports NULL rather than a total computed over its newer half — the surface
 // tells the truth about a mixed window instead of quietly understating it, and
 // it starts reporting on its own once the window holds only measured drives.
 //
-// A WINDOW WITH NO DRIVES yields NULL from the same expression: the FILTERed
-// count is 0, so the CASE takes its THEN arm, and `SUM` over zero rows is NULL.
-// One spelling, both meanings of "nothing to report".
+// A WINDOW WITH NO DRIVES AT ALL yields NULL from the first WHEN: nothing to
+// report, the same answer its three siblings give. A window whose drives all
+// went NOWHERE yields 0 — `SUM` over the FILTERed empty set is NULL and GREATEST
+// floors it — which is the honest total for drives that consumed nothing worth
+// reporting, and the same distinction `totalDistanceMiles` draws between "no
+// drives" and "drives that covered no ground".
 const queryTripDriveTotals = `
 SELECT COUNT(*),
        SUM(d."distanceMiles"),
        SUM(d."durationMinutes"),
-       CASE WHEN COUNT(*) FILTER (
-                WHERE d."distanceMiles" > 0 AND d."energyUsedKwh" <= 0
-            ) = 0
-            THEN SUM(d."energyUsedKwh")
+       CASE
+            WHEN COUNT(*) = 0 THEN NULL
+            WHEN COUNT(*) FILTER (
+                     WHERE d."distanceMiles" > 0 AND d."energyUsedKwh" = 0
+                 ) > 0 THEN NULL
+            ELSE GREATEST(
+                     SUM(d."energyUsedKwh") FILTER (WHERE d."distanceMiles" > 0),
+                     0
+                 )
        END
 FROM "Drive" d
 WHERE d."vehicleId" = $1
