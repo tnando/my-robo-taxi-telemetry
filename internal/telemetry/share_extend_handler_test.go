@@ -200,6 +200,58 @@ func TestShareExtendHandler_Refusals(t *testing.T) {
 		}
 	})
 
+	// THE THREE REFUSALS THAT ARE NOT `already_shared`, and the absence of the
+	// sub-code on each is the assertion. `already_shared` is a SUCCESS to
+	// render — the person has the car — so a client that saw it here would mark
+	// a paused or departed grantee as fine and move on. These three mean
+	// nothing happened and name a different thing the owner must do first, on a
+	// different screen, which is why they are told in the message and carry no
+	// sub-code for a client to branch on generically.
+	t.Run("a state the owner must resolve elsewhere is 409 with NO sub-code", func(t *testing.T) {
+		for _, tt := range []struct {
+			name    string
+			err     error
+			wantMsg string
+		}{
+			{"the SOURCE grant is paused", ErrShareSourceSuspended,
+				"that share is paused — restore it in Share first"},
+			{"the grantee is paused on the TARGET car", ErrShareTargetSuspended,
+				"that person is paused on this car — restore them in Share"},
+			{"the grantee LEFT the target car", ErrShareGranteeLeft,
+				"they left this car — send them a new invite"},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				store := &fakeShareInviteStore{extendErr: tt.err}
+				invalidator := &fakeAccessInvalidator{}
+				mux := newShareInviteMux(t, shareOwnerUser, store, shareOwnerUser, invalidator)
+
+				rec := doShareRequest(t, mux, http.MethodPost, shareExtendPath, validBody)
+
+				if rec.Code != http.StatusConflict {
+					t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+				}
+				var env wserrors.ErrorEnvelope
+				if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+					t.Fatalf("decode envelope: %v", err)
+				}
+				if env.Error.Code != wserrors.ErrCodeConflict {
+					t.Errorf("code = %q, want conflict", env.Error.Code)
+				}
+				if env.Error.SubCode != nil {
+					t.Errorf("subCode = %q, want none — a client told `already_shared` here would "+
+						"render a refusal as success", *env.Error.SubCode)
+				}
+				if env.Error.Message != tt.wantMsg {
+					t.Errorf("message = %q, want %q — the remedy is the only thing carrying it",
+						env.Error.Message, tt.wantMsg)
+				}
+				if len(invalidator.busted) != 0 {
+					t.Errorf("busted = %v, want none — no grant was created", invalidator.busted)
+				}
+			})
+		}
+	})
+
 	t.Run("an unclassified store failure is 500 and busts nothing", func(t *testing.T) {
 		store := &fakeShareInviteStore{extendErr: errors.New("boom")}
 		invalidator := &fakeAccessInvalidator{}
