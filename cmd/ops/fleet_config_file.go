@@ -91,7 +91,8 @@ func opsConfigFilePath() string {
 // unavailable. Split out of the sync.Once so it is testable.
 func readFleetConfigFile(path string) fleetConfigFileSettings {
 	var out fleetConfigFileSettings
-	raw, err := os.ReadFile(path) //nolint:gosec // operator-supplied path, by design
+	// #nosec G304 -- operator-configured config path, the same file the server is started with
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return out
 	}
