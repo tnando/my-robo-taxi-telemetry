@@ -297,8 +297,15 @@ LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
 WHERE t.id = $1`
 
 // queryTripDriveTotals is the ONE STATEMENT behind `driveCount`,
-// `totalDistanceMiles` and `totalDurationSeconds` (MYR-608). See
-// queryTripDrivesWindow for why the TEXT column is cast.
+// `totalDistanceMiles` and `totalDurationSeconds` (MYR-608). It reads the
+// window's bounds through `driveStartInstantExpr`, whose own comment carries
+// the whole argument for why the TEXT column is cast and why the cast is
+// guarded — this statement is one of the four the review round moved off the
+// strict cast, because a `driveCount` that 500s takes §7.30.2's whole list
+// with it and one unreadable row in a car's history was enough to do it.
+//
+// THE `d` ALIAS IS REQUIRED, not stylistic: `driveStartInstantExpr` names
+// `d."startTime"`, so the statement it lands in has to supply that alias.
 //
 // THE THREE NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
 // §7.30.2 decorates every row it returns, so a separate SUM query would have
@@ -319,10 +326,10 @@ WHERE t.id = $1`
 // them until the window closed would leave the surface that most wants a
 // total — a road trip in progress — the one surface that cannot have one.
 const queryTripDriveTotals = `
-SELECT COUNT(*), SUM("distanceMiles"), SUM("durationMinutes") FROM "Drive"
-WHERE "vehicleId" = $1
-  AND "startTime"::timestamptz >= $2
-  AND "startTime"::timestamptz <= $3`
+SELECT COUNT(*), SUM(d."distanceMiles"), SUM(d."durationMinutes") FROM "Drive" d
+WHERE d."vehicleId" = $1
+  AND ` + driveStartInstantExpr + ` >= $2
+  AND ` + driveStartInstantExpr + ` <= $3`
 
 // ── THE THREE tripId EXPRESSIONS (MYR-608) ──────────────────────────────────
 //
@@ -362,41 +369,68 @@ const tripEffectiveEndExpr = `LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))`
 // make these expressions agree with the lists they decorate only while every
 // row carries the same offset spelling.
 //
-// ⚠ THE GUARD IS NOT OPTIONAL EITHER, AND IT IS WHAT SEPARATES A DECORATION
-// FROM A PREDICATE (MYR-608). A bare `::timestamptz` does not skip a row it
-// cannot read — it ERRORS, and an error in a select-list expression fails the
-// WHOLE STATEMENT. §7.2 is an owner's entire drive history, and until this
-// issue it carried no cast at all; adding an unguarded one would have meant a
-// single unreadable `startTime` anywhere in a car's past turning that list
-// into a permanent 500. A test fixture holding `'10:00'` found this on the
+// ⚠ THE GUARD IS NOT OPTIONAL EITHER (MYR-608). A bare `::timestamptz` does not
+// skip a row it cannot read — it ERRORS, and an error anywhere in a statement
+// fails the WHOLE statement. §7.2 is an owner's entire drive history, and until
+// this issue it carried no cast at all; adding an unguarded one would have
+// meant a single unreadable `startTime` anywhere in a car's past turning that
+// list into a permanent 500. A test fixture holding `'10:00'` found this on the
 // first run, which is the cheap version of finding it in production.
 //
-// SO A ROW THIS EXPRESSION CANNOT READ GETS `tripId: null` rather than taking
-// the page down with it. That is the same direction MYR-614 settled on for the
+// SO A ROW THIS EXPRESSION CANNOT READ RESOLVES NULL rather than taking the
+// page down with it. That is the same direction MYR-614 settled on for the
 // single-drive gate: an unreadable start instant admits the caller to nothing
 // and is reported to the operator, never to the reader.
 //
-// THE PREFIX REGEX IS THE GUARD because Postgres has no TRY_CAST, and CASE is
-// the one construct that guarantees its THEN arm is not evaluated when the
-// WHEN is false. It covers every shape a partial or lazy write actually
-// produces — the empty string, a bare time, a date with no time. A string that
-// matches the prefix and still fails the cast (`2026-01-01T00:00:00nonsense`)
-// would error, and no writer in either repo can produce one.
+// ⚠ THE GUARD IS A FUNCTION, NOT A REGEX, AND THE REGEX WAS THE REVIEW ROUND'S
+// FINDING. MYR-608 first wrapped the cast in a `CASE` whose `WHEN` was a prefix
+// regex — the one construct Postgres guarantees will not evaluate its `THEN`
+// arm. That guard counted DIGITS, and a digit count cannot decide whether a
+// date exists: `'2026-13-45T00:00:00Z'`, `'2026-02-30T08:00:00Z'` and
+// `'2026-01-01T25:00:00Z'` all matched the pattern and then raised
+// `date/time field value out of range` from the arm the pattern had admitted
+// them to — the permanent 500 the guard was written to prevent, reached by the
+// guard's own front door. No regex can answer a calendar question; the only
+// thing in the database that can is the cast itself.
 //
-// ⚠ THE `WHERE` CASTS ELSEWHERE IN THIS FILE ARE DELIBERATELY LEFT STRICT.
-// They are ACCESS predicates — §7.30.7's window bound, the participant
-// narrowing — and a row whose start instant cannot be read must not be
-// admitted. Softening those would be a behaviour change on a gate this issue
-// is not about; that they fail the statement rather than the row is recorded
-// as a known hazard on the PR.
-const driveStartInstantExpr = `(CASE
-			WHEN d."startTime" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
-			THEN d."startTime"::timestamptz
-		END)`
+// `go_try_timestamptz` (migration 0070) is therefore the cast guarding ITSELF:
+// a PL/pgSQL `EXCEPTION` block, the one construct in Postgres that can catch a
+// cast failure, returning NULL for anything `::timestamptz` refuses. It is
+// Go-owned and `go_`-prefixed; CG-DL-9 forbids a Go migration from naming a
+// Prisma TABLE, which a function over `text` does not.
+//
+// ⚠ IT IS NOW USED IN THE `WHERE` CLAUSES TOO, which is the second half of the
+// same finding. §7.30.7's window bound, the participant narrowing and the drive
+// totals all compared a strict `::timestamptz`, so ONE unreadable row anywhere
+// in a car's history took those lists down for everybody on that car — the
+// hazard the first round recorded on the PR rather than fixing. It is fixed
+// here, and it is NOT a widening of access: a NULL satisfies neither `>=` nor
+// `<=`, so an unreadable row is EXCLUDED from every window it might have fallen
+// in. Same access answer as the strict cast would have given had it survived
+// to give one; the difference is that the other rows still get served.
+const driveStartInstantExpr = `go_try_timestamptz(d."startTime")`
 
-// tripCoversDriveExpr is the drive-membership test: does the drive row aliased
-// `d` begin inside trip `t`'s window? A NULL start instant satisfies neither
-// comparison, so an unreadable row belongs to no trip.
+// tripCoversDriveExpr is the drive-membership test AGAINST A `go_trips` ROW:
+// does the drive row aliased `d` begin inside trip `t`'s window? A NULL start
+// instant satisfies neither comparison, so an unreadable row belongs to no
+// trip.
+//
+// ⚠ IT IS NOT THE ONLY SPELLING OF MEMBERSHIP IN THIS FILE, and the review
+// round corrected the claim that it was. The participant statements test the
+// same rule against an UNNESTED WINDOW SET — `w(win_from, win_to)` — not
+// against a `go_trips` row, so they open-code the two comparisons rather than
+// reusing this const. Parameterising the alias would mean assembling this
+// predicate as a string at the point it is used, which is the one thing this
+// file refuses to do near an access decision.
+//
+// WHAT IS GENUINELY SHARED IS THE TWO HALVES THAT CAN DRIFT: the start instant
+// (`driveStartInstantExpr`, one const, used by every form including the
+// participant one) and the window's end (`tripEffectiveEndExpr`, one const,
+// used by every statement that reads a trip row — including
+// queryTripWindowsForUserVehicle, which is where the participant's `win_to`
+// comes from). So the participant form's bounds are this expression's bounds,
+// computed one statement earlier and carried in an array; the duplication is
+// the two comparison operators, and both ends are inclusive in every copy.
 const tripCoversDriveExpr = `t.starts_at <= ` + driveStartInstantExpr + `
 		  AND ` + driveStartInstantExpr + ` <= ` + tripEffectiveEndExpr
 
@@ -407,8 +441,13 @@ const tripCoversDriveExpr = `t.starts_at <= ` + driveStartInstantExpr + `
 // placeholder name would have made those two statements assembled strings, and
 // this file's whole posture is that a predicate near an access decision is a
 // `const` a reader can check — so the placeholder is fixed and the two call
-// sites are the thing that must agree, which the compiler-free part of that is
-// pinned by TestDriveListCarriesTheOwnersTripID.
+// sites are the thing that must agree. Nothing in the compiler checks that
+// agreement, so two store tests do: TestDriveTripIDIsScopedToTheCaller (the
+// caller bound at $2 is the one the answer is scoped to — a mis-bound
+// placeholder names another owner's trip) and
+// TestDriveTripIDIsBoundedByTheWindowAtBothEnds (the window the answer comes
+// from is this expression's, at both edges). TestTripDriveCursorPagesCarryTheTripID
+// pins the same pair for the cursor form, where the anchor moved to ($3, $4).
 //
 // SCOPED TO `owner_user_id = $2` RATHER THAN TO THE VEHICLE. A car can change
 // hands, and a drive that fell in the PREVIOUS owner's window is not this
@@ -567,6 +606,15 @@ WHERE p.user_id = $1 AND t.vehicle_id = $2 AND p.left_at IS NULL
 // the ordering index still orders them, and one vehicle's drive history is a
 // bounded set.
 //
+// ⚠ AND IT IS GUARDED, WHICH THE FIRST ROUND OF MYR-608 LEFT UNDONE HERE. This
+// bound was a strict `::timestamptz` on the theory that an access predicate
+// must not soften — but a strict cast does not REFUSE the row it cannot read,
+// it fails the STATEMENT, so one unreadable `startTime` anywhere in the car's
+// history made this endpoint a 500 for every participant on it rather than
+// admitting one row too few. `driveStartInstantExpr` resolves NULL instead, and
+// a NULL satisfies neither `>=` nor `<=`: the unreadable row is EXCLUDED, which
+// is the answer the strict cast was trying to give and never got to give.
+//
 // The upper bound is INCLUSIVE where the access predicate's is exclusive: a
 // drive that began exactly at the closing instant is a drive of this trip, and
 // excluding it would lose it from the only list it belongs to.
@@ -575,21 +623,21 @@ WHERE p.user_id = $1 AND t.vehicle_id = $2 AND p.left_at IS NULL
 // why this surface stamps rather than resolves.
 const queryTripDrivesWindow = `SELECT ` + driveSummarySelectColumns + `, ` + pathTripIDForDriveExpr + `
 FROM "Drive" d
-WHERE "vehicleId" = $1
-  AND "startTime"::timestamptz >= $2
-  AND "startTime"::timestamptz <= $3
-ORDER BY "startTime" DESC, "id" DESC
+WHERE d."vehicleId" = $1
+  AND ` + driveStartInstantExpr + ` >= $2
+  AND ` + driveStartInstantExpr + ` <= $3
+ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $5`
 
 // queryTripDrivesWindowCursor is the resume page. The cursor comparison stays
 // TEXT, byte-identical to §7.2's, so the two lists page the same way.
 const queryTripDrivesWindowCursor = `SELECT ` + driveSummarySelectColumns + `, ` + pathTripIDForDriveExpr + `
 FROM "Drive" d
-WHERE "vehicleId" = $1
-  AND "startTime"::timestamptz >= $2
-  AND "startTime"::timestamptz <= $3
-  AND ("startTime", "id") < ($5, $6)
-ORDER BY "startTime" DESC, "id" DESC
+WHERE d."vehicleId" = $1
+  AND ` + driveStartInstantExpr + ` >= $2
+  AND ` + driveStartInstantExpr + ` <= $3
+  AND (d."startTime", d."id") < ($5, $6)
+ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $7`
 
 // queryVehicleDrivesInTripWindows is the §7.2 list AS SEEN BY A TRIP
@@ -609,7 +657,10 @@ LIMIT $7`
 // reaching here, but a gate that also fails safe one layer down is a gate that
 // survives a refactor of the layer above.
 //
-// The cast on "startTime" is there for the reason queryTripDrivesWindow states.
+// The cast on "startTime" — and the guard around it — are there for the reason
+// queryTripDrivesWindow states. The window bound is `driveStartInstantExpr`, so
+// a row whose start instant cannot be read matches no `w` and is narrowed away
+// rather than failing the page for everybody on the car.
 //
 // A THIRD PARALLEL ARRAY carries the trip ids (MYR-608), so the projection can
 // name the window that admitted each row without a second resolution — see
@@ -620,8 +671,8 @@ FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND EXISTS (
 	SELECT 1 FROM unnest($2::timestamptz[], $3::timestamptz[]) AS w(win_from, win_to)
-	WHERE d."startTime"::timestamptz >= w.win_from
-	  AND d."startTime"::timestamptz <= w.win_to
+	WHERE ` + driveStartInstantExpr + ` >= w.win_from
+	  AND ` + driveStartInstantExpr + ` <= w.win_to
   )
 ORDER BY d."startTime" DESC, d."id" DESC
 LIMIT $5`
@@ -634,8 +685,8 @@ FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND EXISTS (
 	SELECT 1 FROM unnest($2::timestamptz[], $3::timestamptz[]) AS w(win_from, win_to)
-	WHERE d."startTime"::timestamptz >= w.win_from
-	  AND d."startTime"::timestamptz <= w.win_to
+	WHERE ` + driveStartInstantExpr + ` >= w.win_from
+	  AND ` + driveStartInstantExpr + ` <= w.win_to
   )
   AND (d."startTime", d."id") < ($5, $6)
 ORDER BY d."startTime" DESC, d."id" DESC

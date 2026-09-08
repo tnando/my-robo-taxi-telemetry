@@ -770,7 +770,9 @@ Both halves move to the server. Neither needs a migration, and that is the desig
 | §7.2, `trip_participant` | `participantTripIDForDriveExpr` — read out of the **same unnested window set that admitted the row** | Not an optimisation, a property: there is only ONE window set in that statement, so the id a participant is told **cannot** name a window that did not admit the drive. It is why `TripDrivesWindow` now carries its `TripID` and why the statement takes a third array |
 | §7.30.7 | `pathTripIDForDriveExpr` — the trip in the URL, **bound as a parameter** | Every row is inside this trip's window by the statement's own predicate and the caller was authorized before it ran, so the stamp cannot be a lie |
 
-**They share the window predicate literally, not by inspection.** `tripEffectiveEndExpr` is now the **one** spelling of `min(endsAt, endedAt)` in `trip_queries.go` (`queryTripWindowsForUserVehicle` was rewritten to use it), and `tripCoversDriveExpr` is the one spelling of the inclusive-both-ends membership test. §5's bound, §7.30.3's count and these three expressions are the same bound.
+**They share the window predicate literally, not by inspection.** The two halves that can drift are each one `const`: `tripEffectiveEndExpr` is the **one** spelling of `min(endsAt, endedAt)` in `trip_queries.go` (`queryTripWindowsForUserVehicle` was rewritten to use it), and `driveStartInstantExpr` is the **one** spelling of the drive's start instant, used by every form including the participant's. §5's bound, §7.30.3's count and these three expressions are the same bound, inclusive at both ends.
+
+`tripCoversDriveExpr` composes those two into the membership test **against a `go_trips` row** — it is not the only spelling of membership in the file, and an earlier revision of this section wrongly said it was. The participant statements test the same rule against an **unnested window set** (`w(win_from, win_to)`) rather than a trip row, so they open-code the two comparisons; parameterising the alias would mean assembling an access predicate as a string, which `trip_queries.go` refuses to do. The bounds they compare against are still `tripEffectiveEndExpr`'s, computed one statement earlier in `queryTripWindowsForUserVehicle` and carried in an array.
 
 **⚠ OVERLAPPING WINDOWS ARE REACHABLE, AND THE TWO SURFACES MAY DISAGREE ABOUT ONE DRIVE.** `queryTripOverlaps` refuses a new window only against trips where `NOW() < COALESCE(ended_at, ends_at)` — history does not reserve the calendar, and it must not, or a back-dated trip could never cover ground an old trip also covered. So **two ENDED windows may cover the same drive**. One row carries one id, so:
 
@@ -781,13 +783,22 @@ This is the **only** place on the platform where two surfaces report a different
 
 **The wire spelling is ALWAYS PRESENT AND NULLABLE**, deliberately not the omit-when-empty convention the four location labels on the same shape follow. Those are absent while the server has nothing to say *yet* — a reverse-geocode may still arrive. This is a **decided** answer, and a missing key would be indistinguishable from a server that does not send the field at all. Grouping drives under trips is precisely the feature that must not silently fall back to ungrouped.
 
-### 13.2 The guarded cast, and why §7.2 needed one
+### 13.2 The guarded cast, and why every surface needed one
 
-**§7.2 carried no cast on `Drive."startTime"` at all before this change**, and the first test run found what adding one costs. `"startTime"` is a Prisma-owned **TEXT** column; an unguarded `::timestamptz` **in a select-list expression does not skip the row it cannot read — it ERRORS**, and an error there fails the whole statement. §7.2 is an owner's entire drive history, so one unreadable value anywhere in a car's past would have turned that list into a permanent `500`. A fixture holding `'10:00'` caught it.
+**§7.2 carried no cast on `Drive."startTime"` at all before this change**, and the first test run found what adding one costs. `"startTime"` is a Prisma-owned **TEXT** column; an unguarded `::timestamptz` **does not skip the row it cannot read — it ERRORS**, and an error anywhere in a statement fails the whole statement. §7.2 is an owner's entire drive history, so one unreadable value anywhere in a car's past would have turned that list into a permanent `500`. A fixture holding `'10:00'` caught it.
 
-`driveStartInstantExpr` wraps the cast in a `CASE` whose `WHEN` is a prefix regex — the one construct Postgres guarantees will not evaluate its `THEN` arm — so an unreadable row resolves **`tripId: null`** and nothing else. That is the same direction [MYR-614](https://linear.app/myrobotaxi/issue/MYR-614) settled on for the single-drive gate: **a data fault is logged for an operator and never told to a reader.**
+**THE GUARD IS A FUNCTION, AND THE FIRST ATTEMPT AT ONE WAS A REGEX THAT DID NOT HOLD.** MYR-608 initially wrapped the cast in a `CASE` whose `WHEN` was a prefix pattern — the one construct Postgres guarantees will not evaluate its `THEN` arm. The review round found it wrong in **both** directions, and neither direction is reachable by tightening the pattern:
 
-**⚠ THE `WHERE` CASTS IN THIS FILE STAY STRICT, AND THAT ASYMMETRY IS THE POINT.** §7.30.7's window bound and the participant narrowing are **access** predicates: a row whose start instant cannot be read must not be admitted, and softening them would be a behaviour change on a gate MYR-608 is not about. The consequence — that one unreadable row fails those two statements rather than being excluded from them — is real, pre-existing, and recorded as a known hazard rather than silently fixed.
+| | Value | Regex said | Cast says | Consequence of the mismatch |
+|---|---|---|---|---|
+| Admitted what it could not cast | `2026-13-45T00:00:00Z`, `2026-02-30T08:00:00Z`, `2026-01-01T25:00:00Z` | matches | **errors** | The `THEN` arm ran and raised `date/time field value out of range` — the permanent `500` the guard existed to prevent, through the guard's own front door |
+| Rejected what it could cast | `2026-07-02` | no match | `2026-07-02 00:00:00+00` | §7.2 blanked the `tripId` while §7.30.7's strict cast placed the **same drive in the same window** — two surfaces disagreeing about one drive, in a change whose subject is making them agree |
+
+A pattern counts **digits**; it cannot decide whether a date **exists**, because that is a calendar question and the only thing in the database that can answer it is the cast itself. So the cast guards itself: **`go_try_timestamptz(text)`** (migration `0070`, PL/pgSQL, `IMMUTABLE STRICT PARALLEL SAFE`) returns `NULL` for anything `::timestamptz` refuses, via the `EXCEPTION` block that is the only construct in Postgres able to catch a cast failure. It is a Go-owned, `go_`-prefixed **function**; CG-DL-9 forbids a Go migration from naming a Prisma **table**, which this does not. An unreadable row therefore resolves **`tripId: null`** and nothing else — the direction [MYR-614](https://linear.app/myrobotaxi/issue/MYR-614) settled on for the single-drive gate: **a data fault is logged for an operator and never told to a reader.**
+
+**⚠ THE `WHERE` CASTS ARE GUARDED TOO, WHICH THE FIRST ROUND LEFT UNDONE.** §7.30.7's window bound, the participant narrowing and `queryTripDriveTotals` compared a strict `::timestamptz` on the argument that an **access** predicate must not soften. That argument does not survive contact with what a strict cast actually does: it never gets to **refuse** the row it cannot read, because it fails the **statement** first. One unreadable value anywhere in a car's history made §7.30.7, the participant's §7.2, §7.30.2 and §7.30.3 a `500` for **every** person on that car — so the "takes nothing down" claim held only for the owner's own list.
+
+**Softening them widens nothing**, which is why it is safe rather than a trade: `NULL` satisfies neither `>=` nor `<=`, so the unreadable row is **excluded** from every window it might have fallen in — exactly the answer the strict cast was trying to give, delivered without taking the other rows with it. `TestUnreadableStartTimeTakesDownNoTripSurface` asserts both halves (each surface answers `200`; the junk is not in the answer) on all four.
 
 ### 13.3 The totals ride the count's statement
 
@@ -806,9 +817,10 @@ This is the **only** place on the platform where two surfaces report a different
 | Concern | File |
 |---------|------|
 | The three `tripId` expressions, the shared window spellings, the guarded cast | `internal/store/trip_queries.go` (the block headed "THE THREE tripId EXPRESSIONS") |
+| The try-cast itself | `internal/store/migrations/0070_try_timestamptz.up.sql`, mirrored into the contract harness schema (`tests/contract/contract_test.go`), which hand-writes its schema instead of running migrations |
 | The owner's two §7.2 statements, and why the caller is pinned at `$2` | `internal/store/queries.go` |
 | `DriveSummaryRow.TripID`, the one scanner every statement must feed | `internal/store/drive_repo_list.go` |
-| The window's trip id, carried with its bounds | `internal/store/trip_types.go` (`TripDrivesWindow`) |
+| The window's trip id, carried with its bounds | `internal/store/trip_window.go` (`TripDrivesWindow`, `Trip.Window()` — split out of `trip_types.go`, which crossed the 300-line cap) |
 | The three parallel arrays | `internal/store/trip_repo_drives.go` |
 | `driveCount` + both totals in one read | `internal/store/trip_repo_read.go` (`loadDriveTotals`) |
 | The wire projections | `internal/telemetry/vehicle_drives_types.go`, `internal/telemetry/trip_wire.go` |

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -350,31 +351,205 @@ func TestDriveTripIDSurvivesAnUnreadableStartTime(t *testing.T) {
 		time.Date(2026, 7, 5, 0, 0, 0, 0, time.UTC), []string{shareID})
 	seedDriveAt(t, "cdrv_readable", vehicleID, good)
 
-	for _, junk := range []string{"", "10:00", "2026-07-02", "not a time"} {
-		if _, err := testPool.Exec(ctx,
-			`INSERT INTO "Drive" ("id","vehicleId","date","startTime") VALUES ($1,$2,'2026-07-02',$3)`,
-			"cdrv_junk_"+junk, vehicleID, junk); err != nil {
-			t.Fatalf("seed junk drive %q: %v", junk, err)
-		}
+	seedUnreadableStartTimes(t, vehicleID)
+	// A bare date IS readable, and it lands inside this window at midnight —
+	// see bareDateStartTime for why it is seeded apart from the junk.
+	if _, err := testPool.Exec(ctx,
+		`INSERT INTO "Drive" ("id","vehicleId","date","startTime") VALUES ($1,$2,'2026-07-02',$3)`,
+		"cdrv_bare_date", vehicleID, bareDateStartTime); err != nil {
+		t.Fatalf("seed bare-date drive: %v", err)
 	}
 
 	page, err := drives.ListByVehicleID(ctx, vehicleID, shareOwnerA, store.DriveListCursor{}, 20)
 	if err != nil {
 		t.Fatalf("one unreadable startTime took the whole list down: %v", err)
 	}
-	if len(page.Items) != 5 {
-		t.Fatalf("listed %d drives, want all 5 — the unreadable rows are still drives", len(page.Items))
+	if want := 2 + len(unreadableStartTimes); len(page.Items) != want {
+		t.Fatalf("listed %d drives, want all %d — the unreadable rows are still drives", len(page.Items), want)
 	}
 	for _, item := range page.Items {
-		if item.ID == "cdrv_readable" {
+		switch item.ID {
+		case "cdrv_readable", "cdrv_bare_date":
+			// Both are readable instants inside the window, so both carry the
+			// id. The bare date is the one the regex used to blank.
 			if item.TripID == nil || *item.TripID != trip.ID {
-				t.Errorf("the readable row lost its tripId: %v", deref(item.TripID))
+				t.Errorf("%s is inside the window but carries tripId %v", item.ID, deref(item.TripID))
 			}
-			continue
+		default:
+			if item.TripID != nil {
+				t.Errorf("%s has an unreadable startTime but was placed in trip %s", item.ID, *item.TripID)
+			}
 		}
-		if item.TripID != nil {
-			t.Errorf("%s has an unreadable startTime but was placed in trip %s", item.ID, *item.TripID)
+	}
+}
+
+// unreadableStartTimes is every shape of `Drive."startTime"` the platform can
+// hold that `::timestamptz` will not read. `go_try_timestamptz` resolves each
+// one to NULL, and a NULL belongs to no window.
+//
+// ⚠ THE LAST THREE ARE THE REVIEW ROUND'S FINDING, and they are the reason the
+// guard is a function and not a regex. MYR-608 first guarded the cast with a
+// prefix pattern that counted DIGITS — four, two, two, two, two, two — and
+// these three satisfy it exactly:
+//
+//	2026-13-45T00:00:00Z   month 13, day 45
+//	2026-02-30T08:00:00Z   February 30th
+//	2026-01-01T25:00:00Z   hour 25
+//
+// Each one matched the `WHEN`, was admitted to the `THEN` arm, and raised
+// `date/time field value out of range` from inside it — failing the whole
+// statement, which is the permanent 500 the guard existed to prevent, reached
+// through the guard's own front door. A digit count cannot decide whether a
+// date EXISTS; that is a calendar question, and the only thing in the database
+// that can answer it is the cast. THESE THREE FAIL AGAINST THE PRE-REVIEW HEAD
+// AND PASS AGAINST go_try_timestamptz — that is what they are for, so do not
+// "simplify" them back into the first three.
+//
+// The first three are the shapes a partial or lazy write actually produces.
+// The regex did reject those, and so does the cast.
+var unreadableStartTimes = []string{
+	"",
+	"10:00",
+	"not a time",
+	"2026-13-45T00:00:00Z",
+	"2026-02-30T08:00:00Z",
+	"2026-01-01T25:00:00Z",
+}
+
+// bareDateStartTime is a `startTime` the REGEX REJECTED AND THE CAST ACCEPTS,
+// and it is the review round's finding pointing the other way.
+//
+// `'2026-07-02'::timestamptz` is `2026-07-02 00:00:00+00` — Postgres reads a
+// bare date as midnight, and always did. The prefix regex demanded a time
+// component, so §7.2 resolved `tripId: null` for this row while §7.30.7's
+// STRICT cast happily placed the same drive inside the same window: two
+// surfaces disagreeing about one drive, in a PR whose subject is making them
+// agree. Nothing in the guard's own comment claimed that, because nobody had
+// asked the database what it did with a date.
+//
+// The answer now is the cast's answer on every surface: it is midnight on that
+// day, it is in the window if midnight is, and this fixture pins it so a future
+// "tighten the guard" cannot quietly re-open the disagreement.
+const bareDateStartTime = "2026-07-02"
+
+// seedUnreadableStartTimes plants one Drive row per unreadable shape.
+//
+// The ids are positional rather than derived from the value, because two of
+// these values differ only in characters a reader skims past and a failure
+// message naming `cdrv_junk_2` is worse than useless. The index is stable, so
+// the message points at the slice.
+func seedUnreadableStartTimes(t *testing.T, vehicleID string) {
+	t.Helper()
+	for i, junk := range unreadableStartTimes {
+		if _, err := testPool.Exec(context.Background(),
+			`INSERT INTO "Drive" ("id","vehicleId","date","startTime") VALUES ($1,$2,'2026-07-02',$3)`,
+			fmt.Sprintf("cdrv_junk_%02d", i), vehicleID, junk); err != nil {
+			t.Fatalf("seed junk drive unreadableStartTimes[%d] = %q: %v", i, junk, err)
 		}
+	}
+}
+
+// TestUnreadableStartTimeTakesDownNoTripSurface is the review round's second
+// finding, and it is the one that made the first round's "found, not fixed"
+// note wrong rather than merely incomplete.
+//
+// THE FOUR OTHER SURFACES COMPARED A STRICT `::timestamptz` IN THEIR `WHERE`.
+// The first round left them strict on the argument that an access predicate
+// must not soften — but a strict cast does not REFUSE the row it cannot read,
+// it fails the STATEMENT. So one unreadable `startTime` anywhere in a car's
+// history made §7.30.7, the participant's narrowed §7.2, §7.30.2's list and
+// §7.30.3's single trip a 500 for EVERY person on that car, and the "it takes
+// nothing down" claim held only for the owner's own list.
+//
+// SOFTENING THEM WIDENS NOTHING, which is the whole reason it is safe: the
+// guard resolves NULL, and a NULL satisfies neither `>=` nor `<=`. The
+// unreadable row is EXCLUDED from every window — the same answer the strict
+// cast was trying to give, delivered without taking the other rows with it.
+// This test asserts BOTH halves on all four surfaces: they answer, and the
+// junk is not in the answer.
+func TestUnreadableStartTimeTakesDownNoTripSurface(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareID := seedTripFixture(t)
+	repo := newTripRepo(t)
+
+	start := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 8, 5, 0, 0, 0, 0, time.UTC)
+	trip := mustCreateTrip(t, repo, vehicleID, start, end, []string{shareID})
+	seedDriveWithStats(t, "cdrv_ok", vehicleID, start.Add(6*time.Hour), 42.5, 90)
+	seedUnreadableStartTimes(t, vehicleID)
+
+	// §7.30.7 — the trip's own drive list, for both roles on it. The window
+	// bound is the statement's own predicate here, so this is the surface the
+	// strict cast hurt most directly.
+	for _, caller := range []struct{ name, userID string }{
+		{"owner", shareOwnerA},
+		{"participant", shareViewer1},
+	} {
+		t.Run("§7.30.7 answers for the "+caller.name, func(t *testing.T) {
+			page, err := repo.TripDrivesForUser(ctx, trip.ID, caller.userID, store.DriveListCursor{}, 20)
+			if err != nil {
+				t.Fatalf("one unreadable startTime took §7.30.7 down: %v", err)
+			}
+			assertOnlyTheReadableDrive(t, page)
+		})
+	}
+
+	// Participant §7.2 — the narrowed vehicle list, where the bound arrives as
+	// an unnested array rather than as a pair of parameters.
+	t.Run("participant §7.2 answers", func(t *testing.T) {
+		page, err := repo.VehicleDrivesInTripWindows(ctx, shareViewer1, vehicleID, store.DriveListCursor{}, 20)
+		if err != nil {
+			t.Fatalf("one unreadable startTime took the participant's §7.2 down: %v", err)
+		}
+		assertOnlyTheReadableDrive(t, page)
+	})
+
+	// §7.30.3 and §7.30.2 — the totals, which ride queryTripDriveTotals. A
+	// count that 500s takes the whole list down with it, so this is the same
+	// finding one layer up.
+	t.Run("§7.30.3 totals answer, and count only the readable drive", func(t *testing.T) {
+		view, err := repo.GetForUser(ctx, trip.ID, shareOwnerA)
+		if err != nil {
+			t.Fatalf("one unreadable startTime took §7.30.3 down: %v", err)
+		}
+		assertTotals(t, view, 1, 42.5, 90)
+	})
+
+	t.Run("§7.30.2 lists, and its totals count only the readable drive", func(t *testing.T) {
+		views, err := repo.ListForUser(ctx, shareOwnerA, "", 20)
+		if err != nil {
+			t.Fatalf("one unreadable startTime took §7.30.2 down: %v", err)
+		}
+		var found bool
+		for _, v := range views {
+			if v.ID != trip.ID {
+				continue
+			}
+			found = true
+			assertTotals(t, v, 1, 42.5, 90)
+		}
+		if !found {
+			t.Fatalf("§7.30.2 did not list trip %s", trip.ID)
+		}
+	})
+}
+
+// assertOnlyTheReadableDrive pins both halves of the fix on a drive page: the
+// readable row is served, and no unreadable row was admitted to the window.
+func assertOnlyTheReadableDrive(t *testing.T, page store.DriveListPage) {
+	t.Helper()
+	if len(page.Items) != 1 {
+		ids := make([]string, 0, len(page.Items))
+		for _, d := range page.Items {
+			ids = append(ids, d.ID)
+		}
+		t.Fatalf("page held %d drives (%v), want only cdrv_ok — a NULL start instant is in no window", len(page.Items), ids)
+	}
+	if page.Items[0].ID != "cdrv_ok" {
+		t.Fatalf("page held %s, want cdrv_ok", page.Items[0].ID)
 	}
 }
 

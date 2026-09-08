@@ -154,6 +154,34 @@ func createContractSchema(ctx context.Context, pool *pgxpool.Pool) error {
 		'driving', 'parked', 'charging', 'offline', 'in_service'
 	);
 
+	-- go_try_timestamptz: the try-cast for the Prisma-owned TEXT "startTime"
+	-- column (migration 0070, MYR-608). MIRRORED HERE RATHER THAN MIGRATED IN,
+	-- because this harness hand-writes its schema instead of calling
+	-- store.RunMigrations — every go_ table below is mirrored the same way and
+	-- for the same reason (the Prisma-owned tables are created here by hand, so
+	-- the migrations would collide with them).
+	--
+	-- IT IS NOT OPTIONAL FOR THIS HARNESS. driveStartInstantExpr names this
+	-- function, so §7.2 for both roles, §7.30.7 and the trip totals all fail
+	-- with "function go_try_timestamptz(text) does not exist" without it — the
+	-- contract tests would go red on the first drive list, not on a subtle
+	-- answer. Keep the body byte-identical to the migration's.
+	CREATE OR REPLACE FUNCTION go_try_timestamptz(value text)
+	RETURNS timestamptz
+	LANGUAGE plpgsql
+	IMMUTABLE
+	STRICT
+	PARALLEL SAFE
+	SET search_path = pg_catalog, pg_temp
+	AS $$
+	BEGIN
+		RETURN value::pg_catalog.timestamptz;
+	EXCEPTION
+		WHEN others THEN
+			RETURN NULL;
+	END;
+	$$;
+
 	CREATE TABLE "User" (
 		"id"   TEXT PRIMARY KEY,
 		-- MYR-581: the TOP RUNG of the display-name ladder. Every catalog read
