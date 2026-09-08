@@ -1,5 +1,12 @@
 package store
 
+import (
+	"context"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+)
+
 // TOMBSTONE SQL for the MYR-184 vehicle-sharing surface — every statement that
 // ends a share, in one place.
 //
@@ -29,12 +36,25 @@ package store
 // that decides is a locking SELECT inside the same transaction as the write.
 
 // queryRevokeSharesForVehicle tombstones every live grant on a vehicle. Called
-// from the owner-offboarding path: a car that has left the fleet must not keep
-// appearing in its viewers' lists.
+// from the owner-offboarding path (a car that has left the fleet must not keep
+// appearing in its viewers' lists) and from the MYR-599 owner-wins transfer.
+//
+// IT RETURNS THE GRANTEES IT CUT, and that is not decoration (MYR-601). Every
+// row this statement touches is somebody's live access to the car, and on the
+// transfer path each of them is holding an open WebSocket the hub has to be
+// told about — the cache TTL and the sweep are the alternative, and both are
+// measured in minutes of a stranger's live GPS. `accepted_by_user_id` is NULL
+// on a PENDING row (nobody redeemed it, so nobody is streaming), which the
+// caller filters.
+//
+// The offboarding caller keeps using `tx.Exec`, which discards the rows: it is
+// deleting the vehicle outright, so `Hub.RemoveVehicle` closes every subscribed
+// session at once and there is no per-grantee question to answer.
 const queryRevokeSharesForVehicle = `
 UPDATE go_vehicle_shares
 SET status = 'revoked', revoked_at = NOW(), revoked_by = 'owner'
-WHERE vehicle_id = $1 AND status <> 'revoked'`
+WHERE vehicle_id = $1 AND status <> 'revoked'
+RETURNING accepted_by_user_id`
 
 // querySupersedeCollidingShares retires the locked PENDING rows that can never
 // become grants: the redeemer already holds a LIVE ACCEPTED grant on that
@@ -130,3 +150,46 @@ WHERE s.vehicle_id = $1 AND s.accepted_by_user_id = $2 AND s.status = 'accepted'
     WHERE r.vehicle_id = $1 AND r.rider_id = $2
       AND r.status IN ('requested', 'accepted', 'arrived', 'enroute'))
 LIMIT 1`
+
+// revokeSharesReturningGrantees tombstones every live grant on the car and
+// reports WHO it cut.
+//
+// THE IDS ARE THE POINT (MYR-601). The revocation itself is MYR-599 behaviour
+// and unchanged; what was missing is that nothing told the running process
+// about it. Each of these accounts may be holding an open WebSocket whose
+// access set was frozen while the grant was live, and `Client.vehicleIDs`
+// still names this car — so without the ids the only things that would end
+// their stream are the 5-minute access-cache TTL and the 60-second sweep.
+//
+// A PENDING row carries a NULL grantee (nobody redeemed it), and duplicates
+// are possible (one person can hold a grant and an unredeemed invite on the
+// same car). Both are filtered here rather than at the call site, so the
+// caller receives a list it can hand to the hub one id at a time.
+func revokeSharesReturningGrantees(ctx context.Context, tx pgx.Tx, vehicleID string) ([]string, error) {
+	rows, err := tx.Query(ctx, queryRevokeSharesForVehicle, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("revokeSharesReturningGrantees(vehicle=%s): %w", vehicleID, err)
+	}
+	defer rows.Close()
+
+	seen := make(map[string]struct{})
+	var out []string
+	for rows.Next() {
+		var grantee *string
+		if err := rows.Scan(&grantee); err != nil {
+			return nil, fmt.Errorf("revokeSharesReturningGrantees(vehicle=%s): scan grantee: %w", vehicleID, err)
+		}
+		if grantee == nil || *grantee == "" {
+			continue
+		}
+		if _, dup := seen[*grantee]; dup {
+			continue
+		}
+		seen[*grantee] = struct{}{}
+		out = append(out, *grantee)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("revokeSharesReturningGrantees(vehicle=%s): %w", vehicleID, err)
+	}
+	return out, nil
+}

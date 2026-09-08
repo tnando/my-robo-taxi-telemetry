@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -34,8 +35,13 @@ func (r *recordingInvalidator) InvalidateVehicles(userID string) {
 }
 
 // recordingWidener records widenings AND what the invalidator had done first.
+//
+// `seq` is the SHARED ordering log the narrower writes to as well: the transfer
+// publishes in both directions and the order between them is normative (losses
+// first — see announceProvisioned), which no per-recorder list can show.
 type recordingWidener struct {
 	inv    *recordingInvalidator
+	seq    *[]string
 	calls  []accessCall
 	busted [][]string
 }
@@ -47,13 +53,22 @@ func (r *recordingWidener) ShareAccessWidened(userID, vehicleID, reason string) 
 	if r.inv != nil {
 		r.busted = append(r.busted, append([]string(nil), r.inv.users...))
 	}
+	if r.seq != nil {
+		*r.seq = append(*r.seq, "gained:"+userID)
+	}
 }
 
 // recordingNarrower is the transfer's other end.
-type recordingNarrower struct{ calls []accessCall }
+type recordingNarrower struct {
+	seq   *[]string
+	calls []accessCall
+}
 
 func (r *recordingNarrower) ShareAccessRevoked(userID, vehicleID, reason string) {
 	r.calls = append(r.calls, accessCall{userID, vehicleID, reason})
+	if r.seq != nil {
+		*r.seq = append(*r.seq, "lost:"+userID)
+	}
 }
 
 const accessVIN = "5YJ3E1EA7KF000042"
@@ -187,12 +202,17 @@ func TestOwnerStreamHook_SkippedProvisionsAnnounceNothing(t *testing.T) {
 // most, because a late one leaves somebody streaming live GPS from a car that
 // is no longer theirs in any sense.
 func TestOwnerStreamHook_TransferAnnouncesBothEnds(t *testing.T) {
+	var seq []string
 	inv := &recordingInvalidator{}
-	wid := &recordingWidener{inv: inv}
-	nar := &recordingNarrower{}
+	wid := &recordingWidener{inv: inv, seq: &seq}
+	nar := &recordingNarrower{seq: &seq}
 	hook := newAccessHook(t,
 		[]telemetry.FleetVehicle{ownedVehicle("111", accessVIN, "Lunar")},
-		&fakeUpserter{outcome: store.VehicleOwnedByTransfer, previousUserID: "cdriver"},
+		&fakeUpserter{
+			outcome:           store.VehicleOwnedByTransfer,
+			previousUserID:    "cdriver",
+			revokedGranteeIDs: []string{"cviewer_a", "cviewer_b"},
+		},
 		ownerStreamAccess{invalidator: inv, widener: wid, narrower: nar},
 	)
 
@@ -201,14 +221,30 @@ func TestOwnerStreamHook_TransferAnnouncesBothEnds(t *testing.T) {
 	if len(wid.calls) != 1 || wid.calls[0].user != "cowner" || wid.calls[0].reason != "owner_transfer" {
 		t.Errorf("widenings = %+v, want one {cowner … owner_transfer}", wid.calls)
 	}
-	if len(nar.calls) != 1 || nar.calls[0].user != "cdriver" || nar.calls[0].reason != "superseded_by_owner" {
-		t.Errorf("narrowings = %+v, want one {cdriver … superseded_by_owner} — the former "+
-			"driver keeps the car's live GPS until something tells the hub otherwise", nar.calls)
+	// THREE narrowings, and each carries the reason for ITS kind of loss: the
+	// linker lost a car they had linked, the viewers lost a share somebody else
+	// had given them, and an audit trail should be able to tell them apart.
+	wantNarrow := []accessCall{
+		{"cdriver", "veh_" + accessVIN, "superseded_by_owner"},
+		{"cviewer_a", "veh_" + accessVIN, "share_superseded_by_owner"},
+		{"cviewer_b", "veh_" + accessVIN, "share_superseded_by_owner"},
 	}
-	// BOTH accounts' cached sets are busted, and the transfer is not `Inserted`,
-	// so this also pins that the transfer takes its own branch.
-	if len(inv.users) != 2 {
-		t.Errorf("cache busts = %v, want both the owner's and the former driver's", inv.users)
+	if !reflect.DeepEqual(nar.calls, wantNarrow) {
+		t.Errorf("narrowings = %+v, want %+v — every account the teardown cut keeps the "+
+			"car's live GPS until something tells the hub otherwise", nar.calls, wantNarrow)
+	}
+	// EVERY loser's cached set is busted, plus the arriving owner's. The
+	// transfer is not `Inserted`, so this also pins that it takes its own branch.
+	if len(inv.users) != 4 {
+		t.Errorf("cache busts = %v, want the owner's and all three losers'", inv.users)
+	}
+	// AND THE LOSSES ARE PUBLISHED FIRST (MYR-601 review finding 8). Both go
+	// onto an in-process bus that drops the OLDEST event when a subscriber is
+	// behind; if exactly one is going to be lost it must not be the one whose
+	// latency is a stranger's live GPS.
+	wantSeq := []string{"lost:cdriver", "lost:cviewer_a", "lost:cviewer_b", "gained:cowner"}
+	if !reflect.DeepEqual(seq, wantSeq) {
+		t.Errorf("publish order = %v, want %v — the security half goes first", seq, wantSeq)
 	}
 }
 
@@ -336,4 +372,67 @@ func TestOwnerStreamHook_TransferNarrowingUsesTheRevocationTopic(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the arriving owner's widening was never published")
 	}
+}
+
+// THE FORMER DRIVER IS NOT THE ONLY LOSER, and the others are the ones most
+// likely to be watching. The transfer's teardown tombstones EVERY live grant on
+// the car, so the driver's viewers — people who never linked anything — lose
+// access in the same statement. Until MYR-601's review round only the driver's
+// socket was closed, which handed the arriving owner a car whose live GPS was
+// still streaming to two strangers until the cache TTL and the sweep caught up.
+//
+// End to end through the REAL bus and REAL sockets, because the claim is about
+// what reaches a connection, not about which method was called.
+func TestOwnerStreamHook_TransferNarrowsEveryRevokedGrantee(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(discardWriter{}, nil))
+	bus := newShareAccessTestBus(t, logger)
+
+	hub := ws.NewHub(logger, &countingHubMetrics{})
+	defer hub.Stop()
+	if _, err := newShareAccessDispatcher(hub, logger).Subscribe(bus); err != nil {
+		t.Fatalf("Subscribe revocations: %v", err)
+	}
+	if _, err := newShareWidenDispatcher(hub, logger).Subscribe(bus); err != nil {
+		t.Fatalf("Subscribe widenings: %v", err)
+	}
+
+	const carID = "veh_" + accessVIN
+	// The two viewers hold the CAR, which is what makes them findable by a
+	// vehicle-scoped revocation — and what makes them a live GPS leak.
+	viewerASrv := newWSTestServer(t, hub, &fakeAuth{userID: "cviewer_a", vehicleIDs: []string{carID}})
+	defer viewerASrv.Close()
+	viewerBSrv := newWSTestServer(t, hub, &fakeAuth{userID: "cviewer_b", vehicleIDs: []string{carID}})
+	defer viewerBSrv.Close()
+	// And the arriving OWNER, who is connected and must be re-handshaked rather
+	// than left without the car they just linked.
+	ownerSrv := newWSTestServer(t, hub, &fakeAuth{userID: "cowner", vehicleIDs: []string{"veh-other"}})
+	defer ownerSrv.Close()
+
+	viewerA := dialWSAuth(t, viewerASrv.URL, "tok")
+	defer viewerA.Close(websocket.StatusNormalClosure, "test done")
+	viewerB := dialWSAuth(t, viewerBSrv.URL, "tok")
+	defer viewerB.Close(websocket.StatusNormalClosure, "test done")
+	ownerConn := dialWSAuth(t, ownerSrv.URL, "tok")
+	defer ownerConn.Close(websocket.StatusNormalClosure, "test done")
+	waitClients(t, hub, 3)
+
+	hook := newAccessHook(t,
+		[]telemetry.FleetVehicle{ownedVehicle("111", accessVIN, "Lunar")},
+		&fakeUpserter{
+			outcome:           store.VehicleOwnedByTransfer,
+			previousUserID:    "cdriver",
+			revokedGranteeIDs: []string{"cviewer_a", "cviewer_b"},
+		},
+		ownerStreamAccess{
+			widener:  newShareWidenBusNotifier(bus, logger),
+			narrower: newShareAccessBusNotifier(bus, logger),
+		},
+	)
+
+	start := time.Now()
+	hook.AfterLink(context.Background(), "cowner", "token")
+
+	awaitClose4002(t, viewerA, start, "a viewer the transfer revoked")
+	awaitClose4002(t, viewerB, start, "the second viewer the transfer revoked")
+	awaitClose4002(t, ownerConn, start, "the arriving owner")
 }

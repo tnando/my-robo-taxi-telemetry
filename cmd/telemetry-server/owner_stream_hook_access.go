@@ -148,13 +148,31 @@ func (h *ownerStreamHook) lost(userID, vehicleID, reason string) {
 //
 // The transfer is the second door: the row is not inserted — it already existed
 // under somebody else — but it has moved into this user's access set and out of
-// the previous linker's, so BOTH ends are announced.
+// the previous linker's and out of every grantee's, so ALL of those ends are
+// announced.
+//
+// THE LOSSES GO FIRST, AND THE ORDER FOLLOWS THE STAKES. A widening that
+// arrives late costs the arriving owner a car on their map for one reconnect; a
+// narrowing that arrives late leaves a stranger streaming live GPS from a car
+// that is no longer theirs in any sense. Both publishes are best-effort onto an
+// in-process bus that drops the OLDEST event when a subscriber is behind, so if
+// exactly one of them is going to be lost it must not be a security one. See
+// `lost`.
 func (h *ownerStreamHook) announceProvisioned(userID string, res store.VehicleUpsertResult) {
 	switch {
 	case res.Outcome == store.VehicleOwnedByTransfer:
-		h.gained(userID, res.VehicleID, "owner_transfer")
 		// The former driver, who was not asked and is not told anywhere else.
 		h.lost(res.PreviousUserID, res.VehicleID, "superseded_by_owner")
+		// AND EVERY THIRD PARTY THE SAME TRANSACTION CUT. The teardown revokes
+		// every live grant on the car, not just the linker's claim, so the
+		// driver's viewers lose access in the same statement — and theirs are
+		// the sessions most likely to be open and watching. A transfer that
+		// closed only the driver's socket would hand the arriving owner a car
+		// whose live GPS was still streaming to strangers.
+		for _, granteeID := range res.RevokedGranteeIDs {
+			h.lost(granteeID, res.VehicleID, "share_superseded_by_owner")
+		}
+		h.gained(userID, res.VehicleID, "owner_transfer")
 	case res.Inserted:
 		h.gained(userID, res.VehicleID, "provisioned")
 	}

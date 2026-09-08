@@ -118,6 +118,25 @@ type VehicleUpsertResult struct {
 	// not a new fact — it is the one fact the transaction already recorded,
 	// handed to the caller that has to act on it.
 	PreviousUserID string
+	// RevokedGranteeIDs names every THIRD PARTY whose share of the car the
+	// transfer's teardown tombstoned, and is empty on every other outcome
+	// (MYR-601). Deduplicated, and never carries a pending invite's NULL.
+	//
+	// THE FORMER DRIVER IS NOT THE ONLY LOSER, which is the finding that put
+	// this field here. `queryRevokeSharesForVehicle` revokes EVERY live grant
+	// on the vehicle, so the driver's viewers — people who never linked
+	// anything and are simply watching a car somebody shared with them — lose
+	// access in the same statement. Their sessions are the ones most likely to
+	// be open and streaming: PreviousUserID alone would have closed the driver's
+	// socket and left every viewer they had invited on the car's live GPS until
+	// the cache TTL and the sweep caught up.
+	//
+	// Separate from PreviousUserID rather than appended to it because the two
+	// are different facts with different reasons on the wire
+	// (`superseded_by_owner` for the linker, `share_superseded_by_owner` for a
+	// grantee) and a reader of an audit trail should be able to tell a person
+	// who lost a car they linked from a person who lost a share.
+	RevokedGranteeIDs []string
 }
 
 // queryUpsertOwnedVehicle inserts the minimal identity columns for a newly
