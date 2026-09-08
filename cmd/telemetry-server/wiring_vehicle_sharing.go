@@ -83,6 +83,12 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 		&sharedVehicleListerAdapter{repo: deps.vehicleRepo},
 		deps.accessInvalidator,
 		logger,
+		// MYR-601: and the live-socket half. A redeemer who tapped the invite
+		// link inside the app is CONNECTED, so the cache bust above fixes a
+		// handshake they are not about to make — their held session's access set
+		// was frozen before the grant existed. Nil in dev mode and in tests that
+		// wire no bus.
+		telemetry.WithShareRedeemWidener(deps.shareAccessWidener),
 	)
 	deps.srv.HandleFunc("POST /api/invites/redeem", redeemHandler.ServeHTTP)
 

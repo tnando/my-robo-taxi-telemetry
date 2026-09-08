@@ -492,6 +492,10 @@ func setupRideRequestEndpoints(deps httpRouteDeps, vehicles telemetry.VehicleSna
 		// so bust their cached one — the redeem path's rule, for the redeem
 		// path's reason.
 		telemetry.WithRideAccessInvalidator(deps.accessInvalidator),
+		// MYR-601: and make their already-open socket re-handshake, so the ride's
+		// car reaches the session the join's 200 sends them straight into rather
+		// than the next one they happen to open.
+		telemetry.WithRideAccessWidener(deps.shareAccessWidener),
 	}
 	// MYR-556: the dispatch-now seam, wired only when reservation dispatch was
 	// actually composed. Passing an adapter over a nil sweeper would turn a

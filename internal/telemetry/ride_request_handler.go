@@ -69,6 +69,10 @@ type RideRequestHandler struct {
 	// access busts a fresh member's cached vehicle set so the car they just
 	// joined a ride in appears on their very next request (MYR-540).
 	access AccessCacheInvalidator
+	// widened makes a fresh member's ALREADY-OPEN sockets re-handshake, so the
+	// ride's car reaches the session they are holding rather than only the next
+	// one they open (MYR-601). Nil restores the pre-MYR-601 behavior.
+	widened ShareAccessWidener
 	// dispatchNow runs the reservation sweeper's claimed dispatch path for the
 	// owner's MYR-556 "send it now" tap. Nil leaves POST
 	// /api/ride-requests/{id}/dispatch-now answering 500 — a deployment error,

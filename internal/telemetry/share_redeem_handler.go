@@ -30,7 +30,30 @@ type ShareRedeemHandler struct {
 	// access busts the redeemer's cached vehicle set so the car they just
 	// joined appears on the very next request.
 	access AccessCacheInvalidator
-	logger *slog.Logger
+	// widened makes the redeemer's ALREADY-OPEN sockets re-handshake, so the
+	// car they just joined reaches the session they are holding rather than
+	// only the next one they open (MYR-601). Optional; nil restores the
+	// pre-MYR-601 behavior.
+	widened ShareAccessWidener
+	logger  *slog.Logger
+}
+
+// ShareRedeemOption configures the redeem handler.
+type ShareRedeemOption func(*ShareRedeemHandler)
+
+// WithShareRedeemWidener wires the live-socket half of a redemption (MYR-601).
+//
+// THE CACHE BUST WAS NEVER ENOUGH ON ITS OWN, and redeem is the path where that
+// shows most plainly. The bust fixes the NEXT handshake; a redeemer who was
+// already connected — which is every redeemer who tapped an invite link inside
+// the app — holds a session whose access set was frozen before the grant
+// existed. Their "you're in!" screen is followed by a tracking sheet that
+// cannot subscribe to the car, which is the same failure §7.5.5's own cache
+// bust exists to prevent, one layer down.
+//
+// Nil in dev mode and in tests that wire no bus.
+func WithShareRedeemWidener(wd ShareAccessWidener) ShareRedeemOption {
+	return func(h *ShareRedeemHandler) { h.widened = wd }
 }
 
 // NewShareRedeemHandler builds the redeem handler with the default per-user
@@ -42,8 +65,9 @@ func NewShareRedeemHandler(
 	vehicles SharedVehicleLister,
 	invalidator AccessCacheInvalidator,
 	logger *slog.Logger,
+	opts ...ShareRedeemOption,
 ) *ShareRedeemHandler {
-	return &ShareRedeemHandler{
+	h := &ShareRedeemHandler{
 		auth:     tokens,
 		redeem:   redeem,
 		vehicles: vehicles,
@@ -51,6 +75,10 @@ func NewShareRedeemHandler(
 		access:   invalidator,
 		logger:   logger,
 	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
 }
 
 // ServeHTTP handles POST /api/invites/redeem.
@@ -138,6 +166,18 @@ func (h *ShareRedeemHandler) writeGrants(ctx context.Context, w http.ResponseWri
 	if h.access != nil {
 		h.access.InvalidateVehicles(userID)
 	}
+
+	// AND THE SOCKET THEY ARE ALREADY HOLDING (MYR-601). Same order and the
+	// same argument as §7.5.8 extend: the bust fixes the next handshake, this
+	// makes a next handshake happen, and a re-handshake that overtook the bust
+	// would be served the pre-redemption set and come back without the car.
+	//
+	// ONE SIGNAL FOR THE WHOLE REDEMPTION even when the invite granted several
+	// cars. The hub re-handshakes every session the user holds — it cannot find
+	// them by a vehicle they are not yet authorized for, which is the whole
+	// reason WidenUserAccess exists — so one publish already covers every car
+	// this redemption granted, and the id it carries is for the log alone.
+	h.widenLiveAccess(userID, grants[0].VehicleID, "redeemed")
 
 	vehicleIDs := make([]string, 0, len(grants))
 	for _, g := range grants {
@@ -260,4 +300,14 @@ func (h *ShareRedeemHandler) writeJSON(w http.ResponseWriter, status int, v any)
 // writeError writes the REST error envelope (rest-api.md §4.1).
 func (h *ShareRedeemHandler) writeError(w http.ResponseWriter, status int, code wserrors.ErrorCode, msg string) {
 	wserrors.WriteErrorEnvelope(w, h.logger, status, code, msg)
+}
+
+// widenLiveAccess publishes the redemption's widening. Best-effort by
+// construction: a nil widener or an empty user is an ordinary no-op, and the
+// redeemer's 200 does not depend on anybody hearing it.
+func (h *ShareRedeemHandler) widenLiveAccess(userID, vehicleID, reason string) {
+	if h.widened == nil || userID == "" {
+		return
+	}
+	h.widened.ShareAccessWidened(userID, vehicleID, reason)
 }
