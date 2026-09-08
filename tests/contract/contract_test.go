@@ -1039,7 +1039,15 @@ func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID, vi
 			MaxSpeedMph:      d.MaxSpeedMph,
 			StartChargeLevel: d.StartChargeLevel,
 			EndChargeLevel:   d.EndChargeLevel,
-			CreatedAt:        d.CreatedAt,
+			// MYR-152's two FSD stats. Dropped by this harness since they
+			// landed, so every drive it served carried 0.0 for both while the
+			// store had real values — a silent wrongness that nothing catches
+			// because `validateDrivesList` does not assert them either (the
+			// canonical `drives.json` fixture predates MYR-152 as well). Copied
+			// now so a future tightening of either finds the truth here.
+			FsdMiles:      d.FsdMiles,
+			FsdPercentage: d.FsdPercentage,
+			CreatedAt:     d.CreatedAt,
 			// MYR-608. Already role-scoped by the statement that produced it.
 			TripID: d.TripID,
 		})
@@ -1101,6 +1109,8 @@ func (a *contractTripDriveAdmitter) VehicleDrivesInTripWindows(
 			MaxSpeedMph:      d.MaxSpeedMph,
 			StartChargeLevel: d.StartChargeLevel,
 			EndChargeLevel:   d.EndChargeLevel,
+			FsdMiles:         d.FsdMiles,
+			FsdPercentage:    d.FsdPercentage,
 			CreatedAt:        d.CreatedAt,
 			TripID:           d.TripID,
 		})
