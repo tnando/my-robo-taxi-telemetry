@@ -27,21 +27,29 @@ import (
 
 // ServeDelete handles DELETE /api/trips/{tripId} — OWNER ONLY, 204, any status.
 //
-// ⚠ SETTLE FIRST, DELETE SECOND, AND THE ORDER IS NORMATIVE. The settlement
-// reads the trip — its roster, its open leg, each party's Live Activity
-// registration — and every one of those rows is about to stop existing. Run the
-// other way round, a participant's lock screen would keep a live card for a
-// journey that no longer exists, addressed by a token nothing can look up any
-// more, until ActivityKit's own staleness ceiling retired it hours later.
+// ⚠ END, SETTLE, DELETE — THREE STEPS, AND THE ORDER IS NORMATIVE.
 //
-// The cost of that order is the failure mode it creates, and it is worth
-// stating rather than discovering: if the DELETE then fails, the trip has been
-// SETTLED but not removed — ended, announced, cards down — and the client's
-// retry deletes it. That is the conservative direction. Access is already
-// revoked, nobody is told anything false, and the only visible artefact is a
-// trip that briefly reads as `ended` on the owner's own list. The reverse
-// ordering's failure mode is a stranded card on somebody else's phone, which
-// nothing can clear.
+// SETTLE BEFORE DELETE, because the settlement reads the trip — its roster, its
+// open leg, each party's Live Activity registration — and every one of those
+// rows is about to stop existing. Run the other way round, a participant's lock
+// screen would keep a live card for a journey that no longer exists, addressed
+// by a token nothing can look up any more, until ActivityKit's own staleness
+// ceiling retired it hours later.
+//
+// END BEFORE SETTLE, and this step is here for the failure mode the other order
+// creates rather than for the happy path — on the happy path the row is deleted
+// a moment later and nothing ever reads the stamp. **If the DELETE then fails,
+// `ended_at` is what makes the half-done state conservative.** The settlement
+// takes every card down and tells every participant the trip is over; without
+// the stamp the trip would still be ACTIVE, so those people would keep the
+// car's live location for the rest of a window they had just been told had
+// closed — told it ended, still watching. With it, the trip is genuinely over,
+// the client's retry deletes it, and the only artefact is a trip that reads as
+// `ended` on the owner's own list until then.
+//
+// It is `EndTrip`, the §7.30.5 statement, reused rather than reimplemented:
+// owner-scoped, guarded on `ended_at IS NULL`, and therefore a no-op on a trip
+// that has already ended.
 func (h *TripHandler) ServeDelete(w http.ResponseWriter, r *http.Request) {
 	tripID, ctx, userID, ok := h.beginTrip(w, r)
 	if !ok {
@@ -80,6 +88,13 @@ func (h *TripHandler) ServeDelete(w http.ResponseWriter, r *http.Request) {
 	// answers for one that ended WHILE it was in flight — an owner tapping End
 	// and Delete in the same second, which settles once and announces once.
 	if tripStatusOf(before, time.Now()) != tripStatusEnded {
+		// The stamp first. See the ordering note above: it is what stops a
+		// failed delete leaving people who were told the trip ended still
+		// holding the car's live location.
+		if _, err := h.trips.EndTrip(ctx, tripID, userID); err != nil {
+			h.failTrip(w, "delete", tripID, err)
+			return
+		}
 		h.notifier.TripDeleted(ctx, before, participantUserIDs(before))
 	}
 

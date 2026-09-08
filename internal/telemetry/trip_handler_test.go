@@ -44,6 +44,9 @@ type fakeTripStore struct {
 	// the settle-before-delete ordering's own failure mode.
 	tripDeleteCalls int
 	deleteErr       error
+	// endCalls counts EndTrip, which the delete route calls before settling so
+	// a failed delete leaves a trip that is genuinely over.
+	endCalls int
 
 	// The LEG anchor of §7.21's per-Activity path (§7.21.7).
 	legTokenCalls  int
@@ -89,6 +92,7 @@ func (f *fakeTripStore) UpdateTrip(_ context.Context, _, _ string, in TripUpdate
 	return f.trip, f.err
 }
 func (f *fakeTripStore) EndTrip(context.Context, string, string) (TripData, error) {
+	f.endCalls++
 	return f.trip, f.err
 }
 func (f *fakeTripStore) LeaveTrip(context.Context, string, string) error {

@@ -45,6 +45,29 @@ func TestTripDeleteOwnerGets204(t *testing.T) {
 	}
 }
 
+// TestTripDeleteStampsTheEndBeforeSettling is the guard on the half-done state.
+//
+// The settlement takes every card down and tells every participant the trip is
+// over. Without `ended_at` written first, a delete that then FAILED would leave
+// those people holding the car's live location for the rest of a window they
+// had just been told had closed — told it ended, still watching.
+func TestTripDeleteStampsTheEndBeforeSettling(t *testing.T) {
+	store := &fakeTripStore{trip: fixtureTrip()}
+	notifier := &recordingTripNotifier{onDeleted: func() {
+		if store.endCalls == 0 {
+			t.Errorf("the trip was settled before its end was stamped")
+		}
+	}}
+	handler := newTripTestHandler(t, store, true, WithTripNotifier(notifier))
+
+	if rec := tripRequest(t, handler, http.MethodDelete, "/api/trips/"+tripTestID, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204", rec.Code)
+	}
+	if store.endCalls != 1 {
+		t.Errorf("EndTrip calls = %d, want 1", store.endCalls)
+	}
+}
+
 // TestTripDeleteSettlesBeforeDeleting pins the ORDERING that the whole route
 // hangs on.
 //
@@ -103,6 +126,9 @@ func TestTripDeleteOfAnEndedTripNotifiesNobody(t *testing.T) {
 	}
 	if len(notifier.deleted) != 0 {
 		t.Errorf("TripDeleted calls = %d, want 0 for a trip that had already ended", len(notifier.deleted))
+	}
+	if store.endCalls != 0 {
+		t.Errorf("EndTrip calls = %d, want 0 — there is nothing left to stamp", store.endCalls)
 	}
 	if store.tripDeleteCalls != 1 {
 		t.Errorf("DeleteTrip calls = %d, want 1 — the row still goes", store.tripDeleteCalls)

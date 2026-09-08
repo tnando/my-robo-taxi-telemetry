@@ -381,27 +381,32 @@ what people can see, which is why it carries none of §7.30.4's `trip_ended`
 refusal: that refusal exists because extending a lapsed window would resurrect
 live access, and a deletion grants nothing to anybody.
 
-**TWO PHASES, AND THE ORDER IS THE WHOLE DESIGN.**
+**THREE PHASES, AND THE ORDER IS THE WHOLE DESIGN.**
 
 | Phase | What happens | Where |
 |---|---|---|
-| 1 — settle | Every open leg is ended and its Live Activity ended; `trip_ended` is fanned out to the participants carrying **`deleted: true`**; the WS re-mask is nudged | `trips.Service.NotifyTripDeleted` |
-| 2 — delete | Five statements in one transaction: the audit row, then the leg Activities, the legs, the tokens, the roster, the window | `store.TripRepo.Delete` |
+| 1 — end | `ended_at` is stamped, through the §7.30.5 statement reused verbatim (owner-scoped, guarded on `ended_at IS NULL`, a no-op on an already-ended trip) | `store.TripRepo.End` |
+| 2 — settle | Every open leg is ended and its Live Activity ended; `trip_ended` is fanned out to the participants carrying **`deleted: true`**; the WS re-mask is nudged | `trips.Service.NotifyTripDeleted` |
+| 3 — delete | Five statements in one transaction: the audit row, then the leg Activities, the legs, the tokens, the roster, the window | `store.TripRepo.Delete` |
 
-**PHASE 1 READS ROWS PHASE 2 REMOVES.** Who is on the trip, which leg is open,
-which device holds which card — after phase 2 nothing in the database can name
-any of them. A settlement that ran second would end no card and tell nobody, and
+**PHASE 2 READS ROWS PHASE 3 REMOVES.** Who is on the trip, which leg is open,
+which device holds which card — after phase 3 nothing in the database can name
+any of them. A settlement that ran last would end no card and tell nobody, and
 every participant's lock screen would keep a live Activity for a journey that no
 longer exists until ActivityKit's own 8-hour staleness ceiling retired it. That
 is the same hazard the `0047` down-migration's header warns about, arrived at
 from the other direction.
 
-**The cost of that order is a stated failure mode.** If phase 2 fails, the trip
-is settled but not deleted — ended, announced, cards down — and the client's
-retry deletes it. Access is already revoked and nothing false has been said; the
-only artefact is a trip that briefly reads as `ended` on the owner's own list.
-The reverse ordering's failure is a stranded card on somebody else's phone that
-nothing can clear.
+**PHASE 1 EXISTS ONLY FOR THE HALF-DONE STATE.** On the happy path the row is
+deleted a moment later and nothing ever reads the stamp. Phase 2 takes every
+card down and tells every participant the trip is over; **without `ended_at`
+written first, a phase 3 that FAILED would leave the trip ACTIVE, so those
+people would keep the car's live location for the rest of a window they had just
+been told had closed** — told it ended, still watching. With it, the trip is
+genuinely over, the client's retry deletes it, and the only artefact is a trip
+that reads as `ended` on the owner's own list until then. The reverse ordering
+cannot offer a conservative failure at all: its failure is a stranded card on
+somebody else's phone that nothing can clear.
 
 **`NotifyTripDeleted` IS `SettleTrip` WITH TWO DIFFERENCES**, and the second is
 the one worth knowing: the banner carries the flag, and **the open legs are
