@@ -1768,6 +1768,7 @@ components:
         - fsdMiles
         - fsdPercentage
         - createdAt
+        - tripId
       additionalProperties: false
       properties:
         id:
@@ -1777,6 +1778,40 @@ components:
         vehicleId:
           type: string
           description: Opaque DB cuid for the drive's parent vehicle.
+          x-classification: P0
+        tripId:
+          type: ["string", "null"]
+          description: |
+            The trip whose WINDOW contains this drive's start instant, as
+            far as THIS caller is concerned, or null when the drive falls
+            in no window they may see (MYR-608).
+
+            ALWAYS PRESENT AND NULLABLE — it is in `required` and its type
+            is ["string","null"], deliberately NOT the omit-when-empty
+            convention the four location labels on this same shape follow.
+            Those are absent because the server has nothing to say YET (a
+            geocode may still arrive); this is a DECIDED answer. A missing
+            key would be indistinguishable from a server that does not send
+            the field, and a consumer grouping drives under trips would
+            silently fall back to ungrouped against a deployed server that
+            simply had nothing to sum.
+
+            RESOLVED SERVER-SIDE, NEVER RE-DERIVED. A consumer MUST group by
+            this value and MUST NOT reconstruct it from `startTime` and a
+            trip's window: two implementations of one rule is what this
+            field exists to delete.
+
+            ROLE-SCOPED IN THE STATEMENT that produced the row. On §7.2 an
+            owner is told about the windows THEY own (a car can change
+            hands; a previous owner's trip is never named) and a trip
+            participant only about the windows that admitted them. On
+            §7.30.7 every row carries the trip in the request path.
+
+            OVERLAPPING WINDOWS: two ENDED trips may cover one drive (the
+            create probe only refuses windows that have not closed), and on
+            §7.2 the NEWEST by `startsAt` wins. §7.30.7 always answers with
+            the trip it was asked for. This is the one place two surfaces
+            may report a different `tripId` for the same drive.
           x-classification: P0
         startTime:
           type: string

@@ -354,15 +354,51 @@ WHERE "vehicleId" = $1
 // early yields its scheduled end rather than NULL.
 const tripEffectiveEndExpr = `LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))`
 
-// tripCoversDriveExpr is the drive-membership test: does the drive row aliased
-// `d` begin inside trip `t`'s window?
+// driveStartInstantExpr is the drive row's start instant, or NULL when the
+// stored TEXT will not parse as one.
 //
 // THE CAST IS NOT OPTIONAL — see queryTripDrivesWindow. `Drive."startTime"` is
-// a Prisma-owned TEXT column, and comparing it as text would make this
-// expression agree with the list it decorates only while every row carries the
-// same offset spelling.
-const tripCoversDriveExpr = `t.starts_at <= d."startTime"::timestamptz
-		  AND d."startTime"::timestamptz <= ` + tripEffectiveEndExpr
+// a Prisma-owned TEXT column holding RFC 3339, and comparing it as text would
+// make these expressions agree with the lists they decorate only while every
+// row carries the same offset spelling.
+//
+// ⚠ THE GUARD IS NOT OPTIONAL EITHER, AND IT IS WHAT SEPARATES A DECORATION
+// FROM A PREDICATE (MYR-608). A bare `::timestamptz` does not skip a row it
+// cannot read — it ERRORS, and an error in a select-list expression fails the
+// WHOLE STATEMENT. §7.2 is an owner's entire drive history, and until this
+// issue it carried no cast at all; adding an unguarded one would have meant a
+// single unreadable `startTime` anywhere in a car's past turning that list
+// into a permanent 500. A test fixture holding `'10:00'` found this on the
+// first run, which is the cheap version of finding it in production.
+//
+// SO A ROW THIS EXPRESSION CANNOT READ GETS `tripId: null` rather than taking
+// the page down with it. That is the same direction MYR-614 settled on for the
+// single-drive gate: an unreadable start instant admits the caller to nothing
+// and is reported to the operator, never to the reader.
+//
+// THE PREFIX REGEX IS THE GUARD because Postgres has no TRY_CAST, and CASE is
+// the one construct that guarantees its THEN arm is not evaluated when the
+// WHEN is false. It covers every shape a partial or lazy write actually
+// produces — the empty string, a bare time, a date with no time. A string that
+// matches the prefix and still fails the cast (`2026-01-01T00:00:00nonsense`)
+// would error, and no writer in either repo can produce one.
+//
+// ⚠ THE `WHERE` CASTS ELSEWHERE IN THIS FILE ARE DELIBERATELY LEFT STRICT.
+// They are ACCESS predicates — §7.30.7's window bound, the participant
+// narrowing — and a row whose start instant cannot be read must not be
+// admitted. Softening those would be a behaviour change on a gate this issue
+// is not about; that they fail the statement rather than the row is recorded
+// as a known hazard on the PR.
+const driveStartInstantExpr = `(CASE
+			WHEN d."startTime" ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}:[0-9]{2}'
+			THEN d."startTime"::timestamptz
+		END)`
+
+// tripCoversDriveExpr is the drive-membership test: does the drive row aliased
+// `d` begin inside trip `t`'s window? A NULL start instant satisfies neither
+// comparison, so an unreadable row belongs to no trip.
+const tripCoversDriveExpr = `t.starts_at <= ` + driveStartInstantExpr + `
+		  AND ` + driveStartInstantExpr + ` <= ` + tripEffectiveEndExpr
 
 // ownerTripIDForDriveExpr resolves the tripId on the OWNER's §7.2 list.
 //
@@ -407,8 +443,8 @@ const ownerTripIDForDriveExpr = `
 const participantTripIDForDriveExpr = `
 	(SELECT w.trip_id
 	 FROM unnest($2::timestamptz[], $3::timestamptz[], $4::text[]) AS w(win_from, win_to, trip_id)
-	 WHERE d."startTime"::timestamptz >= w.win_from
-	   AND d."startTime"::timestamptz <= w.win_to
+	 WHERE ` + driveStartInstantExpr + ` >= w.win_from
+	   AND ` + driveStartInstantExpr + ` <= w.win_to
 	 ORDER BY w.win_from DESC, w.trip_id DESC
 	 LIMIT 1) AS trip_id`
 

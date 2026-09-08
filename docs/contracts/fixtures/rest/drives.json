@@ -21,6 +21,7 @@
       "maxSpeedMph": 65.2,
       "startChargeLevel": 82,
       "endChargeLevel": 76,
+      "tripId": "cltrp1234567890abcdef",
       "createdAt": "2026-04-13T18:46:19Z"
     },
     {
@@ -35,6 +36,7 @@
       "maxSpeedMph": 42.0,
       "startChargeLevel": 85,
       "endChargeLevel": 82,
+      "tripId": null,
       "createdAt": "2026-04-13T08:29:08Z"
     }
   ],
