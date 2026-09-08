@@ -256,6 +256,17 @@ func TestParticipantAddRefusalsRideTheExistingErrorMap(t *testing.T) {
 			subCode: SubCodeTripEnded,
 		},
 		{
+			// REVIEW ROUND. The owner removed this person, and only the owner
+			// may add them back. A `conflict` rather than a
+			// `permission_denied` — the caller HOLDS the verb, and it is this
+			// particular person who may not be added — and not
+			// `participant_not_shared`, whose advice ("get a share first")
+			// leads nowhere since they very likely still hold one.
+			name: "the owner removed them", err: ErrTripParticipantOwnerRemoved,
+			status: http.StatusConflict, code: wserrors.ErrCodeConflict,
+			subCode: SubCodeParticipantOwnerRemoved,
+		},
+		{
 			name: "not on the trip at all", err: ErrTripNotFound,
 			status: http.StatusNotFound, code: wserrors.ErrCodeNotFound,
 		},
@@ -351,6 +362,31 @@ func TestAddablePeopleRefusesAStrangerAs404(t *testing.T) {
 	}
 	if got := decodeTripError(t, rec).Code; got != wserrors.ErrCodeNotFound {
 		t.Errorf("code = %q, want not_found — a 403 would confirm the trip is real", got)
+	}
+}
+
+// TestAddablePeopleRefusesAnEndedTripAs409 is review finding 4 at the wire.
+//
+// The picker refuses on a closed window with the SAME `409 conflict /
+// trip_ended` §7.30.4's add gives, so a client that already handles the add's
+// refusal handles this one, and it never lists names the very next request
+// would reject.
+func TestAddablePeopleRefusesAnEndedTripAs409(t *testing.T) {
+	store := &fakeTripStore{addableErr: ErrTripEnded}
+	handler := newTripRosterHandler(t, store, tripTestParticipant)
+
+	rec := tripRequest(t, handler, http.MethodGet, "/api/trips/"+tripTestID+"/addable-people", "")
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 (body %s)", rec.Code, rec.Body.String())
+	}
+	env := decodeTripError(t, rec)
+	if env.Code != wserrors.ErrCodeConflict {
+		t.Errorf("code = %q, want conflict", env.Code)
+	}
+	if env.SubCode == nil || wserrors.SubCode(*env.SubCode) != SubCodeTripEnded {
+		t.Errorf("subCode = %v, want %q — a bare conflict reads as a server bug and the "+
+			"client retries", env.SubCode, SubCodeTripEnded)
 	}
 }
 
