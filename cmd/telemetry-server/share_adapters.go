@@ -97,6 +97,27 @@ func (a *shareInviteAdapter) ResendInvite(ctx context.Context, inviteID, ownerUs
 	return toShareInviteRow(&row), nil
 }
 
+// ExtendShare copies an accepted grant onto another of the owner's cars
+// (MYR-609) and reports the GRANTEE whose access set widened, so the handler
+// can bust their cache and make the car resolvable on their next call.
+//
+// The grantee id comes off the row the INSERT returned — the same statement
+// that created the grant — rather than from the source row read a moment
+// earlier, so the id the caller busts is the id the new grant actually names.
+func (a *shareInviteAdapter) ExtendShare(
+	ctx context.Context, in telemetry.ShareExtendInput,
+) (telemetry.ShareInviteRow, string, error) {
+	row, err := a.repo.ExtendShare(ctx, store.ExtendShareInput{
+		OwnerUserID:     in.OwnerUserID,
+		TargetVehicleID: in.TargetVehicleID,
+		SourceShareID:   in.SourceShareID,
+	})
+	if err != nil {
+		return telemetry.ShareInviteRow{}, "", translateShareError(err)
+	}
+	return toShareInviteRow(&row), row.AcceptedByUserID, nil
+}
+
 // OwnerFirstName resolves the calling owner's first name for the `from` half of
 // a signed share link (MYR-368). Same repository method the redeem side uses:
 // one ladder, one policy, no second definition of "first name" to drift.

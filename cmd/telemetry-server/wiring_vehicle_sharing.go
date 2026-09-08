@@ -14,6 +14,7 @@ import (
 //	DELETE /api/invites/{inviteId}
 //	PATCH  /api/invites/{inviteId}
 //	POST   /api/invites/{inviteId}/resend
+//	POST   /api/vehicles/{vehicleId}/share/extend
 //	POST   /api/invites/redeem
 //
 // ROUTE ORDERING NOTE: `/api/invites/redeem` and `/api/invites/{inviteId}` do
@@ -63,6 +64,11 @@ func setupVehicleSharingEndpoints(deps httpRouteDeps, vehicles telemetry.Vehicle
 	// same handler as the owner routes so the tombstone, the cache bust and
 	// the MYR-373 socket teardown are one implementation.
 	deps.srv.HandleFunc("DELETE /api/vehicles/{vehicleId}/share", inviteHandler.ServeLeave)
+	// MYR-609 — extend an ACCEPTED grant onto another car the owner owns.
+	// Three segments deep under the vehicle, so it does not collide with the
+	// DELETE above (different method AND a longer, fully literal pattern,
+	// which ServeMux prefers outright).
+	deps.srv.HandleFunc("POST /api/vehicles/{vehicleId}/share/extend", inviteHandler.ServeExtend)
 
 	redeemHandler := telemetry.NewShareRedeemHandler(
 		deps.authenticator,

@@ -64,6 +64,16 @@ type fakeShareInviteStore struct {
 	leaveErr     error
 	leftAs       struct{ vehicleID, viewerID string }
 	leaveCalled  bool
+
+	// MYR-609 — extend capture. extended is the NEW accepted row the store
+	// returns; extendee is the grantee id the handler must bust the cache
+	// for; extendedAs records exactly what the handler passed, which is how
+	// owner-scoping and path-vehicle plumbing are asserted.
+	extended     ShareInviteRow
+	extendee     string
+	extendErr    error
+	extendCalled bool
+	extendedAs   ShareExtendInput
 }
 
 func (f *fakeShareInviteStore) CreateInvite(_ context.Context, in ShareInviteCreateInput) (ShareInviteRow, error) {
@@ -104,6 +114,15 @@ func (f *fakeShareInviteStore) LeaveVehicleShares(_ context.Context, vehicleID, 
 	f.leaveCalled = true
 	f.leftAs = struct{ vehicleID, viewerID string }{vehicleID, viewerUserID}
 	return f.leaveOutcome, f.leaveErr
+}
+
+func (f *fakeShareInviteStore) ExtendShare(_ context.Context, in ShareExtendInput) (ShareInviteRow, string, error) {
+	f.extendCalled = true
+	f.extendedAs = in
+	if f.extendErr != nil {
+		return ShareInviteRow{}, "", f.extendErr
+	}
+	return f.extended, f.extendee, nil
 }
 
 func (f *fakeShareInviteStore) OwnerFirstName(_ context.Context, _ string) (string, error) {
@@ -197,6 +216,7 @@ func newShareInviteMux(t *testing.T, caller string, store ShareInviteStore, owne
 	mux.HandleFunc("POST /api/invites/{inviteId}/resend", h.ServeResend)
 	mux.HandleFunc("PATCH /api/invites/{inviteId}", h.ServePatch)
 	mux.HandleFunc("DELETE /api/vehicles/{vehicleId}/share", h.ServeLeave)
+	mux.HandleFunc("POST /api/vehicles/{vehicleId}/share/extend", h.ServeExtend)
 	return mux
 }
 

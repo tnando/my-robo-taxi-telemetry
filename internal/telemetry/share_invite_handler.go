@@ -19,6 +19,8 @@ import (
 //	GET    /api/vehicles/{vehicleId}/invites   list invites + viewers
 //	DELETE /api/invites/{inviteId}             cancel / revoke
 //	POST   /api/invites/{inviteId}/resend      new code + reset expiry
+//	POST   /api/vehicles/{vehicleId}/share/extend
+//	                                           copy an accepted grant here
 //
 // EVERY route here is owner-only, and none of them has a viewer branch. That is
 // not an oversight to be "completed" later: a viewer who could list a car's
