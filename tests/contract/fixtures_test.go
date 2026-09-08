@@ -570,10 +570,17 @@ func validateDrivesList(t *testing.T, m map[string]any) {
 	}
 
 	// Required DriveSummary fields per OpenAPI spec.
+	//
+	// `tripId` is in this list, not in an "optional" one, and that is the whole
+	// point of it (MYR-608): it is `required` with type ["string","null"], so a
+	// row that OMITS it is invalid even though `null` is a legal value. The
+	// distinction is what stops a consumer confusing "no window covers this
+	// drive" with "this server does not send the field", and a presence check
+	// is the only assertion that can tell them apart.
 	driveSummaryRequired := []string{
 		"id", "vehicleId", "startTime", "endTime", "date",
 		"distanceMiles", "durationSeconds", "avgSpeedMph", "maxSpeedMph",
-		"startChargeLevel", "endChargeLevel", "createdAt",
+		"startChargeLevel", "endChargeLevel", "createdAt", "tripId",
 	}
 
 	for i, item := range items {

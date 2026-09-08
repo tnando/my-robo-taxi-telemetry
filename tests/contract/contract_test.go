@@ -827,6 +827,13 @@ func setupTestServer(t *testing.T) (*httptest.Server, *seedHelpers) {
 	drivesHandler := telemetry.NewVehicleDrivesHandler(
 		authenticator, snapshotAdapter, driveAdapter, logger,
 		telemetry.WithDrivesRoleResolver(authenticator),
+		// MYR-602's window gate, wired for the reason the share reader above
+		// is: without it §7.2 is owner-only and the entire non-owner half of
+		// this surface — the narrowed page, and MYR-608's role-scoped
+		// `tripId` — is unreachable from this harness.
+		telemetry.WithDrivesTripAdmitter(&contractTripDriveAdmitter{
+			repo: store.NewTripRepo(testPool, store.NoopMetrics{}, enc, logger),
+		}),
 	)
 
 	mux := http.NewServeMux()
@@ -1005,8 +1012,8 @@ func (a *contractVehicleSnapshotReader) GetByID(ctx context.Context, vehicleID s
 
 type contractDriveLister struct{ repo *store.DriveRepo }
 
-func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
-	page, err := a.repo.ListByVehicleID(ctx, vehicleID, store.DriveListCursor{
+func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID, viewerUserID string, cursor telemetry.DriveListCursor, limit int) (telemetry.DriveListPage, error) {
+	page, err := a.repo.ListByVehicleID(ctx, vehicleID, viewerUserID, store.DriveListCursor{
 		StartTime: cursor.StartTime,
 		ID:        cursor.ID,
 	}, limit)
@@ -1033,6 +1040,69 @@ func (a *contractDriveLister) ListByVehicleID(ctx context.Context, vehicleID str
 			StartChargeLevel: d.StartChargeLevel,
 			EndChargeLevel:   d.EndChargeLevel,
 			CreatedAt:        d.CreatedAt,
+			// MYR-608. Already role-scoped by the statement that produced it.
+			TripID: d.TripID,
+		})
+	}
+	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
+}
+
+// contractTripDriveAdmitter is the MYR-602 window gate over the real TripRepo.
+//
+// WIRED SO THE NON-OWNER HALF OF §7.2 IS REACHABLE FROM THIS HARNESS AT ALL.
+// Without it the drives handler is owner-only, exactly as a deployment that
+// forgot to wire trips would be — the fail-closed default — and a
+// `trip_participant` reading a car's drives could not be exercised end to end.
+// It is the same two-method shape cmd/telemetry-server wires; the duplication
+// is the price of the package boundary, and the methods are thin enough that
+// there is nothing here to get wrong independently.
+type contractTripDriveAdmitter struct{ repo *store.TripRepo }
+
+func (a *contractTripDriveAdmitter) TripDriveWindows(
+	ctx context.Context, userID, vehicleID string,
+) ([]telemetry.TripDriveWindow, error) {
+	windows, err := a.repo.TripDriveWindows(ctx, userID, vehicleID)
+	if err != nil {
+		return nil, fmt.Errorf("contractTripDriveAdmitter.TripDriveWindows: %w", err)
+	}
+	out := make([]telemetry.TripDriveWindow, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, telemetry.TripDriveWindow{From: w.From, To: w.To})
+	}
+	return out, nil
+}
+
+func (a *contractTripDriveAdmitter) VehicleDrivesInTripWindows(
+	ctx context.Context, userID, vehicleID string, cursor telemetry.DriveListCursor, limit int,
+) (telemetry.DriveListPage, error) {
+	page, err := a.repo.VehicleDrivesInTripWindows(ctx, userID, vehicleID, store.DriveListCursor{
+		StartTime: cursor.StartTime,
+		ID:        cursor.ID,
+	}, limit)
+	if err != nil {
+		return telemetry.DriveListPage{}, fmt.Errorf("contractTripDriveAdmitter.VehicleDrivesInTripWindows: %w", err)
+	}
+	items := make([]telemetry.DriveListItem, 0, len(page.Items))
+	for i := range page.Items {
+		d := &page.Items[i]
+		items = append(items, telemetry.DriveListItem{
+			ID:               d.ID,
+			VehicleID:        d.VehicleID,
+			StartTime:        d.StartTime,
+			EndTime:          d.EndTime,
+			Date:             d.Date,
+			StartLocation:    d.StartLocation,
+			StartAddress:     d.StartAddress,
+			EndLocation:      d.EndLocation,
+			EndAddress:       d.EndAddress,
+			DistanceMiles:    d.DistanceMiles,
+			DurationMinutes:  d.DurationMinutes,
+			AvgSpeedMph:      d.AvgSpeedMph,
+			MaxSpeedMph:      d.MaxSpeedMph,
+			StartChargeLevel: d.StartChargeLevel,
+			EndChargeLevel:   d.EndChargeLevel,
+			CreatedAt:        d.CreatedAt,
+			TripID:           d.TripID,
 		})
 	}
 	return telemetry.DriveListPage{Items: items, HasMore: page.HasMore}, nil
