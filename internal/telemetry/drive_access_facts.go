@@ -20,10 +20,19 @@ package telemetry
 // exactly ONE type, produced at the composition root by exactly ONE function
 // over a store drive row (`driveAccessFacts` in cmd/telemetry-server), and
 // shared by both read models. A future field the gate needs is added here once
-// and reaches both surfaces; a field dropped here breaks both surfaces' tests
-// at once rather than silently disabling access on the quieter one. Callers are
-// unaffected by the shape change — Go promotes the embedded fields, so
-// `data.StartTime` still reads the same.
+// and reaches both surfaces. Callers are unaffected by the shape change — Go
+// promotes the embedded fields, so `data.StartTime` still reads the same.
+//
+// THE EMBEDDING IS NOT ITSELF A GUARD, and it is worth being exact about that
+// so the next author does not trust an invariant Go does not provide.
+// `DriveRouteData{RoutePoints: pts}` still compiles with all three facts at
+// their zero values, exactly as the literal that caused MYR-614 did; the
+// compile errors this change produced were a one-time effect of renaming the
+// old spelling, not an ongoing check. WHAT ACTUALLY HOLDS THE FIX DOWN IS THE
+// WIRING TESTS — cmd/telemetry-server/wiring_drive_reads_test.go drives the
+// real adapters through the real handlers, and its reflective totality tests
+// fail on any field of this type, or of either read model, that the projection
+// leaves zero.
 //
 // NONE OF THESE ARE WIRE FIELDS BY VIRTUE OF BEING HERE. §7.4's response has
 // never carried a start time and still does not; §7.3 emits its own `startTime`
@@ -42,8 +51,13 @@ type DriveAccessFacts struct {
 	//
 	// REQUIRED ON EVERY PATH THAT BUILDS THESE FACTS. A trip participant is
 	// admitted only to drives that began inside one of their windows, so an
-	// absent or unparseable value is not a refusal — it is a data fault, and
-	// since MYR-614 the handlers answer it 500 rather than let it masquerade
-	// as a legitimate 404.
+	// absent or unparseable value is a data fault — one the caller is never
+	// told about (the wire answer is the ordinary 404; a distinct status would
+	// confirm the drive exists) and an operator always is, at ERROR level. See
+	// denyDriveWithUnreadableStartTime.
+	//
+	// The value is read by ParseDriveStartTime, which accepts the shapes
+	// Postgres `::timestamptz` accepts — the same reading §7.2's list applies
+	// in SQL, so the two surfaces admit one set.
 	StartTime string
 }

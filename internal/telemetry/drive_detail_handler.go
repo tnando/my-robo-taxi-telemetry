@@ -141,7 +141,9 @@ func (h *DriveDetailHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.verifyOwnership(ctx, w, driveID, data.VehicleID, data.StartTime, userID) {
+	// ONE GATE FOR BOTH DRIVE READS (MYR-614): §7.3 and §7.4 resolve the
+	// same access question over the same embedded facts, in one function.
+	if !verifyDriveAccess(ctx, w, h.vehicles, h.trips, h.logger, "drive detail", data.DriveAccessFacts, userID) {
 		return
 	}
 

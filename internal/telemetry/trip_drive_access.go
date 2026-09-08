@@ -138,57 +138,50 @@ func denyDriveOutsideTripWindow(w http.ResponseWriter, logger *slog.Logger, surf
 		slog.String("drive_id", driveID),
 		slog.String("user_id", userID),
 	)
-	wserrors.WriteErrorEnvelope(w, logger, http.StatusNotFound,
-		wserrors.ErrCodeNotFound, "drive not found")
+	writeDriveNotFound(w, logger)
 }
 
-// failDriveStartTimeUnreadable answers a participant read of a drive whose
+// denyDriveWithUnreadableStartTime answers a participant read of a drive whose
 // stored `startTime` will not parse.
 //
-// THIS IS A 500, NOT THE 404 — AND MYR-614 IS WHY IT HAD TO BECOME ONE.
+// THE SAME 404 AS "OUTSIDE YOUR WINDOW", AND THAT IS THE POINT (MYR-614).
 //
-// The two answers look identical to a client and mean opposite things. "Outside
-// your window" is a correct, deliberate refusal of a drive that exists. An
-// unreadable start instant is a SERVER DATA FAULT: the gate cannot evaluate its
-// own question, and the caller may well be entitled to the drive. Folding the
-// fault into the refusal is exactly what hid MYR-614 — the route adapter never
-// carried a start time at all, every participant's every route parsed as "" and
-// came back 404, and the response was indistinguishable from the feature
-// working correctly. It took a client report to find it.
+// A participant must never learn from a STATUS whether a drive exists. That is
+// the entire reason §7.3/§7.4 answer this role 404 rather than 403, and a
+// status that appears only for drives the server actually holds is that oracle
+// rebuilt one condition later: a caller who could tell "unreadable row" from
+// "not yours" would have a probe for the car's history on days they were not
+// part of. The condition is also PERMANENT — the row does not repair itself —
+// so a 5xx would additionally invite every retry-on-5xx client to re-ask
+// forever where a terminal 404 stops.
 //
-// So the fault now says it is a fault: 500 to the client, and an Error-level
-// log naming the drive, so the same bug in some future adapter shows up in the
-// error rate on the day it ships instead of as a map that quietly never draws.
+// A DATA FAULT IS LOGGED, NEVER TOLD TO A PARTICIPANT. The fault is real and
+// MYR-614 is what it costs when nobody sees it: §7.4's adapter shipped without
+// a `startTime`, every participant's every route parsed as "" and was refused,
+// and the response was indistinguishable from the feature working correctly
+// until a client reported it. So the honesty goes where it cannot leak — an
+// ERROR line naming the drive, the vehicle and the value that would not parse,
+// which is the line an operator greps and an alert can match on. The wire
+// answer stays the refusal it always was.
 //
-// The caller is still told NOTHING about the drive — `internal_error` is the
-// generic envelope, and the drive id in the log is server-side only.
-//
-// STILL ADMITTED TO NOBODY. This is not a widening: the request is refused
-// either way. Only the honesty of the refusal changed.
-func failDriveStartTimeUnreadable(
-	w http.ResponseWriter, logger *slog.Logger, surface, driveID, vehicleID, userID, startTime string,
+// STILL ADMITTED TO NOBODY, either way. Only where the fault is reported moved.
+func denyDriveWithUnreadableStartTime(
+	w http.ResponseWriter, logger *slog.Logger, surface string, facts DriveAccessFacts, userID string,
 ) {
 	logger.Error(surface+": drive startTime is missing or unparseable — cannot evaluate the trip window",
-		slog.String("drive_id", driveID),
-		slog.String("vehicle_id", vehicleID),
+		slog.String("drive_id", facts.DriveID),
+		slog.String("vehicle_id", facts.VehicleID),
 		slog.String("user_id", userID),
-		slog.String("start_time", startTime),
+		slog.String("start_time", facts.StartTime),
 	)
-	wserrors.WriteErrorEnvelope(w, logger, http.StatusInternalServerError,
-		wserrors.ErrCodeInternalError, "internal error")
+	writeDriveNotFound(w, logger)
 }
 
-// parseDriveStartTime reads a Drive row's RFC 3339 `startTime`.
-//
-// A drive whose start time will not parse is admitted to NOBODY through a trip:
-// the window test cannot be evaluated, and the fail-closed answer for an
-// unevaluable access check is denial. What the caller is TOLD about that
-// denial is failDriveStartTimeUnreadable's business, not this function's. The
-// owner path never reaches here.
-func parseDriveStartTime(s string) (time.Time, bool) {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
+// writeDriveNotFound is the ONE writer for the participant 404, shared by both
+// refusals above so they cannot drift into distinguishable answers. A byte for
+// byte identical body is the whole mechanism: the two conditions must be one
+// answer on the wire.
+func writeDriveNotFound(w http.ResponseWriter, logger *slog.Logger) {
+	wserrors.WriteErrorEnvelope(w, logger, http.StatusNotFound,
+		wserrors.ErrCodeNotFound, "drive not found")
 }
