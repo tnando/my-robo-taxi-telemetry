@@ -97,7 +97,8 @@ func TestMigration0020_UpCreatesVehicleShares(t *testing.T) {
 			t.Errorf("column %s: data_type = %q, want %q", col, actual, wantType)
 		}
 	}
-	documented := len(migration0020Columns) + len(migration0024Columns) + len(migration0032Columns)
+	documented := len(migration0020Columns) + len(migration0024Columns) +
+		len(migration0032Columns) + len(migration0051Columns)
 	if len(got) != documented {
 		t.Errorf("go_vehicle_shares has %d columns, want %d — an undocumented column is a classification gap",
 			len(got), documented)

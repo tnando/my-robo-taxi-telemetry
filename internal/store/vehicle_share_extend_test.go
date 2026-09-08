@@ -90,13 +90,32 @@ func TestVehicleShareRepo_ExtendShare_CopiesTheRow(t *testing.T) {
 	if row.SuspendedAt != nil {
 		t.Error("the extended grant is born suspended; the source was live")
 	}
-	// The code column is NOT NULL in the schema, so the row has one — and the
-	// projection must never let it out. The value itself is P1 and is not
-	// reported here even on failure.
+	// NO CREDENTIAL IS WRITTEN AT ALL (migration 0052). Not a minted-and-lapsed
+	// one that three predicates agree is dead — a NULL. The value would be P1
+	// and is not reported here even on failure.
 	if row.Code != "" {
 		t.Error("an accepted row carried a `code` out of the repository; the SQL projection " +
-			"blanks it for exactly this reason")
+			"blanks it, and since MYR-609 there is nothing to blank")
 	}
+	if !row.ExpiresAt.IsZero() {
+		t.Errorf("expires_at = %v, want the zero value — an extended grant has no deadline "+
+			"because it has no credential", row.ExpiresAt)
+	}
+	t.Run("and the columns are NULL in the database, not merely suppressed on read", func(t *testing.T) {
+		var codeNull, expiryNull bool
+		if err := testPool.QueryRow(ctx,
+			`SELECT code IS NULL, expires_at IS NULL FROM go_vehicle_shares WHERE id = $1`, row.ID).
+			Scan(&codeNull, &expiryNull); err != nil {
+			t.Fatalf("read the stored row: %v", err)
+		}
+		if !codeNull {
+			t.Error("the extended row stores a code. A credential whose deadness rests on three " +
+				"unrelated predicates continuing to agree is a credential")
+		}
+		if !expiryNull {
+			t.Error("the extended row stores an expires_at; a deadline is a property of a credential")
+		}
+	})
 
 	t.Run("the source grant is untouched", func(t *testing.T) {
 		again := extendedGrantOn(t, repo, vehA1)
@@ -106,11 +125,17 @@ func TestVehicleShareRepo_ExtendShare_CopiesTheRow(t *testing.T) {
 	})
 }
 
-// A SUSPENDED source copies its pause forward. Refusing to extend a suspended
-// grant would force an owner to un-pause somebody in order to add them to a
-// second car, which is the opposite of what a pause means; copying it LIVE
-// would silently undo the pause on the new car.
-func TestVehicleShareRepo_ExtendShare_CopiesSuspension(t *testing.T) {
+// A SUSPENDED source is REFUSED, and the pause is NOT copied forward.
+//
+// The tempting reading is the opposite one, and the PR shipped it: refusing
+// seems to force an owner to un-pause somebody in order to add a car. What
+// copying it actually produces is a grant born suspended — excluded from the
+// access set by the suspension invariant, so INVISIBLE to the grantee, while
+// the owner's own listing shows the car as shared with them. Nobody would know
+// to lift it, and it contradicts the invariant queryAcceptSharesByID asserts in
+// the other direction (`suspended_at = NULL`: a freshly accepted grant is never
+// born paused, precisely so no grant exists that only its creator can see).
+func TestVehicleShareRepo_ExtendShare_RefusesSuspendedSource(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable")
 	}
@@ -120,6 +145,7 @@ func TestVehicleShareRepo_ExtendShare_CopiesSuspension(t *testing.T) {
 	repo := newShareRepo(t)
 
 	cleanVehicleShares(t)
+	cleanAuditLog(t, testPool)
 	sourceID := acceptedGrantFixture(t, repo, vehA1, store.SharePermissionRides)
 	if _, err := repo.PatchInvite(ctx, store.PatchShareInviteInput{
 		InviteID: sourceID, OwnerUserID: shareOwnerA, Suspended: boolPtr(true),
@@ -127,25 +153,45 @@ func TestVehicleShareRepo_ExtendShare_CopiesSuspension(t *testing.T) {
 		t.Fatalf("suspend source: %v", err)
 	}
 
-	row, err := repo.ExtendShare(ctx, store.ExtendShareInput{
+	_, err := repo.ExtendShare(ctx, store.ExtendShareInput{
 		OwnerUserID:     shareOwnerA,
 		TargetVehicleID: vehA2,
 		SourceShareID:   sourceID,
 	})
-	if err != nil {
-		t.Fatalf("ExtendShare from a suspended source: %v — a pause is the owner's own "+
-			"reversible state and must not block them adding a car", err)
+	if !errors.Is(err, store.ErrShareSourceSuspended) {
+		t.Fatalf("err = %v, want ErrShareSourceSuspended", err)
 	}
-	if row.SuspendedAt == nil {
-		t.Fatal("the extended grant is LIVE though the source was suspended; extending would " +
-			"otherwise be a way to undo a pause without lifting it")
+	if errors.Is(err, store.ErrShareAlreadyGranted) {
+		t.Error("a paused source must not borrow the already_shared sub-code; that one tells a " +
+			"client the call SUCCEEDED")
+	}
+	if got := countQuery(t, `SELECT count(*) FROM go_vehicle_shares WHERE vehicle_id = $1`, vehA2); got != 0 {
+		t.Errorf("%d rows were written on the target, want 0", got)
+	}
+	if got := countQuery(t, `SELECT count(*) FROM "AuditLog" WHERE "action" = $1`,
+		string(store.AuditActionShareExtended)); got != 0 {
+		t.Errorf("%d share.extended audit rows for a refused extend, want 0", got)
 	}
 
-	// And the suspension invariant holds on the new row: a suspended grant is
-	// excluded from the access set, so the target car must not appear.
-	if ids := authAccessSet(t, shareViewer1); slices.Contains(ids, vehA2) {
-		t.Errorf("access set %v contains %s; a suspended grant conveys nothing", ids, vehA2)
-	}
+	t.Run("and lifting the pause makes it extendable, with the new row LIVE", func(t *testing.T) {
+		if _, err := repo.PatchInvite(ctx, store.PatchShareInviteInput{
+			InviteID: sourceID, OwnerUserID: shareOwnerA, Suspended: boolPtr(false),
+		}); err != nil {
+			t.Fatalf("un-suspend source: %v", err)
+		}
+		row, err := repo.ExtendShare(ctx, store.ExtendShareInput{
+			OwnerUserID: shareOwnerA, TargetVehicleID: vehA2, SourceShareID: sourceID,
+		})
+		if err != nil {
+			t.Fatalf("ExtendShare after lifting the pause: %v", err)
+		}
+		if row.SuspendedAt != nil {
+			t.Fatal("the extended grant is born suspended")
+		}
+		if ids := authAccessSet(t, shareViewer1); !slices.Contains(ids, vehA2) {
+			t.Errorf("access set %v omits %s; the new grant is live and must convey", ids, vehA2)
+		}
+	})
 }
 
 // The new row must be admitted by the REAL access set — the owned-UNION-shared
@@ -311,16 +357,46 @@ func TestVehicleShareRepo_ExtendShare_Refusals(t *testing.T) {
 		}
 	})
 
-	t.Run("a malformed input is refused before any write", func(t *testing.T) {
-		for _, in := range []store.ExtendShareInput{
-			{TargetVehicleID: vehA2, SourceShareID: "x"},
-			{OwnerUserID: shareOwnerA, SourceShareID: "x"},
-			{OwnerUserID: shareOwnerA, TargetVehicleID: vehA2},
+	// A malformed input is refused by the SAME PREDICATES that refuse a
+	// well-formed one naming nothing, so it arrives as a MAPPED sentinel and
+	// not as a bare error the handler could only turn into a 500. An earlier
+	// cut had a Go-side `validateExtendInput` returning `errors.New`, and a
+	// client sending `{"shareId": ""}` past the handler would have been told
+	// the server had failed.
+	t.Run("a malformed input is refused with a mapped sentinel", func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			in   store.ExtendShareInput
+			want error
+		}{
+			{"no owner", store.ExtendShareInput{TargetVehicleID: vehA2, SourceShareID: "x"},
+				store.ErrShareNotFound},
+			{"no source share", store.ExtendShareInput{OwnerUserID: shareOwnerA, TargetVehicleID: vehA2},
+				store.ErrShareNotFound},
+			{"no target vehicle", store.ExtendShareInput{OwnerUserID: shareOwnerA, SourceShareID: "x"},
+				store.ErrShareNotFound},
 		} {
-			if _, err := repo.ExtendShare(ctx, in); err == nil {
-				t.Errorf("ExtendShare(%+v) succeeded; an incomplete input must be refused", in)
-			}
+			t.Run(tt.name, func(t *testing.T) {
+				cleanVehicleShares(t)
+				_, err := repo.ExtendShare(ctx, tt.in)
+				if !errors.Is(err, tt.want) {
+					t.Fatalf("err = %v, want %v — not a bare error that maps to 500", err, tt.want)
+				}
+			})
 		}
+
+		// With a REAL source in place, an empty target vehicle reaches the
+		// ownership predicate instead and is 403's sentinel, not 404's.
+		t.Run("a real source and no target vehicle", func(t *testing.T) {
+			cleanVehicleShares(t)
+			sourceID := acceptedGrantFixture(t, repo, vehA1, store.SharePermissionLive)
+			_, err := repo.ExtendShare(ctx, store.ExtendShareInput{
+				OwnerUserID: shareOwnerA, SourceShareID: sourceID,
+			})
+			if !errors.Is(err, store.ErrShareVehicleNotOwned) {
+				t.Fatalf("err = %v, want ErrShareVehicleNotOwned", err)
+			}
+		})
 	})
 }
 
@@ -398,7 +474,102 @@ func TestVehicleShareRepo_ExtendShare_WritesTheAuditRow(t *testing.T) {
 
 // A refused extend must leave NO audit row: the two go together or neither
 // does, which is the whole reason the INSERT is inside the transaction.
-func TestVehicleShareRepo_ExtendShare_RefusalWritesNoAudit(t *testing.T) {
+//
+// AND THE REFUSAL HERE IS THE INSERT-TIME ONE, deliberately. The pre-insert
+// probe refuses BEFORE the audit row is written, so a test that trips it proves
+// only that the audit write is ordered after the probe — it never exercises the
+// rollback. The path that matters is the one the probe structurally cannot
+// cover: two extends of the same person onto the same car, both reading no row,
+// with `uq_go_vehicle_shares_accepted_grant` deciding at the INSERT, after the
+// audit row is already in the transaction.
+//
+// Reproduced with a second connection holding an uncommitted duplicate. The
+// extend's probe cannot see it (read committed), so it proceeds, writes its
+// audit row, and blocks on the index; committing the other transaction turns
+// that into the 23505. The test WAITS for the block and fails if it never
+// happens, so it cannot silently degrade into testing the probe again.
+func TestVehicleShareRepo_ExtendShare_InsertConflictRollsBackTheAudit(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehA1, vehA2, _ := seedShareFixtures(t)
+	ensureAuditSchema(t)
+	repo := newShareRepo(t)
+
+	cleanVehicleShares(t)
+	cleanAuditLog(t, testPool)
+	sourceID := acceptedGrantFixture(t, repo, vehA1, store.SharePermissionLive)
+
+	// A competing accepted grant for the same (grantee, target), held
+	// uncommitted so the extend's probe cannot see it.
+	blocker, err := testPool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin blocker: %v", err)
+	}
+	defer func() { _ = blocker.Rollback(ctx) }()
+	if _, err := blocker.Exec(ctx,
+		`INSERT INTO go_vehicle_shares
+		   (id, vehicle_id, owner_user_id, label, permission, allow_rides,
+		    accepted_by_user_id, status, created_at, accepted_at, updated_at)
+		 VALUES ('cshblocker0000000000000000000001', $1, $2, 'L', 'live', false, $3,
+		         'accepted', NOW(), NOW(), NOW())`, vehA2, shareOwnerA, shareViewer1); err != nil {
+		t.Fatalf("seed the uncommitted duplicate: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := repo.ExtendShare(ctx, store.ExtendShareInput{
+			OwnerUserID: shareOwnerA, TargetVehicleID: vehA2, SourceShareID: sourceID,
+		})
+		done <- err
+	}()
+
+	if !waitForBlockedShareInsert(t) {
+		t.Fatal("the extend never blocked on the accepted-grant index, so this test did not " +
+			"reach the insert-time conflict it exists for")
+	}
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("commit blocker: %v", err)
+	}
+
+	if err := <-done; !errors.Is(err, store.ErrShareAlreadyGranted) {
+		t.Fatalf("err = %v, want ErrShareAlreadyGranted — a 23505 on the accepted-grant index "+
+			"IS the conflict", err)
+	}
+	if got := countQuery(t, `SELECT count(*) FROM "AuditLog" WHERE "action" = $1`,
+		string(store.AuditActionShareExtended)); got != 0 {
+		t.Errorf("%d share.extended audit rows survive an insert-time conflict, want 0 — the "+
+			"audit row was already written when the INSERT failed, so only the rollback "+
+			"can remove it", got)
+	}
+}
+
+// waitForBlockedShareInsert polls pg_stat_activity until a backend is waiting
+// on a lock inside the extend's INSERT, which is the state that proves the
+// probe let the call through. Returns false on timeout rather than hanging.
+func waitForBlockedShareInsert(t *testing.T) bool {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var n int
+		if err := testPool.QueryRow(context.Background(),
+			`SELECT count(*) FROM pg_stat_activity
+			 WHERE wait_event_type = 'Lock'
+			   AND query LIKE '%INSERT INTO go_vehicle_shares%'`).Scan(&n); err != nil {
+			t.Fatalf("poll pg_stat_activity: %v", err)
+		}
+		if n > 0 {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return false
+}
+
+// The PRE-INSERT probe refuses without writing anything at all, which is the
+// ordinary path and the one an owner actually hits.
+func TestVehicleShareRepo_ExtendShare_ProbeRefusalWritesNoAudit(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable")
 	}
@@ -416,8 +587,6 @@ func TestVehicleShareRepo_ExtendShare_RefusalWritesNoAudit(t *testing.T) {
 		t.Fatalf("seed the first extend: %v", err)
 	}
 
-	// The second extend conflicts, after the audit INSERT would have run had it
-	// been ordered outside the transaction.
 	if _, err := repo.ExtendShare(ctx, store.ExtendShareInput{
 		OwnerUserID: shareOwnerA, TargetVehicleID: vehA2, SourceShareID: sourceID,
 	}); !errors.Is(err, store.ErrShareAlreadyGranted) {
@@ -427,6 +596,6 @@ func TestVehicleShareRepo_ExtendShare_RefusalWritesNoAudit(t *testing.T) {
 	if got := countQuery(t, `SELECT count(*) FROM "AuditLog" WHERE "action" = $1`,
 		string(store.AuditActionShareExtended)); got != 1 {
 		t.Errorf("%d share.extended audit rows, want exactly 1 — the refused call must have "+
-			"rolled its own row back", got)
+			"written none", got)
 	}
 }
