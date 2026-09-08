@@ -854,7 +854,90 @@ Postgres already collapses the two calls per row into one (a `LATERAL` form that
 | Window edges, overlap, role scoping, unreadable rows, totals, the N+1 guard | `internal/store/trip_drive_totals_test.go` |
 | The wire shapes | `internal/telemetry/vehicle_drives_trip_id_test.go`, `internal/telemetry/trip_totals_wire_test.go` |
 
-## 14. References
+## 14. A trip says how much energy it used, and the drive tracker learns to measure it (MYR-629)
+
+Client feedback, 2026-09-08: the trip Drives sheet wants a summary header with **total miles, hours driven and average efficiency (Wh/mi)** — *"you should probably be able to collect these metrics from the Tesla fleet telemetry. Check on it."* MYR-608 already delivered the first two. The third needed energy, and checking on it is where this section starts.
+
+### 14.1 The diagnosis: `Drive.energyUsedKwh` was a hard zero in production
+
+A read-only count over the production database on 2026-09-08:
+
+| Window | Drive rows | `energyUsedKwh > 0` | Rows that actually moved |
+|---|---|---|---|
+| Last 30 days | 460 | **7** | 441 |
+| Last 90 days | 609 | 10 | 581 |
+| September 2026 | 96 | **0** | — |
+| All time | 834 | 16 | — |
+
+The column is `NOT NULL`, so the failure never surfaced as a null. It surfaced as **`0 kWh` on a 77-mile drive**.
+
+**THE CAUSE IS THE MYR-207 DEFECT REACHING THE ONE FIELD THE FIX NEVER COVERED.** `calculateStats` computed
+
+```go
+energyDelta := drive.startEnergy - drive.lastEnergy
+if drive.startEnergy == 0 { energyDelta = 0 }
+```
+
+and `startEnergy` was read **only** from the gear-change frame that opened the drive. `Gear` is configured at `IntervalSeconds: 1` and `EnergyRemaining` at `30`, and Tesla emits a field only when **both** the interval has elapsed **and** the value changed — so the frame that flips the car into `D` essentially never carries energy, and the guard then discarded the whole drive. SOC hit exactly this in MYR-207 (*"0% → 75%, −75% used"*), the odometer and the FSD counter in MYR-157; each was fixed by caching the last idle value on the vehicle and lazily seeding from the first in-drive sample. **Energy was the one member of that family nobody came back for.**
+
+### 14.2 The field WAS subscribed; the arithmetic was the bug
+
+`EnergyRemaining` (proto 158) has been in `DefaultFieldConfig` at 30s since the first fleet config. No field had to be added. What MYR-629 **did** add is a **`ResendIntervalSeconds` of 300**, for the reason `HvacPower` (MYR-300) and `DetailedChargeState` (MYR-333) carry one: **energy does not change in a parked car that is not plugged in**, so on-change emission never fires while the car sits, and a server that comes up during that window (a deploy, a reconnect, a car waking from sleep) never learns the pack level and starts the next drive with a cold baseline.
+
+It is **kill-switch-safe by construction**: it is a value in `DefaultFieldConfig`, governed by the same fleet-config push path as every other field, and **a car whose config is never re-pushed keeps the previous behaviour** rather than breaking — the accumulator's lazy in-drive seed still produces a figure, just one that starts at the first in-drive sample. ⚠ As with every other config change, **it reaches a car only on a re-push** (`POST /api/fleet-config/{vin}`, `ops fleet-config push`, or the next owner link); there is no config version or hash that re-pushes itself. While the car is **driving** the resend costs nothing at all — energy changes continuously, so on-change emission already fires every interval.
+
+### 14.3 A running sum, not a subtraction of two endpoints
+
+`internal/drives/energy.go` replaces the two-point subtraction with an accumulator that folds each `energyRemaining` sample into a running total. Two reasons, and the second is what the issue asked for:
+
+- **A sum survives a missing endpoint.** Any two consecutive readings inside the drive produce a real figure, so a drive that never saw a pre-drive baseline still reports what it burned after its first sample.
+- **A sum can EXCLUDE an interval.** A subtraction cannot tell a drive that used 20 kWh from one that used 20 kWh and then charged 15 back — it reports 5.
+
+**Charging inside a drive is real, not hypothetical.** A drive stays open across a stop shorter than `EndDebounce` (30s), and while the watchdog waits out `StallTimeout` on a car that parked without ever sending `gear=P` — which is the ordinary way a Supercharger stop lands in the middle of a road-trip leg.
+
+**TELLING CHARGING FROM REGEN** is the one judgement call. Both raise `EnergyRemaining`; regen is real and must be **credited** (rolling down a pass genuinely puts charge back, and a drive's honest consumption is the net), charging is not consumption at all and must be **excluded**. The discriminator is two-part, and the cheap half is authoritative:
+
+1. **The car says so.** `chargeState` (proto 179 `DetailedChargeState`) reads `Charging` or `Starting` while the pack takes power from a cable. When the frame carries it, it decides.
+2. **A rate bound**, for the frames that do not — `chargeState` is emitted on change with a 120s resend, so a gain can arrive on a frame that says nothing about charging. A gain is credited as regen only within `maxRegenKw` (70) × `min(elapsed, 60s)` ≈ 1.17 kWh per step; anything beyond is charging, dropped, and the baseline rebased.
+
+**A NET-REGEN DRIVE CLAMPS TO ZERO.** The physical figure is negative and real, but these values are summed into a window total, and a negative leg would silently cancel another leg's consumption — a 200-mile trip reporting the efficiency of the 40 miles that happened to be uphill.
+
+**AN UNMEASURABLE DRIVE WRITES 0**, because the column is `NOT NULL`. What makes that zero honest downstream is §14.4.
+
+### 14.4 `Trip.totalEnergyKwh`, and why its null rule is stricter
+
+The fourth number rides `queryTripDriveTotals` — the statement that already produced `driveCount`, `totalDistanceMiles` and `totalDurationSeconds` — so it adds **no query** to §7.30.2's per-row decoration, which the statement-counting N+1 guard in `trip_drive_totals_test.go` pins.
+
+Its null rule is **not** its siblings'. Theirs is `SUM` over zero rows. This one is:
+
+```sql
+CASE WHEN COUNT(*) FILTER (WHERE d."distanceMiles" > 0 AND d."energyUsedKwh" <= 0) = 0
+     THEN SUM(d."energyUsedKwh")
+END
+```
+
+**ALL-OR-NOTHING OVER THE DRIVES THAT MOVED.** The client renders `Wh/mi = totalEnergyKwh × 1000 / totalDistanceMiles`, so a window of five drives where two reported energy would print a figure computed from **two drives' energy over five drives' miles** — about 40% of the truth, rendered as a confident number. A stationary drive (`distanceMiles = 0`) has no energy to report and does not veto the window; the same reasoning that lets `0` be a real total for a window whose drives went nowhere.
+
+**THIS IS ALSO THE MIGRATION RULE.** Every drive recorded before this issue carries 0, so a window straddling the fix reports `null` — the honest "not reported" dash — rather than an understated number, and starts reporting on its own once every drive in it was measured. **No backfill is possible**: the samples were never stored.
+
+**THE SERVER STORES NO RATIO.** Efficiency is derived client-side, because a persisted Wh/mi could disagree with the two numbers on the same card that produced it, and would have to be recomputed on every read in any case — these being running totals.
+
+### 14.5 Where it lives
+
+| Thing | File |
+|---|---|
+| The accumulator, the regen/charging discriminator, the zero clamp | `internal/drives/energy.go` |
+| The idle `energyRemaining` cache (the SOC cache's twin) | `internal/drives/detector.go`, `internal/drives/state.go` |
+| Baseline seeding at drive start, per-sample folding | `internal/drives/transitions.go` |
+| `EnergyDelta` sourced from the accumulator | `internal/drives/stats.go` |
+| The `EnergyRemaining` resend | `internal/telemetry/fleet_api_fields.go` |
+| The fourth number, and the CASE that voids a mixed window | `internal/store/trip_queries.go` (`queryTripDriveTotals`) |
+| `TotalEnergyKwh` through view → data → wire | `internal/store/trip_view.go`, `internal/store/trip_repo_read.go`, `cmd/telemetry-server/trip_adapters.go`, `internal/telemetry/trip_types.go`, `internal/telemetry/trip_wire.go` |
+| Accumulator + detector regression tests | `internal/drives/energy_test.go` |
+| All-or-nothing, running totals, the N+1 guard | `internal/store/trip_drive_totals_test.go` |
+| Always-present-nullable on the wire, null-beside-non-null-distance | `internal/telemetry/trip_totals_wire_test.go` |
+
+## 15. References
 
 - **Wire contract:** [`rest-api.md`](../contracts/rest-api.md) §7.30 (the ten trip routes, the error table, `activeTripId`, the kill switch), §5 (the four roles), §5.1.1 (sentinel substitution), §5.2.0–§5.2.4 (the per-resource masks), §10 **DV-26**.
 - **Schemas:** [`schemas/trip.schema.json`](../contracts/schemas/trip.schema.json), and the MYR-602 amendments to [`vehicle-summary.schema.json`](../contracts/schemas/vehicle-summary.schema.json) (`activeTripId`, the rewritten `location` RBAC text), [`vehicle-state.schema.json`](../contracts/schemas/vehicle-state.schema.json) (the per-field MYR-602 visibility notes) and [`live-activity.schema.json`](../contracts/schemas/live-activity.schema.json) (the `ride` \| `trip` kind).

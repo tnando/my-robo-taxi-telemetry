@@ -161,6 +161,17 @@ func tripWire(t TripData, callerID string) map[string]any {
 		// state the total anyway.
 		"totalDistanceMiles":   derefOrNil(t.TotalDistanceMiles),
 		"totalDurationSeconds": tripTotalDurationSeconds(t.TotalDurationMinutes),
+		// MYR-629. THE SAME ALWAYS-PRESENT-AND-NULLABLE SHAPE as its two
+		// siblings above, and A STRICTER NULL. Theirs means "the window holds no
+		// drives"; this one ALSO means "at least one drive that moved reported
+		// no energy", because `Drive."energyUsedKwh"` is NOT NULL and an
+		// unmeasurable drive writes 0 there rather than null.
+		//
+		// A CLIENT RENDERS EFFICIENCY AS `totalEnergyKwh × 1000 /
+		// totalDistanceMiles` and shows its "not reported" dash on null. THE
+		// SERVER STORES NO RATIO and never will: a persisted Wh/mi could
+		// disagree with the two numbers on the same card that produced it.
+		"totalEnergyKwh": derefOrNil(t.TotalEnergyKwh),
 	}
 
 	// `currentLeg` is OPTIONAL on the contract and ABSENT rather than null when

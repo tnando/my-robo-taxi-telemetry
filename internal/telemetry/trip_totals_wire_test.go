@@ -18,11 +18,19 @@ import (
 // arithmetic it was told to delete, and would silently fall back to it against
 // a deployed server that simply had nothing to sum.
 
-// fixtureTripWithTotals is fixtureTrip carrying the two sums.
+// fixtureTripWithTotals is fixtureTrip carrying the distance and duration sums
+// but NO energy — the mixed state a window straddling the MYR-629 fix is in.
 func fixtureTripWithTotals(miles float64, minutes int64) TripData {
 	trip := fixtureTrip()
 	trip.TotalDistanceMiles = &miles
 	trip.TotalDurationMinutes = &minutes
+	return trip
+}
+
+// fixtureTripWithEnergy adds the energy sum on top.
+func fixtureTripWithEnergy(miles float64, minutes int64, kwh float64) TripData {
+	trip := fixtureTripWithTotals(miles, minutes)
+	trip.TotalEnergyKwh = &kwh
 	return trip
 }
 
@@ -37,7 +45,7 @@ func TestTripCarriesRunningTotals(t *testing.T) {
 
 	t.Run("the detail read", func(t *testing.T) {
 		handler := newTripTestHandler(t, &fakeTripStore{trip: trip}, true)
-		body := decodeTripBody(t, handler, "/api/trips/"+tripTestID)
+		body := decodeTripBody(t, handler)
 
 		if got := body["totalDistanceMiles"]; got != 128.4 {
 			t.Errorf("totalDistanceMiles = %v, want 128.4", got)
@@ -90,9 +98,9 @@ func TestTripCarriesRunningTotals(t *testing.T) {
 // wrong answer.
 func TestTripTotalsAreAlwaysPresentAndNullWhenEmpty(t *testing.T) {
 	handler := newTripTestHandler(t, &fakeTripStore{trip: fixtureTrip()}, true)
-	body := decodeTripBody(t, handler, "/api/trips/"+tripTestID)
+	body := decodeTripBody(t, handler)
 
-	for _, key := range []string{"totalDistanceMiles", "totalDurationSeconds"} {
+	for _, key := range []string{"totalDistanceMiles", "totalDurationSeconds", "totalEnergyKwh"} {
 		value, present := body[key]
 		if !present {
 			t.Errorf("%s is absent; the contract declares it always present and nullable", key)
@@ -108,12 +116,12 @@ func TestTripTotalsAreAlwaysPresentAndNullWhenEmpty(t *testing.T) {
 // being added in one projection and forgotten in another.
 func TestTripWireStillCarriesEveryDeclaredKey(t *testing.T) {
 	handler := newTripTestHandler(t, &fakeTripStore{trip: fixtureTripWithTotals(1, 1)}, true)
-	body := decodeTripBody(t, handler, "/api/trips/"+tripTestID)
+	body := decodeTripBody(t, handler)
 
 	for _, key := range []string{
 		"id", "vehicleId", "name", "startsAt", "endsAt", "endedAt", "status",
 		"createdAt", "role", "ownerFirstName", "vehicle", "participants",
-		"driveCount", "totalDistanceMiles", "totalDurationSeconds",
+		"driveCount", "totalDistanceMiles", "totalDurationSeconds", "totalEnergyKwh",
 	} {
 		if _, present := body[key]; !present {
 			t.Errorf("the trip shape is missing the required key %q", key)
@@ -121,10 +129,13 @@ func TestTripWireStillCarriesEveryDeclaredKey(t *testing.T) {
 	}
 }
 
-// decodeTripBody issues one GET and decodes its object body.
-func decodeTripBody(t *testing.T, handler http.Handler, path string) map[string]any {
+// decodeTripBody issues one §7.30.3 GET for the fixture trip and decodes its
+// object body. The path is not a parameter: every caller reads the same fixture,
+// and a parameter that only ever takes one value invites a second one that
+// nothing checks.
+func decodeTripBody(t *testing.T, handler http.Handler) map[string]any {
 	t.Helper()
-	rec := tripRequest(t, handler, http.MethodGet, path, "")
+	rec := tripRequest(t, handler, http.MethodGet, "/api/trips/"+tripTestID, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
 	}
@@ -133,4 +144,96 @@ func decodeTripBody(t *testing.T, handler http.Handler, path string) map[string]
 		t.Fatalf("decode: %v", err)
 	}
 	return body
+}
+
+// ── MYR-629: THE ENERGY TOTAL ───────────────────────────────────────────────
+
+// TestTripCarriesTotalEnergyKwh is the populated case on both surfaces, plus
+// the arithmetic the client is expected to do with it.
+//
+// THE SERVER SENDS ENERGY AND DISTANCE, NEVER A RATIO. Efficiency is
+// `totalEnergyKwh × 1000 / totalDistanceMiles` and it is derived on the client,
+// because a persisted Wh/mi could disagree with the two numbers on the same card
+// that produced it — and would have to be recomputed on every read anyway, these
+// being running totals.
+func TestTripCarriesTotalEnergyKwh(t *testing.T) {
+	// 128.4 mi on 38.52 kWh is exactly 300 Wh/mi.
+	trip := fixtureTripWithEnergy(128.4, 205, 38.52)
+
+	t.Run("the detail read", func(t *testing.T) {
+		handler := newTripTestHandler(t, &fakeTripStore{trip: trip}, true)
+		body := decodeTripBody(t, handler)
+
+		got, ok := body["totalEnergyKwh"].(float64)
+		if !ok {
+			t.Fatalf("totalEnergyKwh = %v, want a number", body["totalEnergyKwh"])
+		}
+		if got != 38.52 {
+			t.Errorf("totalEnergyKwh = %v, want 38.52", got)
+		}
+
+		miles := body["totalDistanceMiles"].(float64)
+		if whPerMile := got * 1000 / miles; whPerMile != 300 {
+			t.Errorf("derived efficiency = %v Wh/mi, want 300", whPerMile)
+		}
+	})
+
+	t.Run("every row of the list", func(t *testing.T) {
+		handler := newTripTestHandler(t, &fakeTripStore{trip: trip}, true)
+		rec := tripRequest(t, handler, http.MethodGet, "/api/trips", "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200. Body: %s", rec.Code, rec.Body.String())
+		}
+		var envelope struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &envelope); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if len(envelope.Items) != 1 {
+			t.Fatalf("items = %v, want one row", envelope.Items)
+		}
+		if got := envelope.Items[0]["totalEnergyKwh"]; got != 38.52 {
+			t.Errorf("list row totalEnergyKwh = %v, want 38.52", got)
+		}
+	})
+}
+
+// TestTripEnergyIsNullWhileDistanceIsNot is the state that made this field's
+// null rule stricter than its siblings', and it is not a corner case — it is
+// every window that holds a drive recorded before MYR-629.
+//
+// The window has miles and hours and NO energy. A client MUST render its
+// distance and duration tiles and put the "not reported" dash on efficiency
+// alone; it MUST NOT read the null as zero, and MUST NOT hide the other two.
+func TestTripEnergyIsNullWhileDistanceIsNot(t *testing.T) {
+	handler := newTripTestHandler(t, &fakeTripStore{trip: fixtureTripWithTotals(612, 760)}, true)
+	body := decodeTripBody(t, handler)
+
+	if got := body["totalDistanceMiles"]; got != float64(612) {
+		t.Errorf("totalDistanceMiles = %v, want 612 — the distance total is unaffected", got)
+	}
+	value, present := body["totalEnergyKwh"]
+	if !present {
+		t.Fatal("totalEnergyKwh is absent; the contract declares it always present and nullable")
+	}
+	if value != nil {
+		t.Errorf("totalEnergyKwh = %v, want null for a window nothing measured", value)
+	}
+}
+
+// TestTripEnergyZeroIsNotNull pins the other direction. Zero is a REAL total —
+// a window of drives that went nowhere — and it must survive the wire as `0`,
+// not collapse into the "not reported" null.
+func TestTripEnergyZeroIsNotNull(t *testing.T) {
+	handler := newTripTestHandler(t, &fakeTripStore{trip: fixtureTripWithEnergy(0, 2, 0)}, true)
+	body := decodeTripBody(t, handler)
+
+	got, present := body["totalEnergyKwh"]
+	if !present || got == nil {
+		t.Fatalf("totalEnergyKwh = %v (present=%v), want 0", got, present)
+	}
+	if got != float64(0) {
+		t.Errorf("totalEnergyKwh = %v, want 0", got)
+	}
 }

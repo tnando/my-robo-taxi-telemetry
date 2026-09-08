@@ -63,6 +63,22 @@ type TripData struct {
 	TotalDistanceMiles   *float64
 	TotalDurationMinutes *int64
 
+	// TotalEnergyKwh is the same window's energy consumption summed (MYR-629),
+	// read in the SAME statement as the three above. The client divides it by
+	// TotalDistanceMiles to render Wh/mi; the server stores no ratio, because a
+	// stored efficiency could disagree with the two numbers it was derived from.
+	//
+	// ITS NIL RULE IS STRICTER THAN ITS SIBLINGS'. `Drive."energyUsedKwh"` is
+	// NOT NULL, so a drive the tracker could not measure writes 0 rather than
+	// null, and a plain SUM would mix those zeros into a real total — producing
+	// a Wh/mi computed from some drives' energy over ALL drives' miles. So the
+	// total is ALL-OR-NOTHING over the drives that moved: nil when ANY drive in
+	// the window covered distance without reporting energy, and nil when the
+	// window holds no drives at all. queryTripDriveTotals carries the full
+	// argument, including why this is also the migration rule for the windows
+	// that straddle the MYR-629 fix.
+	TotalEnergyKwh *float64
+
 	// CurrentLeg is the driving leg underway, or nil. INFORMATIONAL, NEVER A
 	// GATE — a consumer must not condition its map, its live screen or its
 	// socket subscription on this being present. An active trip with no leg is

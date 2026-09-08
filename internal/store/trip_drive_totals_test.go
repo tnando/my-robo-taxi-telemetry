@@ -42,6 +42,24 @@ func seedDriveWithStats(t *testing.T, driveID, vehicleID string, at time.Time, m
 	}
 }
 
+// seedDriveWithEnergy is seedDriveWithStats plus a MEASURED energy figure
+// (MYR-629).
+//
+// It is a SEPARATE seeder rather than a widened one, and that separation is the
+// fixture that matters: `seedDriveWithStats` leaves `energyUsedKwh` at 0, which
+// is exactly what a drive the tracker could not measure writes — including
+// every drive recorded before MYR-629 — and the all-or-nothing rule needs both
+// kinds of row in the same window to be worth testing.
+func seedDriveWithEnergy(t *testing.T, driveID, vehicleID string, at time.Time, miles float64, minutes int, kwh float64) {
+	t.Helper()
+	if _, err := testPool.Exec(context.Background(),
+		`INSERT INTO "Drive" ("id","vehicleId","date","startTime","distanceMiles","durationMinutes","energyUsedKwh")
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		driveID, vehicleID, at.Format("2006-01-02"), at.UTC().Format(time.RFC3339), miles, minutes, kwh); err != nil {
+		t.Fatalf("seed drive with energy: %v", err)
+	}
+}
+
 // seedForeignTrip files a window owned by SOMEBODY ELSE directly, bypassing
 // Create.
 //
@@ -717,7 +735,10 @@ func TestTripListDecorationIssuesNoExtraQueryPerTrip(t *testing.T) {
 	three := measure(3)
 
 	// FOUR DECORATION STATEMENTS PER ENDED TRIP: vehicle, owner first name,
-	// roster, drive totals. The fifth — the open leg — is skipped without
+	// roster, drive totals. MYR-629 widened the totals statement with a fourth
+	// number and added NO statement, which is what this counter proves and why
+	// the energy total rides queryTripDriveTotals rather than getting a SUM of
+	// its own. The fifth — the open leg — is skipped without
 	// asking the database when the window is not active, which is why the
 	// fixture uses ENDED windows: the count is then a constant rather than a
 	// function of what the leg detector happened to leave behind.
@@ -782,4 +803,173 @@ func deref(s *string) string {
 		return "<nil>"
 	}
 	return *s
+}
+
+// ── MYR-629: THE ENERGY TOTAL ───────────────────────────────────────────────
+
+// TestTripEnergyTotalIsAllOrNothing pins the rule that makes `totalEnergyKwh`
+// different from its two siblings, and the reason it has to be.
+//
+// `Drive."energyUsedKwh"` is NOT NULL, so a drive the tracker could not measure
+// writes 0 rather than null — and a plain `SUM` would fold those zeros in
+// silently. The client renders `totalEnergyKwh × 1000 / totalDistanceMiles` as
+// Wh/mi, so a window of five drives where two reported energy would print a
+// figure computed from two drives' energy over FIVE drives' miles: about 40% of
+// the truth, with nothing on the wire to say so.
+//
+// SO ONE UNMEASURED DRIVE THAT MOVED VOIDS THE WHOLE TOTAL, and the client shows
+// its "not reported" dash. THIS IS ALSO THE MIGRATION RULE: every drive recorded
+// before MYR-629 carries 0, so a window straddling the fix reports null rather
+// than an understated number, and starts reporting on its own once every drive
+// in it was measured.
+func TestTripEnergyTotalIsAllOrNothing(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	repo := newTripRepo(t)
+	now := time.Now().UTC()
+
+	// Each subtest gets its own car and its own window: the rule is a property
+	// of the SET of drives in one window, so a shared fixture would make the
+	// cases contaminate each other in exactly the dimension under test.
+	newWindow := func(t *testing.T) (string, store.TripView) {
+		t.Helper()
+		vehicleID, shareID := seedTripFixture(t)
+		trip := mustCreateTrip(t, repo, vehicleID, now.Add(-24*time.Hour), now.Add(24*time.Hour), []string{shareID})
+		return vehicleID, trip
+	}
+	energyOf := func(t *testing.T, tripID, userID string) *float64 {
+		t.Helper()
+		view, err := repo.GetForUser(ctx, tripID, userID)
+		if err != nil {
+			t.Fatalf("GetForUser: %v", err)
+		}
+		return view.TotalEnergyKwh
+	}
+
+	t.Run("an empty window reports NULL", func(t *testing.T) {
+		_, trip := newWindow(t)
+		if got := energyOf(t, trip.ID, shareOwnerA); got != nil {
+			t.Errorf("totalEnergyKwh = %v for an empty window, want nil", *got)
+		}
+	})
+
+	t.Run("a window where every drive was measured reports the sum", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_a1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+		seedDriveWithEnergy(t, "cdrv_e_a2", vehicleID, now.Add(-6*time.Hour), 20, 30, 6.25)
+		// Outside the window: the sum is the window's, not the car's.
+		seedDriveWithEnergy(t, "cdrv_e_a3", vehicleID, now.Add(48*time.Hour), 500, 600, 150)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil, want 18.75")
+		}
+		if *got != 18.75 {
+			t.Errorf("totalEnergyKwh = %v, want 18.75", *got)
+		}
+	})
+
+	t.Run("ONE moved drive with no energy voids the whole total", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_b1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+		// A pre-MYR-629 row: real miles, energyUsedKwh left at 0.
+		seedDriveWithStats(t, "cdrv_e_b2", vehicleID, now.Add(-6*time.Hour), 20, 30)
+
+		view, err := repo.GetForUser(ctx, trip.ID, shareOwnerA)
+		if err != nil {
+			t.Fatalf("GetForUser: %v", err)
+		}
+		if view.TotalEnergyKwh != nil {
+			t.Errorf("totalEnergyKwh = %v, want nil — one unmeasured drive that moved voids the total", *view.TotalEnergyKwh)
+		}
+		// AND THE OTHER TWO TOTALS ARE UNAFFECTED. The energy rule must not
+		// reach the numbers it rides with: the card still says 60 miles and an
+		// hour and a half, and only the efficiency tile goes dark.
+		assertTotals(t, view, 2, 60, 90)
+	})
+
+	t.Run("a stationary drive with no energy does not veto the window", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_c1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+		// distanceMiles = 0: nothing moved, so there was no energy to report
+		// and this row has no opinion about the window's total.
+		seedDriveWithStats(t, "cdrv_e_c2", vehicleID, now.Add(-6*time.Hour), 0, 1)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil; a stationary drive must not veto the total")
+		}
+		if *got != 12.5 {
+			t.Errorf("totalEnergyKwh = %v, want 12.5", *got)
+		}
+	})
+
+	t.Run("a window of drives that went nowhere reports 0, not NULL", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithStats(t, "cdrv_e_d1", vehicleID, now.Add(-12*time.Hour), 0, 1)
+		seedDriveWithStats(t, "cdrv_e_d2", vehicleID, now.Add(-6*time.Hour), 0, 2)
+
+		got := energyOf(t, trip.ID, shareOwnerA)
+		if got == nil {
+			t.Fatal("totalEnergyKwh is nil, want 0 — zero is a real total, null is an absence")
+		}
+		if *got != 0 {
+			t.Errorf("totalEnergyKwh = %v, want 0", *got)
+		}
+	})
+
+	t.Run("a participant reads the same energy total the owner does", func(t *testing.T) {
+		vehicleID, trip := newWindow(t)
+		seedDriveWithEnergy(t, "cdrv_e_e1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
+
+		owner := energyOf(t, trip.ID, shareOwnerA)
+		participant := energyOf(t, trip.ID, shareViewer1)
+		if owner == nil || participant == nil || *owner != *participant {
+			t.Errorf("owner read %v and participant read %v; a trip's numbers are a fact about the trip", owner, participant)
+		}
+	})
+}
+
+// TestTripEnergyTotalIsRunning is the same running-not-final rule the other two
+// totals follow, asserted for energy because the surface that most wants an
+// efficiency figure is a road trip in progress.
+func TestTripEnergyTotalIsRunning(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareID := seedTripFixture(t)
+	repo := newTripRepo(t)
+	now := time.Now().UTC()
+
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-24*time.Hour), now.Add(24*time.Hour), []string{shareID})
+	seedDriveWithEnergy(t, "cdrv_e_run1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12)
+
+	view, err := repo.GetForUser(ctx, trip.ID, shareOwnerA)
+	if err != nil {
+		t.Fatalf("GetForUser: %v", err)
+	}
+	if view.StatusAt(time.Now()) != store.TripStatusActive {
+		t.Fatalf("fixture is not active: %v", view.StatusAt(time.Now()))
+	}
+	if view.TotalEnergyKwh == nil || *view.TotalEnergyKwh != 12 {
+		t.Fatalf("totalEnergyKwh = %v, want 12 while the trip is still running", view.TotalEnergyKwh)
+	}
+
+	// A second leg lands. The SAME read now says more, with nothing recomputed
+	// or backfilled — the total is a read-time sum over the window.
+	seedDriveWithEnergy(t, "cdrv_e_run2", vehicleID, now.Add(-2*time.Hour), 20, 30, 6)
+
+	view, err = repo.GetForUser(ctx, trip.ID, shareOwnerA)
+	if err != nil {
+		t.Fatalf("GetForUser (second read): %v", err)
+	}
+	if view.TotalEnergyKwh == nil || *view.TotalEnergyKwh != 18 {
+		t.Fatalf("totalEnergyKwh = %v after a second leg, want 18", view.TotalEnergyKwh)
+	}
+	// 60 miles on 18 kWh is 300 Wh/mi — the figure the client derives, never a
+	// ratio the server stores.
+	assertTotals(t, view, 2, 60, 90)
 }

@@ -297,7 +297,8 @@ LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
 WHERE t.id = $1`
 
 // queryTripDriveTotals is the ONE STATEMENT behind `driveCount`,
-// `totalDistanceMiles` and `totalDurationSeconds` (MYR-608). It reads the
+// `totalDistanceMiles`, `totalDurationSeconds` and `totalEnergyKwh` (MYR-608,
+// widened by MYR-629). It reads the
 // window's bounds through `driveStartInstantExpr`, whose own comment carries
 // the whole argument for why the TEXT column is cast and why the cast is
 // guarded — this statement is one of the four the review round moved off the
@@ -307,7 +308,7 @@ WHERE t.id = $1`
 // THE `d` ALIAS IS REQUIRED, not stylistic: `driveStartInstantExpr` names
 // `d."startTime"`, so the statement it lands in has to supply that alias.
 //
-// THE THREE NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
+// THE FOUR NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
 // §7.30.2 decorates every row it returns, so a separate SUM query would have
 // added one round trip PER TRIP to a list that already issues five. Widening
 // the count that was already there adds none: the totals ride the scan the
@@ -325,8 +326,48 @@ WHERE t.id = $1`
 // what it has driven SO FAR and the number climbs between reads. Withholding
 // them until the window closed would leave the surface that most wants a
 // total — a road trip in progress — the one surface that cannot have one.
+//
+// ── THE FOURTH NUMBER: totalEnergyKwh (MYR-629) ─────────────────────────────
+//
+// It rides this statement for the reason the other two do, and its NULL rule is
+// STRICTER than theirs — deliberately, and this is the part to read before
+// changing it.
+//
+// `Drive."energyUsedKwh"` is `NOT NULL`, so `SUM` over it cannot produce the
+// honest null the distance and duration sums get for free. A drive the tracker
+// could not measure writes 0, and a plain `SUM` would silently mix those zeros
+// in with real figures. The client derives efficiency as
+// `totalEnergyKwh × 1000 / totalDistanceMiles`, so a window holding five drives
+// where two reported energy would print a Wh/mi computed from two drives' energy
+// over FIVE drives' miles — roughly 40% of the truth, rendered as a confident
+// number. That is worse than printing nothing.
+//
+// SO THE TOTAL IS ALL-OR-NOTHING OVER THE DRIVES THAT MOVED. If any drive in the
+// window covered distance and reported no energy, the whole total is NULL and
+// the client shows its "not reported" dash. `distanceMiles > 0` is the qualifier
+// because a stationary micro-drive has no energy to report and must not veto a
+// window; the same reasoning that lets `0` be a real total for a window whose
+// drives went nowhere.
+//
+// THIS IS ALSO THE MIGRATION RULE, not only a correctness one. Every drive
+// recorded before this issue carries 0, so a trip window straddling the fix
+// reports NULL rather than a total computed over its newer half — the surface
+// tells the truth about a mixed window instead of quietly understating it, and
+// it starts reporting on its own once the window holds only measured drives.
+//
+// A WINDOW WITH NO DRIVES yields NULL from the same expression: the FILTERed
+// count is 0, so the CASE takes its THEN arm, and `SUM` over zero rows is NULL.
+// One spelling, both meanings of "nothing to report".
 const queryTripDriveTotals = `
-SELECT COUNT(*), SUM(d."distanceMiles"), SUM(d."durationMinutes") FROM "Drive" d
+SELECT COUNT(*),
+       SUM(d."distanceMiles"),
+       SUM(d."durationMinutes"),
+       CASE WHEN COUNT(*) FILTER (
+                WHERE d."distanceMiles" > 0 AND d."energyUsedKwh" <= 0
+            ) = 0
+            THEN SUM(d."energyUsedKwh")
+       END
+FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND ` + driveStartInstantExpr + ` >= $2
   AND ` + driveStartInstantExpr + ` <= $3`

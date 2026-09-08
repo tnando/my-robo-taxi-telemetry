@@ -240,8 +240,9 @@ func (r *TripRepo) loadRoster(ctx context.Context, v *TripView) error {
 	return nil
 }
 
-// loadDriveTotals fills `driveCount`, `totalDistanceMiles` and
-// `totalDurationSeconds` from ONE statement over ONE window (MYR-608).
+// loadDriveTotals fills `driveCount`, `totalDistanceMiles`,
+// `totalDurationSeconds` and `totalEnergyKwh` from ONE statement over ONE
+// window (MYR-608, widened by MYR-629).
 //
 // THE THREE TRAVEL TOGETHER FOR TWO REASONS. The cheap one is cost: §7.30.2
 // decorates every row it returns, so a separate SUM would have added a round
@@ -250,12 +251,16 @@ func (r *TripRepo) loadRoster(ctx context.Context, v *TripView) error {
 // could straddle a drive being written and describe two different sets of
 // drives on one card, and there is no way for a reader to tell.
 //
-// The two sums are NULLABLE and stay nullable: SUM over zero rows is NULL, and
-// that is the honest spelling of "this window has no drives yet".
+// The three sums are NULLABLE and stay nullable: SUM over zero rows is NULL,
+// and that is the honest spelling of "this window has no drives yet". The
+// ENERGY sum is null under a second condition as well — any drive that moved
+// without reporting energy voids the whole total — because its column is NOT
+// NULL and a zero in it is an absence, not a measurement. See
+// queryTripDriveTotals.
 func (r *TripRepo) loadDriveTotals(ctx context.Context, v *TripView) error {
 	w := v.Window()
 	err := r.pool.QueryRow(ctx, queryTripDriveTotals, w.VehicleID, w.From, w.To).
-		Scan(&v.DriveCount, &v.TotalDistanceMiles, &v.TotalDurationMinutes)
+		Scan(&v.DriveCount, &v.TotalDistanceMiles, &v.TotalDurationMinutes, &v.TotalEnergyKwh)
 	if err != nil {
 		return fmt.Errorf("load trip drive totals: %w", err)
 	}
