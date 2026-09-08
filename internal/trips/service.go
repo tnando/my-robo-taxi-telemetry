@@ -98,6 +98,11 @@ type Pusher interface {
 // ActivityPusher is the Live Activity half.
 type ActivityPusher interface {
 	StartLeg(ctx context.Context, tc push.TripLegContext) int
+	// StartLegForUser raises ONE person's card for a leg that is ALREADY OPEN
+	// — the MYR-612 catch-up for a phone whose token registered after the
+	// fan-out had already run. It shares the fan-out's per-(device, leg) claim,
+	// so the two cannot raise two cards for one journey.
+	StartLegForUser(ctx context.Context, tc push.TripLegContext, userID string) int
 	UpdateLeg(ctx context.Context, tc push.TripLegContext) int
 	EndLeg(ctx context.Context, tc push.TripLegContext)
 }

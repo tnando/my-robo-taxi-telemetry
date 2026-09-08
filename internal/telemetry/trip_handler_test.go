@@ -149,9 +149,17 @@ type recordingTripNotifier struct {
 	ended   [][]string
 	deleted [][]string
 
+	// registered records the (tripID, userID) pairs the MYR-612 catch-up was
+	// asked for, as "trip/user".
+	registered []string
+
 	// onDeleted lets a test observe the ORDER of the two calls the delete route
 	// makes, which is the one property no status code can express.
 	onDeleted func()
+}
+
+func (n *recordingTripNotifier) ActivityTokenRegistered(_ context.Context, tripID, userID string) {
+	n.registered = append(n.registered, tripID+"/"+userID)
 }
 
 func (n *recordingTripNotifier) TripAdded(_ context.Context, _ TripData, ids []string) {
@@ -830,4 +838,45 @@ func (s *tripPatchStore) GetTrip(context.Context, string, string) (TripData, err
 
 func (s *tripPatchStore) UpdateTrip(context.Context, string, string, TripUpdateInput) (TripData, error) {
 	return s.after, nil
+}
+
+// TestActivityTokenRegistrationTriggersTheCatchUp — MYR-612.
+//
+// A leg's Live Activity is push-to-start, and the leg-open fan-out runs ONCE,
+// over whatever tokens are registered at that instant. Registering is what a
+// phone does when the `trip_leg_started` push WAKES it — necessarily
+// afterwards. On 2026-09-08 the only participant's token was written three
+// seconds after the leg opened, and the trip ran all evening with no card for
+// anybody. The registration is now itself an occasion to send.
+func TestActivityTokenRegistrationTriggersTheCatchUp(t *testing.T) {
+	store := &fakeTripStore{trip: fixtureTrip()}
+	notifier := &recordingTripNotifier{}
+	handler := newTripTestHandler(t, store, true, WithTripNotifier(notifier))
+
+	rec := tripRequest(t, handler, http.MethodPost, "/api/trips/"+tripTestID+"/activity-start-token",
+		`{"pushToStartToken":"8f3a91c0deadbeefcafef00dfeedface"}`)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want 204. Body: %s", rec.Code, rec.Body.String())
+	}
+	want := tripTestID + "/" + tripTestOwner
+	if len(notifier.registered) != 1 || notifier.registered[0] != want {
+		t.Fatalf("catch-up calls = %v, want [%s]", notifier.registered, want)
+	}
+}
+
+// TestARefusedRegistrationRaisesNoCard: the catch-up is a consequence of a
+// STORED token, so a refused registration must not reach it — a 404'd caller is
+// not on the trip and must not be pushed a card naming its car.
+func TestARefusedRegistrationRaisesNoCard(t *testing.T) {
+	store := &fakeTripStore{err: ErrTripNotFound}
+	notifier := &recordingTripNotifier{}
+	handler := newTripTestHandler(t, store, true, WithTripNotifier(notifier))
+
+	tripRequest(t, handler, http.MethodPost, "/api/trips/"+tripTestID+"/activity-start-token",
+		`{"pushToStartToken":"abc123"}`)
+
+	if len(notifier.registered) != 0 {
+		t.Fatalf("a refused registration reached the catch-up: %v", notifier.registered)
+	}
 }

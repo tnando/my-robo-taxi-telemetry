@@ -330,6 +330,13 @@ LIMIT 1`
 // P1 CAPABILITY. The value is never logged beyond an 8-character prefix, never
 // echoed into a response, never placed in an error message.
 //
+// ⚠ A ROTATED TOKEN RESETS `started_leg_id` (MYR-612), and an unchanged one
+// does not. ActivityKit rotates the value, and the new token addresses a phone
+// that holds no card for the current leg — so it must be able to be sent one.
+// An idempotent re-POST of the SAME token, which is what an app does on every
+// foreground, must NOT: that phone already has its card, and clearing the stamp
+// would raise a second one on the same lock screen for the same journey.
+//
 // #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
 const queryUpsertTripActivityToken = `
 INSERT INTO go_trip_activity_tokens (trip_id, user_id, push_to_start_token, sandbox)
@@ -337,6 +344,11 @@ VALUES ($1, $2, $3, $4)
 ON CONFLICT (trip_id, user_id) DO UPDATE
 SET push_to_start_token = EXCLUDED.push_to_start_token,
     sandbox = EXCLUDED.sandbox,
+    started_leg_id = CASE
+        WHEN go_trip_activity_tokens.push_to_start_token IS DISTINCT FROM EXCLUDED.push_to_start_token
+        THEN NULL
+        ELSE go_trip_activity_tokens.started_leg_id
+    END,
     updated_at = NOW()`
 
 // queryDeleteTripActivityToken is the DELETE half. Idempotent: no row is the

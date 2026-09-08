@@ -87,6 +87,19 @@ func (a *tripNotifierAdapter) TripDeleted(ctx context.Context, trip telemetry.Tr
 	}
 }
 
+// ActivityTokenRegistered raises the open leg's card on the phone that just
+// registered (MYR-612).
+//
+// THE ONE METHOD ON THIS SEAM THAT IS NOT AN ANNOUNCEMENT. The other four turn
+// a request into a push about a trip; this one repairs a card that the leg-open
+// fan-out could not have raised, because the registration it needed had not
+// happened yet. The live side returns nothing for the same reason those four
+// discard their errors here: the registration has already committed and is
+// correct whatever the push does.
+func (a *tripNotifierAdapter) ActivityTokenRegistered(ctx context.Context, tripID, userID string) {
+	a.svc.CatchUpLegActivity(ctx, tripID, userID)
+}
+
 // log records a failed announcement at WARN. Not ERROR: the state change it was
 // about has already committed and is correct, and the sweeper reaches the same
 // edge again on its next pass for both boundary events.

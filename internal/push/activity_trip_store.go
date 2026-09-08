@@ -18,6 +18,20 @@ type TripActivityStore interface {
 	// PushToStartTokensForTrip lists the trip's push-to-start registrations —
 	// participants and the owner. An empty result is ordinary.
 	PushToStartTokensForTrip(ctx context.Context, tripID string) ([]ActivityStartToken, error)
+	// ClaimPushToStartForLeg claims ONE device's push-to-start for ONE leg and
+	// returns the token to send (MYR-612).
+	//
+	// CLAIM BEFORE SEND. There are two senders — the leg-open fan-out and the
+	// registration catch-up, which exists because a phone that registers three
+	// seconds after a leg opened would otherwise never get a card — and this is
+	// what stops them raising two Live Activities for one journey on one lock
+	// screen. false means somebody already sent it, or the caller is no longer
+	// admitted to the trip; both are ordinary and neither is an error.
+	ClaimPushToStartForLeg(ctx context.Context, tripID, userID, legID string) (ActivityStartToken, bool, error)
+	// ReleasePushToStartClaim hands a claim back after a send that failed for a
+	// reason that might not repeat, so a later attempt can retry. Not called
+	// for a 410 — that verdict deletes the row.
+	ReleasePushToStartClaim(ctx context.Context, tripID, userID, legID string) error
 	// DeleteRejectedPushToStartToken drops a push-to-start token APNs
 	// permanently rejected. NOT DeleteActivityToken: see the two tables'
 	// difference in internal/store/trip_activity_token_repo.go.

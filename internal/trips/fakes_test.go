@@ -343,12 +343,24 @@ type fakeActivityPusher struct {
 	starts  []push.TripLegContext
 	updates []push.TripLegContext
 	ends    []push.TripLegContext
+	// catchUps records the MYR-612 per-device sends, as "userID/legID", and
+	// catchUpContexts the content-state inputs each one carried.
+	catchUps        []string
+	catchUpContexts []push.TripLegContext
 }
 
 func (f *fakeActivityPusher) StartLeg(_ context.Context, tc push.TripLegContext) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.starts = append(f.starts, tc)
+	return 1
+}
+
+func (f *fakeActivityPusher) StartLegForUser(_ context.Context, tc push.TripLegContext, userID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.catchUps = append(f.catchUps, userID+"/"+tc.LegID)
+	f.catchUpContexts = append(f.catchUpContexts, tc)
 	return 1
 }
 

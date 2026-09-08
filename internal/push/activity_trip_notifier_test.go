@@ -21,6 +21,13 @@ type fakeTripActivityStore struct {
 	// anti-reaper mark. Recorded in call order so a test can assert that the
 	// refused sends were NOT stamped.
 	marked []string
+
+	// claims models go_trip_activity_tokens.started_leg_id (MYR-612): the leg
+	// whose push-to-start was last sent to this device, keyed "trip/user".
+	claims     map[string]string
+	claimErr   error
+	released   []string
+	claimCalls int
 }
 
 func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ string) ([]ActivityStartToken, error) {
@@ -30,6 +37,44 @@ func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ st
 		return nil, f.tokensErr
 	}
 	return append([]ActivityStartToken(nil), f.tokens...), nil
+}
+
+func (f *fakeTripActivityStore) ClaimPushToStartForLeg(
+	_ context.Context, tripID, userID, legID string,
+) (ActivityStartToken, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.claimCalls++
+	if f.claimErr != nil {
+		return ActivityStartToken{}, false, f.claimErr
+	}
+	if f.claims == nil {
+		f.claims = map[string]string{}
+	}
+	key := tripID + "/" + userID
+	if f.claims[key] == legID {
+		return ActivityStartToken{}, false, nil
+	}
+	for _, tok := range f.tokens {
+		if tok.UserID != userID {
+			continue
+		}
+		f.claims[key] = legID
+		return tok, true, nil
+	}
+	// No registration for this person: nothing to claim, and not an error.
+	return ActivityStartToken{}, false, nil
+}
+
+func (f *fakeTripActivityStore) ReleasePushToStartClaim(_ context.Context, tripID, userID, legID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := tripID + "/" + userID
+	if f.claims[key] == legID {
+		delete(f.claims, key)
+	}
+	f.released = append(f.released, key+"/"+legID)
+	return nil
 }
 
 func (f *fakeTripActivityStore) DeleteRejectedPushToStartToken(_ context.Context, token string) error {

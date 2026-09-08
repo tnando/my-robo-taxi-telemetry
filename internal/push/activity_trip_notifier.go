@@ -120,6 +120,12 @@ func (t *TripActivityNotifier) allowed(ctx context.Context, userID, legID string
 // iPhone — and is never an error: the leg's pushes still go out through the
 // ordinary notifier, which is what the "a leg that never got a token
 // registration still gets its pushes" rule means.
+//
+// ⚠ THIS FAN-OUT IS NOT THE ONLY SENDER (MYR-612). A phone that registers its
+// token DURING an open leg — which is exactly what a phone does when the
+// `trip_leg_started` push wakes it, three seconds too late — gets its card from
+// the registration catch-up instead. Both claim per (device, leg) before
+// sending, so the two cannot raise two cards for one journey.
 func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) int {
 	if !t.active() {
 		t.logger.Debug("trip activity start skipped",
@@ -143,51 +149,9 @@ func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) 
 	}
 
 	now := t.now()
-	state := tripContentState(tc, now)
-	// The LEG is REQUIRED in the attributes: without it the created card has no
-	// anchor to register its own update token against and can never be updated
-	// or ended — and the iOS struct declares it non-optional, so a payload
-	// missing it fails the decode and raises no card at all.
-	start := &TripActivityStart{
-		TripID:      tc.TripID,
-		LegID:       tc.LegID,
-		VehicleID:   tc.VehicleID,
-		VehicleName: tc.VehicleName,
-	}
-
 	var started int
 	for _, tok := range tokens {
-		if !t.allowed(ctx, tok.UserID, tc.LegID) {
-			continue
-		}
-		err := t.sender.SendActivity(ctx, ActivityNotification{
-			ActivityToken: tok.Token,
-			Sandbox:       tok.Sandbox,
-			Event:         ActivityEventStart,
-			ContentState:  state,
-			Timestamp:     now,
-			Start:         start,
-			// No Alert. The card APPEARING is the announcement, and the
-			// `trip_leg_started` banner is already on its way; a third
-			// interruption for one fact is what MYR-413 exists to stop.
-		})
-		switch {
-		case err == nil:
-			started++
-		case errors.Is(err, ErrUnregistered):
-			// THE APP is gone, not a card — this token addresses an
-			// installation. The row goes from go_trip_activity_tokens, which is
-			// a DIFFERENT table from the one dropActivity touches; see the
-			// store file's header for why pointing the ride path at this
-			// verdict would delete nothing and retry forever.
-			t.dropPushToStartToken(ctx, tok.Token)
-		default:
-			t.logger.Warn("trip activity: push-to-start failed",
-				slog.String("leg_id", tc.LegID),
-				slog.String("push_to_start_token_prefix", tokenPrefix(tok.Token)),
-				slog.String("error", err.Error()),
-			)
-		}
+		started += t.startOne(ctx, tc, tok.UserID, now)
 	}
 
 	t.logger.Info("trip activity started",
@@ -195,9 +159,114 @@ func (t *TripActivityNotifier) StartLeg(ctx context.Context, tc TripLegContext) 
 		slog.String("leg_id", tc.LegID),
 		slog.Int("tokens", len(tokens)),
 		slog.Int("started", started),
-		slog.Bool("has_eta", state.ETA != nil),
 	)
 	return started
+}
+
+// StartLegForUser raises ONE person's card for a leg that is ALREADY OPEN — the
+// MYR-612 catch-up.
+//
+// WHY IT HAS TO EXIST. The fan-out above runs once, at the instant the leg
+// opens, over whatever tokens are registered then. On 2026-09-08 the only
+// participant's phone registered its token at 03:40:27, three seconds after the
+// leg opened at 03:40:24, because registering is what the phone did on
+// RECEIVING the leg-start push. The fan-out had already found an empty registry
+// and nothing looked again: no card for anybody, ever, on that leg.
+//
+// It shares startOne with the fan-out, so it shares the claim, and the two
+// cannot double-send however closely they race.
+func (t *TripActivityNotifier) StartLegForUser(ctx context.Context, tc TripLegContext, userID string) int {
+	if !t.active() || userID == "" {
+		return 0
+	}
+	started := t.startOne(ctx, tc, userID, t.now())
+	if started > 0 {
+		t.logger.Info("trip activity started late",
+			slog.String("trip_id", tc.TripID),
+			slog.String("leg_id", tc.LegID),
+			slog.String("user_id", userID),
+		)
+	}
+	return started
+}
+
+// startOne claims and sends one device's push-to-start. Returns 1 when a card
+// was raised.
+func (t *TripActivityNotifier) startOne(ctx context.Context, tc TripLegContext, userID string, now time.Time) int {
+	if !t.allowed(ctx, userID, tc.LegID) {
+		return 0
+	}
+	tok, claimed, err := t.store.ClaimPushToStartForLeg(ctx, tc.TripID, userID, tc.LegID)
+	if err != nil {
+		t.logger.Error("trip activity: push-to-start claim failed",
+			slog.String("leg_id", tc.LegID),
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+		return 0
+	}
+	if !claimed {
+		// Already sent for this leg, or the caller is no longer on the trip.
+		return 0
+	}
+
+	err = t.sender.SendActivity(ctx, ActivityNotification{
+		ActivityToken: tok.Token,
+		Sandbox:       tok.Sandbox,
+		Event:         ActivityEventStart,
+		ContentState:  tripContentState(tc, now),
+		Timestamp:     now,
+		// The LEG is REQUIRED in the attributes: without it the created card
+		// has no anchor to register its own update token against and can never
+		// be updated or ended — and the iOS struct declares it non-optional, so
+		// a payload missing it fails the decode and raises no card at all.
+		Start: &TripActivityStart{
+			TripID:      tc.TripID,
+			LegID:       tc.LegID,
+			VehicleID:   tc.VehicleID,
+			VehicleName: tc.VehicleName,
+		},
+		// No Alert. The card APPEARING is the announcement, and the
+		// `trip_leg_started` banner is already on its way; a third interruption
+		// for one fact is what MYR-413 exists to stop.
+	})
+	switch {
+	case err == nil:
+		return 1
+	case errors.Is(err, ErrUnregistered):
+		// THE APP is gone, not a card — this token addresses an installation.
+		// The row goes from go_trip_activity_tokens, which is a DIFFERENT table
+		// from the one dropActivity touches; see the store file's header for
+		// why pointing the ride path at this verdict would delete nothing and
+		// retry forever. The claim is NOT released: there is no row left to
+		// release it on.
+		t.dropPushToStartToken(ctx, tok.Token)
+		return 0
+	default:
+		t.logger.Warn("trip activity: push-to-start failed",
+			slog.String("leg_id", tc.LegID),
+			slog.String("push_to_start_token_prefix", tokenPrefix(tok.Token)),
+			slog.String("error", err.Error()),
+		)
+		t.releasePushToStartClaim(ctx, tc, userID)
+		return 0
+	}
+}
+
+// releasePushToStartClaim hands a claim back after a send that might succeed
+// later, on a context detached from the caller's (which the send may have
+// consumed).
+func (t *TripActivityNotifier) releasePushToStartClaim(ctx context.Context, tc TripLegContext, userID string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteTimeout)
+	defer cancel()
+
+	if err := t.store.ReleasePushToStartClaim(ctx, tc.TripID, userID, tc.LegID); err != nil {
+		t.logger.Error("trip activity: releasing a push-to-start claim failed",
+			slog.String("leg_id", tc.LegID),
+			slog.String("user_id", userID),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // UpdateLeg replaces the content-state on every card already running for a leg.

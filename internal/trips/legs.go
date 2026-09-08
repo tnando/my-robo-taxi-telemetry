@@ -322,3 +322,56 @@ const (
 	tripStatusArrived   = "arrived"
 	tripStatusCompleted = "completed"
 )
+
+// CatchUpLegActivity raises the card for a leg that is ALREADY UNDER WAY, for
+// the one person who has just registered a push-to-start token.
+//
+// ⚠ THIS IS THE FIX FOR "NO CARD FOR ANYBODY, EVER" (MYR-612). A leg's Live
+// Activity is push-to-start, and the fan-out runs ONCE, at the instant the leg
+// opens, over whatever tokens are registered then. Registering is what a phone
+// does when the `trip_leg_started` push wakes it — which is necessarily AFTER
+// the leg opened. On 2026-09-08 the only participant's token was written at
+// 03:40:27 for a leg that opened at 03:40:24, three seconds too late; the trip
+// ran for the rest of the evening with `go_live_activities` empty.
+//
+// So the registration itself is now an occasion to send. It is safe to call on
+// every registration, including the overwhelming majority that arrive with no
+// leg open: the store's per-(device, leg) claim is the idempotency, and a trip
+// with no open leg reads one row and sends nothing.
+//
+// BEST-EFFORT BY CONSTRUCTION. It returns nothing, because it is called after
+// the registration has committed and there is no failure the caller could act
+// on — the token is stored either way, and the next leg's fan-out will use it.
+func (s *Service) CatchUpLegActivity(ctx context.Context, tripID, userID string) {
+	if s.activities == nil || tripID == "" || userID == "" {
+		return
+	}
+	legs, err := s.legs.OpenLegsForTrip(ctx, tripID)
+	if err != nil {
+		s.logger.Warn("trips: catch-up open-leg lookup failed",
+			slog.String("trip_id", tripID), slog.String("error", err.Error()))
+		return
+	}
+	if len(legs) == 0 {
+		// The ordinary case: a trip whose car is parked, or between legs.
+		return
+	}
+	// At most one — the partial unique index says so — but taken as a list
+	// because the teardown path must handle whatever it finds rather than
+	// assume the invariant it is cleaning up after.
+	leg := legs[0]
+
+	audience, err := s.trips.TripAudienceFor(ctx, tripID)
+	if err != nil {
+		s.logger.Warn("trips: catch-up audience lookup failed; no card raised",
+			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
+		return
+	}
+
+	// THE CONTENT STATE CARRIES NO ETA, exactly as the leg-open fan-out's does
+	// and for the same reason: this instant is a REGISTRATION, not a frame, and
+	// the honest answer here is that we have not computed one. The next frame
+	// that earns a card refresh puts a time on it, and an absent `eta` renders
+	// a card with no time rather than one with a wrong time — MYR-194's rule.
+	s.activities.StartLegForUser(ctx, s.legContext(ctx, leg, audience, tripStatusEnroute, nil), userID)
+}

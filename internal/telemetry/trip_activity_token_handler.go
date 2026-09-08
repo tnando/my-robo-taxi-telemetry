@@ -84,6 +84,19 @@ func (h *TripHandler) ServeRegisterActivityToken(w http.ResponseWriter, r *http.
 		h.failTrip(w, "register activity token", tripID, err)
 		return
 	}
+	// THE CATCH-UP (MYR-612). A leg that is ALREADY under way gets its card
+	// raised on THIS phone now, because the leg-open fan-out ran before this
+	// row existed — which is the normal order of events, since registering is
+	// what a phone does on receiving the leg-start push. Without this, a token
+	// that lands three seconds late means no card for the whole leg, and on
+	// 2026-09-08 that was every card on the trip.
+	//
+	// AFTER THE COMMIT AND BEFORE THE 204, synchronously, like every other
+	// notifier call on this handler: the row is already stored whatever
+	// happens here, so there is no error to report, and the send is one
+	// claim plus one APNs push. It returns nothing by design.
+	h.notifier.ActivityTokenRegistered(ctx, tripID, userID)
+
 	// NO BODY, deliberately: the response carries no token, because the value
 	// is P1 and the caller already knows what it sent. Echoing it would only
 	// put it in every client log and proxy trace — the same reasoning §7.21's
