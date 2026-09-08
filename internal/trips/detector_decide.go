@@ -37,28 +37,7 @@ func (d *Detector) decide(
 	}
 
 	if !leg.Open() {
-		state.endLeg()
-		// A PENDING CLEAR WITH NO OPEN LEG IS ALREADY SETTLED (MYR-612).
-		//
-		// The debounce exists to protect an OPEN leg from one delta that
-		// happened to omit the destination name; with no leg open there is
-		// nothing to protect and nothing left to confirm it either — branch 2
-		// below is the only place that calls confirmClear, and it is
-		// unreachable from here. Left pending, `destination` keeps naming a
-		// place the driver cancelled while parked, and the next time the car
-		// pulls out it reads as "driving with a destination" although no route
-		// is set: a PHANTOM leg, with a banner and a card, for a journey
-		// nobody planned.
-		if state.clearPending() {
-			state.confirmClear()
-			return
-		}
-		if state.driving && state.destination != "" && (!drivingBefore || destBefore == "") {
-			edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
-			defer cancel()
-			d.svc.openLeg(edgeCtx, tv, state.destination, f.at)
-			state.forgetLegRead()
-		}
+		d.decideIdle(ctx, tv, state, f, drivingBefore, destBefore)
 		return
 	}
 	// The per-leg fields (the arrival latch, the dwell, the card throttle)
@@ -67,20 +46,65 @@ func (d *Detector) decide(
 	// vehicleState.beginLeg.
 	state.beginLeg(leg.ID)
 
-	// A leg IS open. Three things can close it, and they are checked in the
-	// order of how much they assert.
+	if d.settleLeg(ctx, tv, state, leg, f) {
+		return
+	}
+
+	// Still under way. Refresh the card only when this frame's arrival estimate
+	// has earned a push — see vehicleState.dueForCard.
+	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
+		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
+		defer cancel()
+		d.svc.updateLeg(edgeCtx, leg, f, minutes)
+	}
+}
+
+// decideIdle is the half of the decision that runs with NO leg open: the car is
+// between journeys, and the only edge available is the one that starts one.
+func (d *Detector) decideIdle(
+	ctx context.Context, tv TripVehicle, state *vehicleState, f fix, drivingBefore bool, destBefore string,
+) {
+	state.endLeg()
+	// A PENDING CLEAR WITH NO OPEN LEG IS ALREADY SETTLED (MYR-612).
 	//
-	// ⚠ THE AUDIENCE IS NO LONGER READ HERE (MYR-612). It used to be fetched
-	// before the three checks, on EVERY FRAME of every car inside an open
-	// window — up to one query per second per car, on the single bus goroutine,
-	// with no timeout of its own — and it is used by exactly one outcome in
-	// several hundred: a leg EDGE. Together with the open-leg read next to it
-	// that was two unbounded statements per frame; one car on one road trip
-	// held two pool connections busy for four minutes, which is how a JWT
-	// existence probe on an unrelated request came to time out and answer 401
-	// (see internal/auth/user_existence_cache.go). It is read inside
-	// closeLegNow instead, at the edge that actually needs it.
-	//
+	// The debounce exists to protect an OPEN leg from one delta that happened
+	// to omit the destination name; with no leg open there is nothing to
+	// protect and nothing left to confirm it either — settleLeg is the only
+	// place that calls confirmClear, and it is unreachable from here. Left
+	// pending, `destination` keeps naming a place the driver cancelled while
+	// parked, and the next time the car pulls out it reads as "driving with a
+	// destination" although no route is set: a PHANTOM leg, with a banner and a
+	// card, for a journey nobody planned.
+	if state.clearPending() {
+		state.confirmClear()
+		return
+	}
+	if state.driving && state.destination != "" && (!drivingBefore || destBefore == "") {
+		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
+		defer cancel()
+		d.svc.openLeg(edgeCtx, tv, state.destination, f.at)
+		state.forgetLegRead()
+	}
+}
+
+// settleLeg asks the three closing questions of an OPEN leg and reports whether
+// this frame settled its fate — closed it, or deliberately held it.
+//
+// ⚠ THE AUDIENCE IS NO LONGER READ ON EVERY FRAME (MYR-612). It used to be
+// fetched before these checks, on EVERY FRAME of every car inside an open
+// window — up to one query per second per car, on the single bus goroutine,
+// with no timeout of its own — and it is used by exactly one outcome in several
+// hundred: a leg EDGE. Together with the open-leg read next to it that was two
+// unbounded statements per frame; one car on one road trip held two pool
+// connections busy for four minutes, which is how a JWT existence probe on an
+// unrelated request came to time out and answer 401 (see
+// internal/auth/user_existence_cache.go). It is read inside closeLegNow
+// instead, at the edge that actually needs it.
+//
+// The three are checked in the order of how much they assert.
+func (d *Detector) settleLeg(
+	ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, f fix,
+) bool {
 	// Computed BEFORE the dwell is folded in, because `arrivedAt` mutates the
 	// track and this is a pure question about this frame alone.
 	atDestination := state.inRadius(f, d.cfg)
@@ -88,10 +112,19 @@ func (d *Detector) decide(
 	// 1. ARRIVAL — the strongest claim, and the only one that fires
 	//    `trip_leg_arrived`. Latched so the twenty further qualifying frames
 	//    that arrive while the car sits there do nothing.
+	//
+	//    THE LATCH IS SET ONLY IF THE LEG ACTUALLY CLOSED (MYR-612 review). It
+	//    used to be set first, and a failed audience read then destroyed the
+	//    evidence: `arrivalLatched` disabled this branch for the rest of the
+	//    leg, so the arrival could never be re-observed and the leg could only
+	//    ever end as `completed`. Every closing condition here is a STATE the
+	//    next frame re-observes, and that property is only worth having if the
+	//    memory of having acted on it is written after the act.
 	if !state.arrivalLatched && state.arrivedAt(f, d.cfg) {
-		state.arrivalLatched = true
-		d.closeLegNow(ctx, tv, state, leg, true)
-		return
+		if d.closeLegNow(ctx, tv, state, leg, true) {
+			state.arrivalLatched = true
+		}
+		return true
 	}
 
 	// 2. THE ROUTE WAS CLEARED — ONCE THE CLEAR IS CONFIRMED (MYR-612).
@@ -113,11 +146,18 @@ func (d *Detector) decide(
 			// Held open. The card is deliberately NOT refreshed while the
 			// route is in doubt: the honest content-state is the one already
 			// on the lock screen, and its stale-date keeps it honest.
-			return
+			return true
 		}
-		state.confirmClear()
-		d.closeLegNow(ctx, tv, state, leg, false)
-		return
+		// AND THE ROUTE IS FORGOTTEN ONLY IF THE LEG ACTUALLY CLOSED, for the
+		// same reason the arrival latch is (MYR-612 review). confirmClear wipes
+		// `destination`, `destClearedAt` and the arrival state, which is the
+		// entire evidence this clear was ever pending: run before a failed
+		// EndLeg, it left an open leg with nothing left that could ever close
+		// it again.
+		if d.closeLegNow(ctx, tv, state, leg, false) {
+			state.confirmClear()
+		}
+		return true
 	}
 
 	// 3. THE CAR PARKED SHORT of its destination. `completed`, not `arrived`:
@@ -153,16 +193,9 @@ func (d *Detector) decide(
 	//    condition here has.
 	if !atDestination && state.parked(f, d.cfg) {
 		d.closeLegNow(ctx, tv, state, leg, false)
-		return
+		return true
 	}
-
-	// Still under way. Refresh the card only when this frame's arrival estimate
-	// has earned a push — see vehicleState.dueForCard.
-	if minutes := etaMinutesFrom(f); state.dueForCard(minutes, f.at) {
-		edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
-		defer cancel()
-		d.svc.updateLeg(edgeCtx, leg, f, minutes)
-	}
+	return false
 }
 
 // openLegFor answers "does this car have an open leg", from a SHORT-LIVED CACHE
@@ -199,27 +232,44 @@ func (d *Detector) openLegFor(ctx context.Context, state *vehicleState, vehicleI
 	return leg, nil
 }
 
-// closeLegNow reads the audience and ends the leg.
+// closeLegNow reads the audience and ends the leg, REPORTING WHETHER THE ROW
+// ACTUALLY CLOSED.
 //
 // THE AUDIENCE READ LIVES HERE, at the one outcome that uses it, rather than on
 // every frame — see the note in decide. A failed read DEFERS the edge exactly as
 // it did before: the leg stays open and the next qualifying frame tries again,
 // because every closing condition is a STATE the detector can re-observe rather
 // than an edge it sees once.
-func (d *Detector) closeLegNow(ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, arrived bool) {
+//
+// ⚠ THE RETURN VALUE IS THE HALF THAT MAKES THAT TRUE (MYR-612 review). Both
+// callers hold per-car memory that says "this edge has been acted on" — the
+// arrival latch, the confirmed clear — and both used to write it BEFORE getting
+// here. A deferred edge then found its own evidence deleted: the latch disabled
+// the arrival branch, confirmClear wiped the pending clear, and the leg the
+// deferral was supposed to protect could never be closed by anything. Deferring
+// only works if nothing was forgotten, so the memory is written by the caller
+// on `true` and not at all on `false`.
+func (d *Detector) closeLegNow(
+	ctx context.Context, tv TripVehicle, state *vehicleState, leg Leg, arrived bool,
+) bool {
 	readCtx, cancelRead := context.WithTimeout(ctx, d.cfg.Timeout)
 	audience, err := d.svc.trips.TripAudienceFor(readCtx, tv.TripID)
 	cancelRead()
 	if err != nil {
 		d.logger.Warn("trips: leg audience lookup failed; deferring the leg edge",
 			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
+		return false
 	}
 
 	edgeCtx, cancel := context.WithTimeout(ctx, d.cfg.EdgeTimeout)
 	defer cancel()
-	d.svc.closeLeg(edgeCtx, leg, audience, arrived)
+	if !d.svc.closeLeg(edgeCtx, leg, audience, arrived) {
+		// EndLeg failed. The row is still open, so the next qualifying frame
+		// must be allowed to try again — see the note above.
+		return false
+	}
 	state.forgetLegRead()
+	return true
 }
 
 // updateLeg refreshes a running card mid-leg.

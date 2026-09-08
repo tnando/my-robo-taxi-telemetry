@@ -219,12 +219,15 @@ func (s *Service) startLegActivity(ctx context.Context, leg Leg, audience TripAu
 // else, its route was cleared, or the window closed underneath it — and they
 // are deliberately not distinguished. What the surfaces need to know is whether
 // the car REACHED the place it said it was going, and all three answers are no.
-func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, arrived bool) {
+//
+// IT REPORTS WHETHER THE ROW ACTUALLY CLOSED, because the detector's per-car
+// memory of this ending must not be written until it did — see closeLegNow.
+func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, arrived bool) bool {
 	at := s.now()
 	if err := s.legs.EndLeg(ctx, leg.ID, at, arrived); err != nil {
 		s.logger.Error("trips: closing a leg failed; its card may be stranded",
 			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
+		return false
 	}
 
 	status := tripStatusCompleted
@@ -243,6 +246,7 @@ func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, 
 		slog.String("status", status),
 		slog.Duration("duration", at.Sub(leg.StartedAt)),
 	)
+	return true
 }
 
 // endLegActivity delivers the alerting update and the `end`.

@@ -2,6 +2,7 @@ package trips
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -479,5 +480,122 @@ func TestAClearOnArrivalStillArrives(t *testing.T) {
 	}
 	if got := activities.ends[0].Status; got != tripStatusArrived {
 		t.Errorf("final card status = %q, want %q", got, tripStatusArrived)
+	}
+}
+
+// A DEFERRED EDGE MUST STILL BE RE-OBSERVABLE (MYR-612 review).
+//
+// Every closing condition in decide is a STATE — "stopped at the destination
+// for the dwell", "the route has been gone for the grace" — deliberately, so a
+// failed database read at the edge costs a few seconds rather than the ending.
+// That only holds if nothing is FORGOTTEN on the way out. Both callers of
+// closeLegNow used to write their per-car memory of having acted BEFORE the
+// close: the arrival latch, and confirmClear's wipe of the whole pending clear.
+// A failed audience read then destroyed the evidence of the very edge it was
+// deferring, and no later frame could produce it again — the leg stayed open
+// with a card on every lock screen until the window itself lapsed.
+
+// TestAFailedArrivalCloseIsRetried: the audience read fails on the frame that
+// completes the dwell, and the NEXT qualifying frame still arrives.
+func TestAFailedArrivalCloseIsRetried(t *testing.T) {
+	d, trips, legs, pusher, activities := newTestDetector(t)
+
+	feed(d, []frame{
+		{0, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(sedona),
+			string(telemetry.FieldGear):            gear("D"),
+			string(telemetry.FieldSpeed):           speed(30),
+			string(telemetry.FieldMilesToArrival):  speed(2),
+		}},
+		{100, map[string]events.TelemetryValue{
+			string(telemetry.FieldGear):           gear("P"),
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+	})
+
+	// The dwell completes while the trips table cannot be read.
+	trips.audErr = errors.New("pool timeout")
+	feed(d, []frame{
+		{125, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+	})
+	open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 1 {
+		t.Fatalf("open legs = %d, want 1 — a failed audience read defers the edge", len(open))
+	}
+
+	// The database comes back. The arrival is still true of the car, so the
+	// next frame must close the leg AS ARRIVED.
+	trips.audErr = nil
+	feed(d, []frame{
+		{130, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed):          speed(0),
+			string(telemetry.FieldMilesToArrival): speed(0.01),
+		}},
+	})
+
+	open, _ = legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 0 {
+		t.Fatalf("open legs = %d, want 0 — the latch outlived the failed close", len(open))
+	}
+	var arrived bool
+	for _, e := range pusher.events() {
+		if e == push.TripEventLegArrived {
+			arrived = true
+		}
+	}
+	if !arrived {
+		t.Errorf("no trip_leg_arrived push: %v", pusher.events())
+	}
+	if len(activities.ends) != 1 {
+		t.Fatalf("cards ended = %d, want 1", len(activities.ends))
+	}
+	if got := activities.ends[0].Status; got != tripStatusArrived {
+		t.Errorf("final card status = %q, want %q", got, tripStatusArrived)
+	}
+}
+
+// TestAFailedClearCloseIsRetried: the same shape on the clear branch, where the
+// forgotten evidence is the pending clear itself.
+func TestAFailedClearCloseIsRetried(t *testing.T) {
+	d, trips, legs, _, activities := newTestDetector(t)
+	grace := int(d.cfg.LegClearGrace.Seconds())
+
+	feed(d, []frame{underway()})
+
+	trips.audErr = errors.New("pool timeout")
+	feed(d, []frame{
+		{230, map[string]events.TelemetryValue{
+			string(telemetry.FieldDestinationName): dest(""),
+			string(telemetry.FieldSpeed):           speed(60),
+		}},
+		{230 + grace + 1, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed): speed(60),
+		}},
+	})
+	open, _ := legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 1 {
+		t.Fatalf("open legs = %d, want 1 — a failed audience read defers the edge", len(open))
+	}
+
+	trips.audErr = nil
+	feed(d, []frame{
+		{230 + grace + 6, map[string]events.TelemetryValue{
+			string(telemetry.FieldSpeed): speed(60),
+		}},
+	})
+
+	open, _ = legs.OpenLegsForTrip(context.Background(), testTrip)
+	if len(open) != 0 {
+		t.Fatalf("open legs = %d, want 0 — confirmClear wiped the pending clear before it closed", len(open))
+	}
+	if len(activities.ends) != 1 {
+		t.Fatalf("cards ended = %d, want 1", len(activities.ends))
+	}
+	if got := activities.ends[0].Status; got != tripStatusCompleted {
+		t.Errorf("final card status = %q, want %q", got, tripStatusCompleted)
 	}
 }
