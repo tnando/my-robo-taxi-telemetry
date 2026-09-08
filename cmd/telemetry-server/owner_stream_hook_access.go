@@ -67,14 +67,32 @@ type accessSetNarrower interface {
 // ownerStreamAccess is the access-set seam handed to the provisioning hook.
 //
 // One struct rather than three parameters because the three are always wired
-// together and always from the same two objects, and because a hook that had
-// the widener but not the invalidator would be the one combination that is
-// actively wrong: it would provoke a reconnect that re-read the stale cached
-// set and came back WITHOUT the car — a fix that looks like it ran.
+// together and always from the same two objects.
 //
-// Every field is optional. All three nil is the pre-MYR-601 behavior (the car
-// appears at the TTL lapse or the 60-second revalidation sweep), which is what
-// dev mode and every test that wires no bus get.
+// EVERY FIELD IS OPTIONAL, AND THE COMBINATIONS ARE NOT HYPOTHETICAL — this
+// comment previously described a wiring that does not exist, so here is the one
+// that does (main.go, ownerStreamAccessFrom):
+//
+//   - PRODUCTION: all three set. The invalidator is the *auth.JWTAuthenticator
+//     that owns the access-set cache; the widener and narrower are the bus
+//     notifiers whose events the hub's dispatchers consume.
+//   - DEV MODE: the invalidator is nil and the widener and narrower are LIVE.
+//     The bus notifiers are wired unconditionally — they need nothing from the
+//     authenticator — while dev mode's NoopAuthenticator holds no cache to
+//     bust. That is not the dangerous combination it looks like: a dev client
+//     is authorized for every vehicle by the wildcard sentinel, so there is no
+//     cached answer that could come back stale and no car that could be
+//     missing from a re-handshake.
+//   - ALL THREE NIL: the pre-MYR-601 behavior — the car appears at the cache
+//     TTL lapse or at the 60-second revalidation sweep. This is what every test
+//     that wires no bus gets.
+//
+// THE COMBINATION TO AVOID is a live widener next to a REAL cache that is not
+// busted, which only a production deployment could produce: the widen provokes
+// a reconnect, and a handshake served from the stale set comes back WITHOUT the
+// car — a fix that looks like it ran. `ownerStreamAccessFrom` takes both from
+// the same deps, so the two cannot be wired apart by accident; nothing enforces
+// it beyond that.
 type ownerStreamAccess struct {
 	invalidator accessSetInvalidator
 	widener     accessSetWidener
