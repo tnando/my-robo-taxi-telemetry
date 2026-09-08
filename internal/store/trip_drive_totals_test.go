@@ -890,16 +890,19 @@ func TestTripEnergyTotalIsAllOrNothing(t *testing.T) {
 		assertTotals(t, view, 2, 60, 90)
 	})
 
-	t.Run("a stationary drive with no energy does not veto the window", func(t *testing.T) {
+	t.Run("a drive with no distance does not veto the window", func(t *testing.T) {
 		vehicleID, trip := newWindow(t)
 		seedDriveWithEnergy(t, "cdrv_e_c1", vehicleID, now.Add(-12*time.Hour), 40, 60, 12.5)
-		// distanceMiles = 0: nothing moved, so there was no energy to report
-		// and this row has no opinion about the window's total.
-		seedDriveWithStats(t, "cdrv_e_c2", vehicleID, now.Add(-6*time.Hour), 0, 1)
+		// distanceMiles = 0 with energyUsedKwh = 0 is the shape of a drive IN
+		// PROGRESS: the row is created at `drive.started` and its stats are not
+		// written until `drive.ended`, so the leg being driven right now looks
+		// exactly like this for its whole duration. Without the qualifier the
+		// car the trip is watching would blank its own efficiency tile.
+		seedDriveWithStats(t, "cdrv_e_c2", vehicleID, now.Add(-6*time.Hour), 0, 0)
 
 		got := energyOf(t, trip.ID, shareOwnerA)
 		if got == nil {
-			t.Fatal("totalEnergyKwh is nil; a stationary drive must not veto the total")
+			t.Fatal("totalEnergyKwh is nil; a drive with no distance must not veto the total")
 		}
 		if *got != 12.5 {
 			t.Errorf("totalEnergyKwh = %v, want 12.5", *got)

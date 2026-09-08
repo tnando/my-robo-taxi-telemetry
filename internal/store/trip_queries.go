@@ -344,10 +344,17 @@ WHERE t.id = $1`
 //
 // SO THE TOTAL IS ALL-OR-NOTHING OVER THE DRIVES THAT MOVED. If any drive in the
 // window covered distance and reported no energy, the whole total is NULL and
-// the client shows its "not reported" dash. `distanceMiles > 0` is the qualifier
-// because a stationary micro-drive has no energy to report and must not veto a
-// window; the same reasoning that lets `0` be a real total for a window whose
-// drives went nowhere.
+// the client shows its "not reported" dash.
+//
+// `distanceMiles > 0` IS THE QUALIFIER, AND ITS LIVE CASE IS THE DRIVE IN
+// PROGRESS. A Drive row is created at `drive.started` and its stats are written
+// at `drive.ended`, so an OPEN drive sits in the window with `distanceMiles` and
+// `energyUsedKwh` both at 0 for the whole of a leg — and without this qualifier
+// the car being driven right now would blank the efficiency tile on the very
+// trip that is watching it. It also spares the rows the micro-drive filter did
+// not reach and any stationary remnant, on the same reasoning that lets `0` be a
+// real total for a window whose drives went nowhere: a drive with no distance
+// had no energy to report, so it has no opinion about the window.
 //
 // THIS IS ALSO THE MIGRATION RULE, not only a correctness one. Every drive
 // recorded before this issue carries 0, so a trip window straddling the fix
