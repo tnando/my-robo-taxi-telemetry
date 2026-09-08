@@ -206,7 +206,8 @@ func (h *VehiclesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		h.logger.Warn("vehicles list: invalid token",
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := authFailure(err)
+		h.writeError(w, status, code, message)
 		return
 	}
 

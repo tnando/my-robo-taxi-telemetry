@@ -179,7 +179,19 @@ func (h *Hub) authenticateClient(ctx context.Context, client *Client, auth Authe
 
 	userID, err := auth.ValidateToken(authCtx, payload.Token)
 	if err != nil {
-		_ = sendError(authCtx, client.conn, wserrors.ErrCodeAuthFailed, "invalid token", cfg.WriteTimeout)
+		// THE TWO REFUSALS ARE DISTINGUISHED HERE FOR THE SAME REASON THE REST
+		// SURFACES DISTINGUISH THEM (MYR-612): `auth_failed` tells a client its
+		// credential is dead and a phone acts on that by discarding the
+		// session, while an existence probe that could not be ANSWERED — a pool
+		// wait, a cancelled peer sharing the singleflight slot — says nothing
+		// about the credential. The handshake is still refused either way; only
+		// whether reconnecting with the SAME token is worth trying changes.
+		code := wserrors.ErrCodeAuthFailed
+		message := "invalid token"
+		if authpkg.IsLookupFailure(err) {
+			code, message = wserrors.ErrCodeServiceUnavailable, "authentication is temporarily unavailable"
+		}
+		_ = sendError(authCtx, client.conn, code, message, cfg.WriteTimeout)
 		return fmt.Errorf("hub.authenticateClient: validate token: %w", err)
 	}
 

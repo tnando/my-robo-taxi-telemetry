@@ -139,7 +139,8 @@ func (h *VehicleSnapshotHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		h.logger.Warn("vehicle snapshot: invalid token",
 			slog.String("error", err.Error()),
 		)
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := authFailure(err)
+		h.writeError(w, status, code, message)
 		return
 	}
 

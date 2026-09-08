@@ -129,7 +129,8 @@ func (h *VehicleRideShareHandler) handle(w http.ResponseWriter, r *http.Request)
 	userID, err := h.auth.ValidateToken(ctx, token)
 	if err != nil {
 		h.logger.Warn("ride share: invalid token", slog.String("error", err.Error()))
-		h.writeError(w, http.StatusUnauthorized, wserrors.ErrCodeAuthFailed, "invalid or expired token")
+		status, code, message := authFailure(err)
+		h.writeError(w, status, code, message)
 		return
 	}
 
