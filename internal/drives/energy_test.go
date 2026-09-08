@@ -151,6 +151,20 @@ func TestDriveEnergy_Accumulates(t *testing.T) {
 			wantReported: true,
 		},
 		{
+			// The deliberate asymmetry named in observe(): a gain is bounded by
+			// what regen could return, a LOSS is not bounded at all. Whatever
+			// the pack lost across a two-hour hole in the stream — real driving,
+			// vampire drain, a pack-level re-estimate — is credited to the drive
+			// that was open across it.
+			name: "a large loss over a long gap is credited in full, unbounded",
+			seed: 60,
+			samples: []sample{
+				{kwh: 5, afterSecs: 7200},
+			},
+			wantKwh:      55,
+			wantReported: true,
+		},
+		{
 			name: "a gain over a non-positive interval is charging, never regen",
 			seed: 60,
 			samples: []sample{
@@ -386,6 +400,47 @@ func TestCalculateStats_EnergyDeltaComesFromTheAccumulator(t *testing.T) {
 
 		nearly(t, calculateStats(drive).EnergyDelta, 0, "EnergyDelta")
 	})
+}
+
+// TestDriveEnergy_GainAtExactlyTheAllowanceIsRegen pins the STRICT `>` in
+// observe's charging test, from both sides of the boundary.
+//
+// The numbers are chosen so the boundary is REACHABLE rather than approximated:
+// 70 kW across 45 seconds is 0.875 kWh, which is exact in binary floating point,
+// and 10.0 + 0.875 is exact too — so the gain observe() computes is bit-for-bit
+// the allowance regenAllowance() returns, and the comparison is genuinely the
+// equality case rather than something a rounding error either side of it.
+func TestDriveEnergy_GainAtExactlyTheAllowanceIsRegen(t *testing.T) {
+	base := time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)
+	at := base.Add(45 * time.Second)
+
+	var e driveEnergy
+	e.seed(10, base)
+	if got := e.regenAllowance(at); got != 0.875 {
+		t.Fatalf("regenAllowance = %v, want exactly 0.875 — the fixture's exactness depends on it", got)
+	}
+
+	// Exactly the allowance: credited, because the test is `-step > allowance`.
+	e.observe(10.875, at, "")
+	got, reported := e.total()
+	if !reported {
+		t.Fatal("a gain of exactly the allowance was not credited at all")
+	}
+	nearly(t, got, -0.875, "total")
+	if e.chargedInside {
+		t.Error("chargedInside = true; a gain AT the allowance is regen, not charging")
+	}
+
+	// One ulp more is charging: dropped, and the baseline rebased.
+	var over driveEnergy
+	over.seed(10, base)
+	over.observe(math.Nextafter(10.875, math.Inf(1)), at, "")
+	if _, reported := over.total(); reported {
+		t.Error("a gain one ulp beyond the allowance was credited; the bound is not strict")
+	}
+	if !over.chargedInside {
+		t.Error("chargedInside = false for a gain beyond the allowance")
+	}
 }
 
 // ── THE CADENCE MISMATCH THE REVIEW ROUND FOUND ─────────────────────────────

@@ -199,6 +199,23 @@ func (e *driveEnergy) observe(kwh float64, at time.Time, chargeState string) {
 		// reading (the car was stationary between samples) and counts as a
 		// credited step so a drive that idled still reports 0.0 rather than
 		// nothing.
+		//
+		// ⚠ THE LOSS SIDE IS UNBOUNDED AND THE GAIN SIDE IS NOT — a deliberate
+		// asymmetry, and the one place this accumulator can be fooled. A
+		// two-hour gap between samples (a connectivity drop, a sleeping car, a
+		// REST-backfill hole) credits whatever the pack lost across the whole
+		// gap, including vampire drain and any pack-level re-estimate, as
+		// consumption by this drive.
+		//
+		// IT IS ACCEPTED because no bound can be drawn that does not discard
+		// real data. There is no `chargeState` equivalent for "this loss was not
+		// driving", and a rate bound on consumption would have to sit above
+		// sustained highway draw (well past 70 kW on a Plaid at speed), which
+		// puts it above almost every drain scenario it would need to catch. The
+		// direction of the error also favours leaving it: an over-credited loss
+		// makes a drive look LESS efficient than it was, while an over-credited
+		// gain understates consumption outright — and the drive was open for
+		// that whole gap, so the time is being counted against it either way.
 		e.usedKwh += step
 		e.steps++
 	case isChargingState(chargeState) || -step > e.regenAllowance(at):
