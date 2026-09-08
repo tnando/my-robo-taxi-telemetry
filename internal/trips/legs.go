@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
-
-	"github.com/myrobotaxi/telemetry/internal/push"
 )
 
 // The leg lifecycle: what HAPPENS when a leg opens and closes, as against what
@@ -165,66 +163,6 @@ func (s *Service) windowStillOpen(ctx context.Context, tv TripVehicle) bool {
 	return false
 }
 
-// announceLegStarted fires `trip_leg_started` once per leg — and, since
-// MYR-620, at most once per (trip, destination) per LegBannerWindow.
-//
-// TO EVERYONE, owner included — unlike the three lifecycle pushes, which go to
-// participants only. The owner is on the leg card by explicit product decision,
-// and a card with no banner behind it would make the driving party the one
-// person in the feature who is never told anything.
-//
-// ⚠ THE PER-LEG CLAIM IS NOT ENOUGH ON ITS OWN, and the client's 2026-09-08
-// screenshot is the proof: ten of these banners in an hour, every one of them
-// correctly claimed, because the LEG flapped and each reopen was a new row. See
-// leg_banners.go. The recipients who hold a Live Activity for the trip are
-// filtered out further down, in internal/push, where the registry lives.
-func (s *Service) announceLegStarted(ctx context.Context, leg Leg, audience TripAudience) {
-	claimed, err := s.legs.ClaimLegStartedPush(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg-start push claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	if !s.legBannerAllowed(ctx, leg, push.TripEventLegStarted) {
-		return
-	}
-	s.notify(ctx, push.TripPush{
-		TripID:          leg.TripID,
-		VehicleID:       leg.VehicleID,
-		Event:           push.TripEventLegStarted,
-		LegID:           leg.ID,
-		DestinationName: leg.DestinationName,
-		UserIDs:         audience.everyone(),
-	})
-}
-
-// startLegActivity push-to-starts the card on every registered phone.
-//
-// A LEG WITH NO REGISTRATIONS IS NOT A FAILURE and is not retried: the claim is
-// taken whatever the fan-out finds. That is the "a leg that never got a token
-// registration still gets its pushes" rule from the other side — the banner has
-// already gone out, and re-attempting a push-to-start every frame for a trip
-// whose participants are all on the web would be an unbounded loop over an
-// empty set.
-func (s *Service) startLegActivity(ctx context.Context, leg Leg, audience TripAudience) {
-	if s.activities == nil {
-		return
-	}
-	claimed, err := s.legs.ClaimLegActivityStart(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg activity-start claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.activities.StartLeg(ctx, s.legContext(ctx, leg, audience, tripStatusEnroute, nil))
-}
-
 // closeLeg ends a leg: records the verdict, fires `trip_leg_arrived` when there
 // was evidence, and ends the card.
 //
@@ -267,83 +205,6 @@ func (s *Service) closeLeg(ctx context.Context, leg Leg, audience TripAudience, 
 	return true
 }
 
-// endLegActivity delivers the alerting update and the `end`.
-func (s *Service) endLegActivity(ctx context.Context, leg Leg, audience TripAudience, status string, at time.Time) {
-	if s.activities == nil {
-		return
-	}
-	claimed, err := s.legs.ClaimLegActivityEnd(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg activity-end claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	s.activities.EndLeg(ctx, s.legContext(ctx, leg, audience, status, &at))
-}
-
-// announceLegArrived fires `trip_leg_arrived`, ONLY on evidence — and under
-// the same (trip, destination) window the departure banner is under (MYR-620).
-//
-// ITS OWN SLOT, keyed on the event, because a departure and an arrival are
-// different sentences about the same journey and the second reports the
-// outcome. Suppressing an arrival because a departure went out ten minutes ago
-// would delete the half of the story worth keeping.
-func (s *Service) announceLegArrived(ctx context.Context, leg Leg, audience TripAudience) {
-	claimed, err := s.legs.ClaimLegArrivedPush(ctx, leg.ID)
-	if err != nil {
-		s.logger.Warn("trips: leg-arrival push claim failed",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-	if !claimed {
-		return
-	}
-	if !s.legBannerAllowed(ctx, leg, push.TripEventLegArrived) {
-		return
-	}
-	s.notify(ctx, push.TripPush{
-		TripID:          leg.TripID,
-		VehicleID:       leg.VehicleID,
-		Event:           push.TripEventLegArrived,
-		LegID:           leg.ID,
-		DestinationName: leg.DestinationName,
-		UserIDs:         audience.everyone(),
-	})
-}
-
-// legContext assembles the card's content-state inputs.
-//
-// The ETA is NOT carried here and is nil on every call. The card gets its
-// arrival time from the ticker path (updateLeg), which reads it from the frame
-// that prompted the update; a start or an end is triggered by a TRANSITION, and
-// the honest answer at either instant is that we have not computed one — an
-// absent `eta` renders a card with no time rather than one with a wrong time,
-// which is MYR-194's rule about never inventing a number.
-func (s *Service) legContext(
-	ctx context.Context,
-	leg Leg,
-	audience TripAudience,
-	status string,
-	asOf *time.Time,
-) push.TripLegContext {
-	tc := push.TripLegContext{
-		LegID:       leg.ID,
-		TripID:      leg.TripID,
-		VehicleID:   leg.VehicleID,
-		TripName:    s.tripName(ctx, leg.TripID),
-		VehicleName: s.vehicleName(ctx, audience.VehicleID),
-		Destination: leg.DestinationName,
-		Status:      status,
-	}
-	if asOf != nil {
-		tc.AsOf = *asOf
-	}
-	return tc
-}
-
 // The three status values a leg's card carries. Mirrors the unexported
 // constants in internal/push; stated here too because this package decides
 // WHICH one applies and the contract's reasoning (a leg only ever sends these
@@ -353,56 +214,3 @@ const (
 	tripStatusArrived   = "arrived"
 	tripStatusCompleted = "completed"
 )
-
-// CatchUpLegActivity raises the card for a leg that is ALREADY UNDER WAY, for
-// the one person who has just registered a push-to-start token.
-//
-// ⚠ THIS IS THE FIX FOR "NO CARD FOR ANYBODY, EVER" (MYR-612). A leg's Live
-// Activity is push-to-start, and the fan-out runs ONCE, at the instant the leg
-// opens, over whatever tokens are registered then. Registering is what a phone
-// does when the `trip_leg_started` push wakes it — which is necessarily AFTER
-// the leg opened. On 2026-09-08 the only participant's token was written at
-// 03:40:27 for a leg that opened at 03:40:24, three seconds too late; the trip
-// ran for the rest of the evening with `go_live_activities` empty.
-//
-// So the registration itself is now an occasion to send. It is safe to call on
-// every registration, including the overwhelming majority that arrive with no
-// leg open: the store's per-(device, leg) claim is the idempotency, and a trip
-// with no open leg reads one row and sends nothing.
-//
-// BEST-EFFORT BY CONSTRUCTION. It returns nothing, because it is called after
-// the registration has committed and there is no failure the caller could act
-// on — the token is stored either way, and the next leg's fan-out will use it.
-func (s *Service) CatchUpLegActivity(ctx context.Context, tripID, userID string) {
-	if s.activities == nil || tripID == "" || userID == "" {
-		return
-	}
-	legs, err := s.legs.OpenLegsForTrip(ctx, tripID)
-	if err != nil {
-		s.logger.Warn("trips: catch-up open-leg lookup failed",
-			slog.String("trip_id", tripID), slog.String("error", err.Error()))
-		return
-	}
-	if len(legs) == 0 {
-		// The ordinary case: a trip whose car is parked, or between legs.
-		return
-	}
-	// At most one — the partial unique index says so — but taken as a list
-	// because the teardown path must handle whatever it finds rather than
-	// assume the invariant it is cleaning up after.
-	leg := legs[0]
-
-	audience, err := s.trips.TripAudienceFor(ctx, tripID)
-	if err != nil {
-		s.logger.Warn("trips: catch-up audience lookup failed; no card raised",
-			slog.String("leg_id", leg.ID), slog.String("error", err.Error()))
-		return
-	}
-
-	// THE CONTENT STATE CARRIES NO ETA, exactly as the leg-open fan-out's does
-	// and for the same reason: this instant is a REGISTRATION, not a frame, and
-	// the honest answer here is that we have not computed one. The next frame
-	// that earns a card refresh puts a time on it, and an absent `eta` renders
-	// a card with no time rather than one with a wrong time — MYR-194's rule.
-	s.activities.StartLegForUser(ctx, s.legContext(ctx, leg, audience, tripStatusEnroute, nil), userID)
-}

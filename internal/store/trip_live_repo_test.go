@@ -318,9 +318,11 @@ func TestPushToStartTokens_UpsertAndReject(t *testing.T) {
 		t.Fatalf("re-register: %v", err)
 	}
 
-	tokens, err := repo.PushToStartTokensForTrip(ctx, tripID)
+	// The fan-out claim IS the read now (MYR-612 review): one statement that
+	// stamps the leg on every admitted device and returns what it stamped.
+	tokens, err := repo.ClaimPushToStartForLegAll(ctx, tripID, "cleg0602tok")
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("claim fan-out: %v", err)
 	}
 	if len(tokens) != 1 {
 		t.Fatalf("%d rows after a rotation, want 1 — keying on the token would accumulate "+
@@ -333,9 +335,11 @@ func TestPushToStartTokens_UpsertAndReject(t *testing.T) {
 	if err := repo.DeleteRejectedPushToStartToken(ctx, "pts-v2"); err != nil {
 		t.Fatalf("delete rejected: %v", err)
 	}
-	tokens, err = repo.PushToStartTokensForTrip(ctx, tripID)
+	// A NEW leg, so the claim is not refused by the previous stamp — what must
+	// be gone is the ROW.
+	tokens, err = repo.ClaimPushToStartForLegAll(ctx, tripID, "cleg0602tok2")
 	if err != nil {
-		t.Fatalf("list after delete: %v", err)
+		t.Fatalf("claim after delete: %v", err)
 	}
 	if len(tokens) != 0 {
 		t.Errorf("%d rows survived the 410; the app is gone and the token addresses nothing",
@@ -678,11 +682,11 @@ func TestTripAudienceFor_SurvivesAnAllSuspendedRoster(t *testing.T) {
 	}
 }
 
-// TestPushToStartTokensForTrip_DropsDepartedAndSuspended pins the fan-out's own
+// TestClaimPushToStartForLegAll_DropsDepartedAndSuspended pins the fan-out's own
 // access predicate. A push-to-start token is a standing CAPABILITY on a phone
 // and nothing deletes it when a participant leaves or their share is suspended,
 // so the list has to ask.
-func TestPushToStartTokensForTrip_DropsDepartedAndSuspended(t *testing.T) {
+func TestClaimPushToStartForLegAll_DropsDepartedAndSuspended(t *testing.T) {
 	if !dockerAvailable {
 		t.Skip("docker unavailable; skipping store integration test")
 	}
@@ -737,9 +741,9 @@ func TestPushToStartTokensForTrip_DropsDepartedAndSuspended(t *testing.T) {
 	}
 
 	repo := store.NewTripActivityTokenRepo(testPool, nil)
-	rows, err := repo.PushToStartTokensForTrip(ctx, tripID)
+	rows, err := repo.ClaimPushToStartForLegAll(ctx, tripID, "cleg0602ptsfan")
 	if err != nil {
-		t.Fatalf("PushToStartTokensForTrip: %v", err)
+		t.Fatalf("ClaimPushToStartForLegAll: %v", err)
 	}
 	got := make(map[string]bool, len(rows))
 	for _, r := range rows {

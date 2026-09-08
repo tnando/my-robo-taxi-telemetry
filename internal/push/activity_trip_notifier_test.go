@@ -30,13 +30,35 @@ type fakeTripActivityStore struct {
 	claimCalls int
 }
 
-func (f *fakeTripActivityStore) PushToStartTokensForTrip(_ context.Context, _ string) ([]ActivityStartToken, error) {
+// ClaimPushToStartForLegAll models the one-statement fan-out: it claims every
+// registration this leg has not been sent to and returns exactly those. Written
+// on top of the same `claims` map the per-device claim uses, so the two cannot
+// disagree about who has already been sent.
+func (f *fakeTripActivityStore) ClaimPushToStartForLegAll(
+	_ context.Context, tripID, legID string,
+) ([]ActivityStartToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.tokensErr != nil {
 		return nil, f.tokensErr
 	}
-	return append([]ActivityStartToken(nil), f.tokens...), nil
+	if f.claimErr != nil {
+		return nil, f.claimErr
+	}
+	if f.claims == nil {
+		f.claims = map[string]string{}
+	}
+	var out []ActivityStartToken
+	for _, tok := range f.tokens {
+		f.claimCalls++
+		key := tripID + "/" + tok.UserID
+		if f.claims[key] == legID {
+			continue
+		}
+		f.claims[key] = legID
+		out = append(out, tok)
+	}
+	return out, nil
 }
 
 func (f *fakeTripActivityStore) ClaimPushToStartForLeg(

@@ -30,12 +30,15 @@ type tripActivityStoreAdapter struct {
 	activities *store.LiveActivityRepo
 }
 
-func (a *tripActivityStoreAdapter) PushToStartTokensForTrip(
-	ctx context.Context, tripID string,
+// ClaimPushToStartForLegAll is the leg-open fan-out's whole database cost: one
+// statement that claims the leg on every registered device and returns what it
+// stamped (MYR-612 review).
+func (a *tripActivityStoreAdapter) ClaimPushToStartForLegAll(
+	ctx context.Context, tripID, legID string,
 ) ([]push.ActivityStartToken, error) {
-	rows, err := a.tokens.PushToStartTokensForTrip(ctx, tripID)
+	rows, err := a.tokens.ClaimPushToStartForLegAll(ctx, tripID, legID)
 	if err != nil {
-		return nil, fmt.Errorf("trips: list push-to-start tokens: %w", err)
+		return nil, fmt.Errorf("trips: claim push-to-start fan-out: %w", err)
 	}
 	out := make([]push.ActivityStartToken, 0, len(rows))
 	for _, row := range rows {

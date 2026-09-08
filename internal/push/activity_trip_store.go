@@ -15,9 +15,17 @@ import "context"
 // needs. Declared here at the consumer site, like ActivityStore beside it, so
 // internal/push keeps its independence from internal/store.
 type TripActivityStore interface {
-	// PushToStartTokensForTrip lists the trip's push-to-start registrations —
-	// participants and the owner. An empty result is ordinary.
-	PushToStartTokensForTrip(ctx context.Context, tripID string) ([]ActivityStartToken, error)
+	// ClaimPushToStartForLegAll claims the leg's push-to-start on EVERY
+	// registered device of the trip — participants and the owner — in ONE
+	// statement, and returns what it stamped. An empty result is ordinary.
+	//
+	// ⚠ IT REPLACES A LIST-THEN-CLAIM-EACH (MYR-612 review). The fan-out used
+	// to list the registrations and then claim once per row, which re-ran the
+	// same membership predicate N further times and discarded the P1 tokens
+	// the list had already loaded — only a claim's own RETURNING is safe
+	// against a rotation between the two. The tokens this hands back are the
+	// ones it stamped.
+	ClaimPushToStartForLegAll(ctx context.Context, tripID, legID string) ([]ActivityStartToken, error)
 	// ClaimPushToStartForLeg claims ONE device's push-to-start for ONE leg and
 	// returns the token to send (MYR-612).
 	//
