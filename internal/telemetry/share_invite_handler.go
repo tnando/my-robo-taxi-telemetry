@@ -148,7 +148,7 @@ func (h *ShareInviteHandler) ServeCreate(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
-	if !h.driverAccessAllows(w, vehicle, vehicleID, userID) {
+	if !h.driverAccessAllows(w, vehicle, vehicleID, userID, "share invite create") {
 		return
 	}
 
@@ -302,13 +302,20 @@ func (h *ShareInviteHandler) authOwner(
 // 409, matching the reconnect, fleet-config and command refusals: nothing
 // failed, the caller is not forbidden, and §7.29 is the specific thing that
 // changes the answer.
+//
+// `surface` NAMES THE ROUTE THAT WAS REFUSED, and it is a parameter rather than
+// a constant because MYR-609 gave the gate a SECOND caller. A hard-coded
+// "create" would have made every extend refusal log a line about a route the
+// caller never called — cosmetic on one line, and wrong on the grep an operator
+// runs to count how often each surface is being blocked. The `event` slug stays
+// one value across both, so the class is still countable as a whole.
 func (h *ShareInviteHandler) driverAccessAllows(
-	w http.ResponseWriter, row VehicleSnapshotRow, vehicleID, userID string,
+	w http.ResponseWriter, row VehicleSnapshotRow, vehicleID, userID, surface string,
 ) bool {
 	if !row.DriverAccess.PendingAcknowledgment() {
 		return true
 	}
-	h.logger.Info("share invite create: refused, driver-access car awaiting the owner-approval acknowledgment",
+	h.logger.Info(surface+": refused, driver-access car awaiting the owner-approval acknowledgment",
 		slog.String("event", "share_invite_awaiting_owner_ack"),
 		slog.String("vehicle_id", vehicleID),
 		slog.String("user_id", userID),

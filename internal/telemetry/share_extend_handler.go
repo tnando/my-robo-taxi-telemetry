@@ -81,7 +81,7 @@ func (h *ShareInviteHandler) ServeExtend(w http.ResponseWriter, r *http.Request)
 	// third party standing access to a car whose owner has not yet been
 	// recorded as agreeing it belongs here. A route that skipped this would be
 	// a way around §7.29 that the create path closes.
-	if !h.driverAccessAllows(w, vehicle, vehicleID, userID) {
+	if !h.driverAccessAllows(w, vehicle, vehicleID, userID, "share extend") {
 		return
 	}
 
