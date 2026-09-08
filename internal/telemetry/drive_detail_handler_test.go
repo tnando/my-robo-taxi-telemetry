@@ -33,9 +33,11 @@ func (s *stubDriveDetailFetcher) GetDriveDetail(_ context.Context, _ string) (Dr
 // docs/contracts/fixtures/rest/drive_detail.json shape.
 func fixtureDriveDetail(driveID string) DriveDetailData {
 	return DriveDetailData{
-		ID:               driveID,
-		VehicleID:        fixtureSnapshotRowID,
-		StartTime:        "2026-04-13T18:22:00Z",
+		DriveAccessFacts: DriveAccessFacts{
+			DriveID:   driveID,
+			VehicleID: fixtureSnapshotRowID,
+			StartTime: fixtureDriveStart,
+		},
 		EndTime:          "2026-04-13T18:46:18Z",
 		Date:             "2026-04-13",
 		DistanceMiles:    12.4,

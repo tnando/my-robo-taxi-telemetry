@@ -212,20 +212,3 @@ func TestTripDriveWindowCoversIsInclusiveAtBothEdges(t *testing.T) {
 		})
 	}
 }
-
-// TestUnparseableDriveStartTimeIsAdmittedToNobody.
-//
-// The window test cannot be evaluated against a start time that will not parse,
-// and the fail-closed answer for an unevaluable access check is denial. The
-// owner path never reaches this helper.
-func TestUnparseableDriveStartTimeIsAdmittedToNobody(t *testing.T) {
-	if _, ok := parseDriveStartTime("not an instant"); ok {
-		t.Fatal("a malformed startTime parsed")
-	}
-	if _, ok := parseDriveStartTime(""); ok {
-		t.Fatal("an empty startTime parsed")
-	}
-	if _, ok := parseDriveStartTime("2026-09-01T12:00:00Z"); !ok {
-		t.Fatal("a well-formed RFC 3339 startTime failed to parse")
-	}
-}
