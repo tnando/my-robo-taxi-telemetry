@@ -61,10 +61,7 @@ func runFleetConfigRepush(ctx context.Context, opts repushOptions) error {
 		return err
 	}
 
-	deps, err := buildRepushDeps(db, accountRepo, logger, operator, proxyURL, endpoint)
-	if err != nil {
-		return err
-	}
+	deps := buildRepushDeps(db, accountRepo, logger, operator, proxyURL, endpoint)
 
 	report, runErr := fleetrepush.New(deps, fleetrepush.Config{
 		Apply: opts.apply,
@@ -101,7 +98,7 @@ func buildRepushDeps(
 	logger *slog.Logger,
 	operator, proxyURL string,
 	endpoint telemetry.EndpointConfig,
-) (fleetrepush.Deps, error) {
+) fleetrepush.Deps {
 	reader := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
 		BaseURL: os.Getenv("FLEET_API_BASE_URL"), // empty => default NA Fleet API
 	}, logger.With(slog.String("subcomponent", "fleet-read")))
@@ -124,7 +121,7 @@ func buildRepushDeps(
 			auditor:  newOperatorAuditor(db),
 			operator: operator,
 		},
-	}, nil
+	}
 }
 
 // registerRepushFlags adds the sweep's flags to the `fleet-config push` flag

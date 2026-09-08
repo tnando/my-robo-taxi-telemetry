@@ -95,21 +95,8 @@ func (s *Sweep) sweepOne(ctx context.Context, c Candidate) (VehicleReport, error
 		VehicleName: c.VehicleName,
 		LastUpdated: c.LastUpdated,
 	}
-	switch {
-	case c.PendingOwnerAck:
-		// Defence in depth: the candidate query already excludes these
-		// (MYR-599 consent-wins). Enforced again at the consumer site so a
-		// future producer inherits the gate instead of re-opening it.
-		return s.skip(line, ReasonAwaitingOwnerAck), nil
-	case c.Suspended:
-		// MYR-592 removed this car's config on purpose, for cost. Re-pushing
-		// would silently reverse that and start the bill again; the owner's
-		// §7.28 reconnect is the only thing that may.
-		return s.skip(line, ReasonOwnerSuspended), nil
-	case c.ConfigAbsent:
-		// The last push did not take. There is nothing to refresh and the
-		// MYR-448 reconciler already owns the retry.
-		return s.skip(line, ReasonConfigAbsent), nil
+	if reason, refused := rowRefusal(c); refused {
+		return s.skip(line, reason), nil
 	}
 
 	if err := s.audit(ctx, c.UserID); err != nil {
@@ -176,6 +163,31 @@ func (s *Sweep) sweepOne(ctx context.Context, c Candidate) (VehicleReport, error
 	return line, nil
 }
 
+// rowRefusal answers the three refusals that are decidable from the candidate
+// row alone, in the order they cost nothing to check.
+//
+// Kept out of sweepOne so the sweep reads as "refuse, authorize, read, push"
+// rather than as a wall of guards — the parseFleetConfigPushInput precedent.
+func rowRefusal(c Candidate) (reason string, refused bool) {
+	switch {
+	case c.PendingOwnerAck:
+		// Defence in depth: the candidate query already excludes these
+		// (MYR-599 consent-wins). Enforced again at the consumer site so a
+		// future producer inherits the gate instead of re-opening it.
+		return ReasonAwaitingOwnerAck, true
+	case c.Suspended:
+		// MYR-592 removed this car's config on purpose, for cost. Re-pushing
+		// would silently reverse that and start the bill again; the owner's
+		// §7.28 reconnect is the only thing that may.
+		return ReasonOwnerSuspended, true
+	case c.ConfigAbsent:
+		// The last push did not take. There is nothing to refresh and the
+		// MYR-448 reconciler already owns the retry.
+		return ReasonConfigAbsent, true
+	}
+	return "", false
+}
+
 // audit writes the owner's MYR-447 decrypt row once per run, before the token
 // is read. A failure aborts the run: an unattributable decrypt is exactly what
 // the audit exists to prevent, and continuing would produce more of them.
@@ -200,12 +212,12 @@ func (s *Sweep) pace(ctx context.Context) error {
 	if s.teslaCalls > 0 && interval > 0 {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("rate limit wait: %w", ctx.Err())
 		case <-time.After(interval):
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return fmt.Errorf("sweep cancelled: %w", err)
 	}
 	s.teslaCalls++
 	return nil
