@@ -159,6 +159,30 @@ const (
 	// DOTTED, like `vehicle.owner_approval_acknowledged`: it reads as a
 	// trip-scoped sub-action rather than as a platform lifecycle verb.
 	AuditActionTripDeleted AuditAction = "trip.deleted"
+
+	// AuditActionTripParticipantAdded records that somebody was put on an
+	// EXISTING trip (MYR-618, rest-api.md §7.30.4).
+	//
+	// IT EXISTS BECAUSE THE ACTOR IS NO LONGER CONSTANT. Before MYR-618 only
+	// the owner could widen a roster, so "who let this person see my car"
+	// answered itself. Now a live participant can, and the act therefore needs
+	// a record with a subject: `userId` is the ACTOR — owner or participant —
+	// and it is the whole reason the row is worth writing.
+	//
+	// Written inside the roster transaction, one row PER PERSON ACTUALLY ADDED
+	// (a re-add of somebody already on the trip is a no-op and writes nothing),
+	// and never on CREATE: a trip's initial roster is part of the act of
+	// creating it, and the attribution for those rows is the trip's own owner
+	// column. `targetType='trip'`, `targetId`=the trip's cuid,
+	// `initiator='user'`, `metadata={vehicleId, shareId}` — THREE OPAQUE CUIDS
+	// ACROSS THE WHOLE ROW AND NOTHING ELSE (CG-DL-5).
+	//
+	// ⚠ THE ADDED PERSON'S USER ID IS DELIBERATELY NOT IN THE METADATA. The
+	// share id already names them to anybody who can read the vehicle's grants,
+	// which is the population that may legitimately ask this question, and a
+	// user id would be a durable cross-surface identifier for a third party who
+	// is not the subject of the row.
+	AuditActionTripParticipantAdded AuditAction = "trip.participant_added"
 )
 
 // AuditLog targetType / initiator enum values used by Go-emitted rows

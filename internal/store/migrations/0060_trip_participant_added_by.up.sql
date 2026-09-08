@@ -1,0 +1,51 @@
+-- 0060_trip_participant_added_by.up.sql
+--
+-- MYR-618: a LIVE PARTICIPANT may add somebody to a trip, provided that person
+-- already holds an accepted, unsuspended grant on the trip's vehicle.
+--
+-- ── WHY A COLUMN AT ALL ─────────────────────────────────────────────────────
+--
+-- Until now every roster row on a trip was put there by ONE person — the
+-- owner — so "who added this person" had a constant answer and needed no
+-- storage. MYR-618 makes the answer variable, and the owner's trip sheet is
+-- required to say it ("Added by Amruth"). The audit row `trip.participant_added`
+-- records the ACT; this column records the resulting STATE, and the two are not
+-- substitutes: an audit log is append-only history read by an operator, while a
+-- roster row is read on every trip card and must answer without a join to a
+-- table that is pruned on a retention schedule.
+--
+-- ── NULLABLE, DELIBERATELY, AND NOT BACKFILLED ──────────────────────────────
+--
+-- Every row written before this migration was written by the trip's owner, so a
+-- backfill to `owner_user_id` would be CORRECT — and it would also be a claim
+-- this table cannot support: it would record, indistinguishably from a real
+-- observation, that somebody performed an act nobody observed them performing.
+-- NULL is the honest spelling of "this predates the question", it renders as an
+-- ABSENT `addedByName` on §7.30.3 (which the contract already permits), and the
+-- iOS roster row falls back to showing no attribution at all — which is exactly
+-- what every trip looked like before this change.
+--
+-- The column is therefore additive in the strictest sense: no default, no
+-- backfill, no rewrite of the heap, and every statement that reads the roster
+-- keeps working against a row that has never heard of it.
+--
+-- ── CG-DL-9: NO PRISMA TABLES, NO FOREIGN KEY ───────────────────────────────
+--
+-- `added_by_user_id` holds a Prisma cuid, exactly as the sibling `user_id` on
+-- this same table does, and carries no foreign key for the same reason
+-- migration 0047 gives: a file under internal/store/migrations/ may not NAME a
+-- Prisma-owned relation. The account-deletion sequence reaches these rows
+-- explicitly (step 8g deletes the person's own memberships and their trips);
+-- a row that names a DELETED account as its adder resolves to a NULL name
+-- through the confirmed-name ladder, which is the same absent spelling a
+-- pre-migration row gets.
+--
+-- ── CLASSIFICATION ──────────────────────────────────────────────────────────
+--
+-- P0. An opaque cuid, beside two others on the same row. The NAME it resolves
+-- to is P1 and is never stored here — it is walked at read time through the
+-- same three-rung confirmed-name ladder as `ownerFirstName`, so a person who
+-- has not been through the naming prompt has no name on this surface either.
+
+ALTER TABLE go_trip_participants
+    ADD COLUMN IF NOT EXISTS added_by_user_id TEXT;

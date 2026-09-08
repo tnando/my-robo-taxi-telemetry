@@ -124,6 +124,10 @@ func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
 	gated := map[string]struct{ sql, probe string }{
 		"ownerNameLadderExpr": {ownerNameLadderExpr, ownerNameConfirmedExpr},
 		"acceptedByNameExpr":  {acceptedByNameExpr, acceptedByNameConfirmedExpr},
+		// MYR-618's fourth ladder: the name of whoever ADDED a roster entry to a
+		// trip. Same counterparty argument as its neighbour — a name shown to
+		// people who are not its owner — so it gets the same gate.
+		"addedByNameExpr": {addedByNameExpr, addedByNameConfirmedExpr},
 	}
 	for name, g := range gated {
 		t.Run(name+" carries the confirmation probe", func(t *testing.T) {
@@ -170,11 +174,12 @@ func TestConfirmationGateIsSharedAndScoped(t *testing.T) {
 // TestEveryNameLadderTrimsEveryRung is the CROSS-LADDER invariant, and it is the
 // one assertion in this file that spans files.
 //
-// The platform resolves "what is this person called?" through four sibling SQL
+// The platform resolves "what is this person called?" through five sibling SQL
 // ladders — this package's `ownerNameLadderExpr` (the vehicle catalog + the
 // offerability gate), `acceptedByNameExpr` (the share listing),
-// `requesterIdentitySelect` (the ride surfaces) and `queryOwnerFirstNameSources`
-// (the redeem screen and the push copy). They cannot yet be ONE constant: each
+// `requesterIdentitySelect` (the ride surfaces), `queryOwnerFirstNameSources`
+// (the redeem screen and the push copy) and `addedByNameExpr` (MYR-618's trip
+// roster attribution). They cannot yet be ONE constant: each
 // keys its subselects on a different column, and the statements that embed them
 // are `const`, so a key-parameterized helper would force them all to `var`.
 //
@@ -190,6 +195,7 @@ func TestEveryNameLadderTrimsEveryRung(t *testing.T) {
 		"acceptedByNameExpr":         acceptedByNameExpr,
 		"requesterIdentitySelect":    requesterIdentitySelect,
 		"queryOwnerFirstNameSources": queryOwnerFirstNameSources,
+		"addedByNameExpr":            addedByNameExpr,
 	}
 	for name, sql := range ladders {
 		t.Run(name, func(t *testing.T) {

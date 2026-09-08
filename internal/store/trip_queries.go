@@ -107,11 +107,92 @@ WHERE vehicle_id = $1
 // left. `left_at = NULL` in the DO UPDATE is the revival; `added_at` is
 // deliberately NOT refreshed, because it answers "when did this person first
 // join this trip" and a re-add should not erase that.
+//
+// `added_by_user_id` ($4) is the ACTOR — the owner, or since MYR-618 a live
+// participant. THE DO UPDATE ARM PRESERVES IT WHEN THE ROW IS ALREADY LIVE and
+// overwrites it only on a genuine revival, and the asymmetry is the whole
+// attribution rule: re-sending somebody who is already on the trip is a no-op
+// (§7.30.4), so it must not be able to rewrite who put them there — otherwise
+// any participant could claim credit for the owner's own additions by adding
+// them a second time. `go_trip_participants.left_at` inside DO UPDATE is the
+// EXISTING row's value, which is what makes that distinction expressible.
 const queryUpsertTripParticipant = `
-INSERT INTO go_trip_participants (trip_id, user_id, share_id)
-VALUES ($1, $2, $3)
+INSERT INTO go_trip_participants (trip_id, user_id, share_id, added_by_user_id)
+VALUES ($1, $2, $3, $4)
 ON CONFLICT (trip_id, user_id) DO UPDATE
-SET left_at = NULL, share_id = EXCLUDED.share_id`
+SET left_at = NULL,
+    share_id = EXCLUDED.share_id,
+    added_by_user_id = CASE
+        WHEN go_trip_participants.left_at IS NULL THEN go_trip_participants.added_by_user_id
+        ELSE EXCLUDED.added_by_user_id
+    END`
+
+// queryTripLiveParticipantUserIDs is the roster's USER IDS ONLY, read inside the
+// roster transaction so the add path can tell a genuine arrival from a re-send.
+//
+// IT DECIDES TWO THINGS AT ONCE and both need the same answer: which people are
+// news (the `trip_added` fan-out, and the owner's MYR-618 banner) and which
+// adds are worth an audit row. A single read is what keeps them consistent —
+// two probes could disagree if a concurrent leave landed between them, and the
+// row would then record an add that nobody was told about.
+const queryTripLiveParticipantUserIDs = `
+SELECT user_id FROM go_trip_participants
+WHERE trip_id = $1 AND left_at IS NULL`
+
+// queryTripRoleForUser is the CHEAP role probe: the caller's relationship to a
+// trip, and the car it is on, without decrypting a name or decorating anything.
+//
+// It exists for the two MYR-618 routes that need the 404-not-403 rule applied
+// BEFORE they do their real work — the addable-people read and the participant
+// add — and it applies it through the SAME `tripRoleExpr` every other read uses,
+// so there is exactly one definition of "on this trip" and no route can drift
+// to a second one. A NULL role is ErrTripNotFound, identically to an unknown id.
+const queryTripRoleForUser = `
+SELECT t.vehicle_id, t.owner_user_id, t.starts_at, t.ends_at, t.ended_at,` + tripRoleExpr + `
+FROM go_trips t
+WHERE t.id = $2`
+
+// queryTripAddablePeople is §7.30.11: the vehicle's live grant-holders who are
+// NOT already on this trip.
+//
+// ⚠ IT CARRIES THE FULL LIVE-GRANT PREDICATE (invariant 3), not because this
+// statement grants anything — it is a read — but because its rows are what a
+// client posts straight back to §7.30.4's add. A picker that offered a
+// suspended grant would produce a `participant_not_shared` refusal the person
+// could not explain, having just been shown the name.
+//
+// NAMES ONLY, AND NEVER A CODE OR AN EMAIL. The projection is (share id,
+// display name) and nothing else: the caller may be a PARTICIPANT rather than
+// the owner, and §7.5's grant listing — with its invite codes, its statuses and
+// its permissions — is owner-only for reasons that have not changed.
+//
+// The OWNER is excluded because an owner holds no grant on their own car and
+// therefore cannot appear here anyway; the `NOT EXISTS` clause is what excludes
+// people already on the trip, and it tests the live roster (`left_at IS NULL`)
+// so somebody who LEFT can be re-invited.
+//
+// ORDERED BY SHARE ID HERE AND BY DISPLAY NAME IN GO, deliberately. The name a
+// caller reads is `COALESCE(confirmed first name, label)` and the first half of
+// that is an aliased CASE expression — Postgres will order by a bare output
+// name but not by an expression over one, so sorting here would order by the
+// LABEL and produce a list whose visible order looked arbitrary. The SQL order
+// is a total one so the page is deterministic; the reader-facing order is
+// applied once the two halves have been folded together.
+const queryTripAddablePeople = `
+SELECT s.id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `
+FROM go_trips t
+JOIN go_vehicle_shares s ON s.vehicle_id = t.vehicle_id
+WHERE t.id = $1
+  AND s.status = 'accepted' AND s.suspended_at IS NULL
+  AND s.accepted_by_user_id IS NOT NULL AND s.accepted_by_user_id <> ''
+  AND s.accepted_by_user_id <> t.owner_user_id
+  AND NOT EXISTS (
+        SELECT 1 FROM go_trip_participants p
+        WHERE p.trip_id = t.id
+          AND p.user_id = s.accepted_by_user_id
+          AND p.left_at IS NULL
+  )
+ORDER BY s.id`
 
 // queryLeaveTrip is BOTH the participant's own "leave" and the owner's
 // "remove", because they write the same row the same way and the difference is
@@ -251,8 +332,15 @@ WHERE id = $1 AND owner_user_id = $2 AND ended_at IS NULL`
 // share row yields a NULL name and the Go side falls back — first to the
 // owner's label, which is also NULL here, and then to the empty string the
 // contract permits.
+//
+// `added_by_name` (MYR-618) is the CONFIRMED first name of whoever put this
+// person on the trip, resolved through the ladder in trip_added_by_name.go and
+// NULL for every row written before migration 0060. It is projected here rather
+// than joined in a second read for the same reason the label is: the roster is
+// read on every trip card, and an attribution that needed a second query would
+// be the first thing a future optimisation dropped.
 const queryTripRoster = `
-SELECT p.share_id, p.user_id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `
+SELECT p.share_id, p.user_id, COALESCE(s.label, ''), ` + acceptedByNameExpr + `, ` + addedByNameExpr + `
 FROM go_trip_participants p
 LEFT JOIN go_vehicle_shares s ON s.id = p.share_id
 WHERE p.trip_id = $1 AND p.left_at IS NULL

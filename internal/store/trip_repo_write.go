@@ -75,7 +75,7 @@ func (r *TripRepo) Update(ctx context.Context, tripID, ownerUserID string, in Up
 		return TripView{}, fmt.Errorf("TripRepo.Update(%s): write: %w", tripID, err)
 	}
 
-	if err := applyRosterPatch(ctx, tx, tripID, current.VehicleID, in); err != nil {
+	if err := applyRosterPatch(ctx, tx, tripID, current.VehicleID, ownerUserID, in); err != nil {
 		if !errors.Is(err, ErrTripParticipantNotShared) {
 			r.metrics.IncQueryError(op)
 		}
@@ -127,15 +127,18 @@ func (r *TripRepo) loadOwnedTripForPatch(ctx context.Context, tx tripQuerier, tr
 // Split out of Update purely for the cognitive-complexity budget, but the seam
 // is a real one: this is the whole of "who is on the trip", and Update is the
 // whole of "what the trip is".
-func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID string, in UpdateTripInput) error {
-	added, err := resolveShareParticipants(ctx, tx, vehicleID, in.AddParticipantIDs)
-	if err != nil {
+//
+// THE ADD HALF IS THE SHARED ONE (MYR-618). It goes through the same
+// addAndAuditParticipants a participant's own add uses, so the attribution
+// column and the `trip.participant_added` audit row are written identically
+// whoever asked — an owner's add and a participant's add differ in who is
+// allowed to make the request, and in nothing that reaches the database. The
+// REMOVE half has no counterpart and never will: removal stays owner-only.
+func applyRosterPatch(ctx context.Context, tx tripQuerier, tripID, vehicleID, ownerUserID string, in UpdateTripInput) error {
+	if _, err := addAndAuditParticipants(ctx, tx, tripID, vehicleID, ownerUserID, in.AddParticipantIDs); err != nil {
 		if errors.Is(err, ErrTripParticipantNotShared) {
 			return err
 		}
-		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
-	}
-	if err := addTripParticipants(ctx, tx, tripID, added); err != nil {
 		return fmt.Errorf("TripRepo.Update(%s): %w", tripID, err)
 	}
 	if err := removeParticipantsByShare(ctx, tx, tripID, in.RemoveParticipantIDs); err != nil {
