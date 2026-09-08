@@ -138,19 +138,50 @@ func denyDriveOutsideTripWindow(w http.ResponseWriter, logger *slog.Logger, surf
 		slog.String("drive_id", driveID),
 		slog.String("user_id", userID),
 	)
-	wserrors.WriteErrorEnvelope(w, logger, http.StatusNotFound,
-		wserrors.ErrCodeNotFound, "drive not found")
+	writeDriveNotFound(w, logger)
 }
 
-// parseDriveStartTime reads a Drive row's RFC 3339 `startTime`.
+// denyDriveWithUnreadableStartTime answers a participant read of a drive whose
+// stored `startTime` will not parse.
 //
-// A drive whose start time will not parse is admitted to NOBODY through a trip:
-// the window test cannot be evaluated, and the fail-closed answer for an
-// unevaluable access check is denial. The owner path never reaches here.
-func parseDriveStartTime(s string) (time.Time, bool) {
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
+// THE SAME 404 AS "OUTSIDE YOUR WINDOW", AND THAT IS THE POINT (MYR-614).
+//
+// A participant must never learn from a STATUS whether a drive exists. That is
+// the entire reason §7.3/§7.4 answer this role 404 rather than 403, and a
+// status that appears only for drives the server actually holds is that oracle
+// rebuilt one condition later: a caller who could tell "unreadable row" from
+// "not yours" would have a probe for the car's history on days they were not
+// part of. The condition is also PERMANENT — the row does not repair itself —
+// so a 5xx would additionally invite every retry-on-5xx client to re-ask
+// forever where a terminal 404 stops.
+//
+// A DATA FAULT IS LOGGED, NEVER TOLD TO A PARTICIPANT. The fault is real and
+// MYR-614 is what it costs when nobody sees it: §7.4's adapter shipped without
+// a `startTime`, every participant's every route parsed as "" and was refused,
+// and the response was indistinguishable from the feature working correctly
+// until a client reported it. So the honesty goes where it cannot leak — an
+// ERROR line naming the drive, the vehicle and the value that would not parse,
+// which is the line an operator greps and an alert can match on. The wire
+// answer stays the refusal it always was.
+//
+// STILL ADMITTED TO NOBODY, either way. Only where the fault is reported moved.
+func denyDriveWithUnreadableStartTime(
+	w http.ResponseWriter, logger *slog.Logger, surface string, facts DriveAccessFacts, userID string,
+) {
+	logger.Error(surface+": drive startTime is missing or unparseable — cannot evaluate the trip window",
+		slog.String("drive_id", facts.DriveID),
+		slog.String("vehicle_id", facts.VehicleID),
+		slog.String("user_id", userID),
+		slog.String("start_time", facts.StartTime),
+	)
+	writeDriveNotFound(w, logger)
+}
+
+// writeDriveNotFound is the ONE writer for the participant 404, shared by both
+// refusals above so they cannot drift into distinguishable answers. A byte for
+// byte identical body is the whole mechanism: the two conditions must be one
+// answer on the wire.
+func writeDriveNotFound(w http.ResponseWriter, logger *slog.Logger) {
+	wserrors.WriteErrorEnvelope(w, logger, http.StatusNotFound,
+		wserrors.ErrCodeNotFound, "drive not found")
 }

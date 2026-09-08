@@ -320,7 +320,23 @@ paths:
         A cursor scan that straddles a prune event MAY observe items
         disappearing from the tail -- this is acceptable.
 
-        RBAC: owners and viewers see the same summary field set.
+        RBAC: OWNER ONLY, plus one exception. MYR-369 retired the
+        `live_history` tier and with it every viewer's access to drive
+        history: a `viewer` calling this receives 403
+        vehicle_not_owned, at any grant shape. MYR-602 admits exactly
+        one other role -- a `trip_participant`, and only to drives whose
+        startTime falls inside a window they were a live participant of.
+        That bound is on ROWS and is enforced by the handler and by the
+        SQL statement, never by the field mask below (a mask hides a
+        field; it cannot hide a row), which is why the participant's
+        field set is the owner's. A participant asking for a drive
+        outside their window is answered 404 not_found -- NOT 403,
+        which would confirm the car made a journey on a day they were
+        not part of -- and the same 404, byte for byte, covers a drive
+        whose stored startTime cannot be read at all (the fault is
+        logged, never told to the caller; MYR-614). See rest-api.md
+        §5.2.4 and §7.4.
+
         startAddress/endAddress/energyUsedKwh/etc are intentionally NOT
         in the list response -- they are returned by the drive detail
         endpoint. See rest-api.md §5.2.2.
@@ -392,7 +408,16 @@ paths:
           $ref: '#/components/responses/InternalError'
       x-role-masks:
         owner: ['*']
-        viewer: ['*']
+        # MYR-369: the drives surfaces are owner-only again. No grant of
+        # any shape opens them, so there is no viewer field set to
+        # describe -- the call is refused before a mask is reached.
+        viewer: denied
+        # MYR-602: the same field set as the owner, deliberately. The
+        # participant's bound is on ROWS (the trip window), applied by
+        # the handler and by the statement that carries the LIMIT; a
+        # mask can hide a field and cannot hide a row, so narrowing the
+        # field set here would only misdescribe the gate.
+        trip_participant: ['*']
 
   /drives/{driveId}:
     get:
@@ -411,11 +436,27 @@ paths:
         separate GET /drives/{driveId}/route endpoint (heavy payload;
         lazy-fetch guidance on the route endpoint).
 
-        RBAC: owners and viewers see the same field set including
-        start/end location and address (both are P1 per
-        data-classification.md §1.4). The viewer has explicit consent
-        via the accepted invite -- denying them the start/end address
-        would defeat the sharing use case (FR-5.1).
+        RBAC: OWNER ONLY, plus one exception. MYR-369 retired the
+        `live_history` tier and with it every viewer's access to drive
+        history: a `viewer` calling this receives 403
+        vehicle_not_owned, at any grant shape. MYR-602 admits exactly
+        one other role -- a `trip_participant`, and only to drives whose
+        startTime falls inside a window they were a live participant of.
+        That bound is on ROWS and is enforced by the handler and by the
+        SQL statement, never by the field mask below (a mask hides a
+        field; it cannot hide a row), which is why the participant's
+        field set is the owner's. A participant asking for a drive
+        outside their window is answered 404 not_found -- NOT 403,
+        which would confirm the car made a journey on a day they were
+        not part of -- and the same 404, byte for byte, covers a drive
+        whose stored startTime cannot be read at all (the fault is
+        logged, never told to the caller; MYR-614). See rest-api.md
+        §5.2.4 and §7.4.
+
+        The `trip_participant` sees the owner's field set including the
+        P1 start/end location and address (data-classification.md
+        §1.4): what differs between the two roles is WHICH DRIVES they
+        may ask for, never what a drive says once they may see it.
       x-anchored-requirements:
         - FR-3.4
         - FR-9.1
@@ -465,7 +506,16 @@ paths:
           $ref: '#/components/responses/InternalError'
       x-role-masks:
         owner: ['*']
-        viewer: ['*']
+        # MYR-369: the drives surfaces are owner-only again. No grant of
+        # any shape opens them, so there is no viewer field set to
+        # describe -- the call is refused before a mask is reached.
+        viewer: denied
+        # MYR-602: the same field set as the owner, deliberately. The
+        # participant's bound is on ROWS (the trip window), applied by
+        # the handler and by the statement that carries the LIMIT; a
+        # mask can hide a field and cannot hide a row, so narrowing the
+        # field set here would only misdescribe the gate.
+        trip_participant: ['*']
 
   /drives/{driveId}/route:
     get:
@@ -489,7 +539,27 @@ paths:
         networks, especially watchOS per NFR-3.36. Eager prefetch on
         WiFi is acceptable for the top 1-3 drives.
 
-        RBAC: owners and viewers see the full polyline.
+        RBAC: OWNER ONLY, plus one exception. MYR-369 retired the
+        `live_history` tier and with it every viewer's access to drive
+        history: a `viewer` calling this receives 403
+        vehicle_not_owned, at any grant shape. MYR-602 admits exactly
+        one other role -- a `trip_participant`, and only to drives whose
+        startTime falls inside a window they were a live participant of.
+        That bound is on ROWS and is enforced by the handler and by the
+        SQL statement, never by the field mask below (a mask hides a
+        field; it cannot hide a row), which is why the participant's
+        field set is the owner's. A participant asking for a drive
+        outside their window is answered 404 not_found -- NOT 403,
+        which would confirm the car made a journey on a day they were
+        not part of -- and the same 404, byte for byte, covers a drive
+        whose stored startTime cannot be read at all (the fault is
+        logged, never told to the caller; MYR-614). See rest-api.md
+        §5.2.4 and §7.4.
+
+        The polyline is the most locating artifact this platform
+        stores, and the admitted roles see it whole -- there is no
+        partial polyline for a partial window; the window decides
+        WHETHER the drive opens, not how much of it.
       x-anchored-requirements:
         - FR-3.3
         - NFR-3.23
@@ -536,7 +606,16 @@ paths:
           $ref: '#/components/responses/InternalError'
       x-role-masks:
         owner: ['*']
-        viewer: ['*']
+        # MYR-369: the drives surfaces are owner-only again. No grant of
+        # any shape opens them, so there is no viewer field set to
+        # describe -- the call is refused before a mask is reached.
+        viewer: denied
+        # MYR-602: the same field set as the owner, deliberately. The
+        # participant's bound is on ROWS (the trip window), applied by
+        # the handler and by the statement that carries the LIMIT; a
+        # mask can hide a field and cannot hide a row, so narrowing the
+        # field set here would only misdescribe the gate.
+        trip_participant: ['*']
 
   /vehicles/{vehicleId}/invites:
     get:
