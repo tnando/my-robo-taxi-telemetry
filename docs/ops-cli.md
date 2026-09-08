@@ -20,6 +20,7 @@ go build -o ./bin/ops ./cmd/ops
 | `AUTH_TESLA_ID` | `auth token`, `auth link`, `fleet-config push` | Tesla OAuth client id. |
 | `AUTH_TESLA_SECRET` | same as above | Tesla OAuth client secret. |
 | `TESLA_PROXY_URL` | `fleet-config push` | Base URL of the running `tesla-http-proxy` sidecar (e.g. `https://localhost:4443`). |
+| `OPS_OPERATOR` | every command that decrypts user data, including `fleet-config push` and `--all-streaming` | Your operator handle (e.g. `thomas`). No default; an email address is rejected. Written to an `AuditLog` `operator_decrypt` row **before** the decrypt (MYR-447). |
 | `FLEET_TELEMETRY_HOSTNAME` | `fleet-config push` | Hostname vehicles connect to after config (e.g. `telemetry.myrobotaxi.app`). |
 | `FLEET_TELEMETRY_PORT` | `fleet-config push` | Default `443`. |
 | `FLEET_TELEMETRY_CA` | `fleet-config push` (prod) | PEM-encoded CA cert served with the telemetry endpoint. |
@@ -131,6 +132,84 @@ ops fleet-config push --vin 5YJ3E7EB2NF000001 --user-id clxy... | jq
 ```
 
 If `skippedVehicles` is non-null, Tesla rejected the push — the map value explains why (common: `missing_key` means the vehicle has not been paired yet; run the virtual-key pairing flow).
+
+### `ops fleet-config push --all-streaming [--apply] [--limit N]`
+
+Re-pushes `DefaultFieldConfig` to **every already-streaming car** (MYR-630).
+
+A fleet-telemetry config reaches a car exactly once, when it is pushed. Tesla stores no version and no hash, and nothing re-pushes a healthy car — the MYR-448 reconciler heals cars that have gone *quiet*, which is the precise complement of the set that matters here. So every change to `DefaultFieldConfig` (a new field, a new interval, MYR-629's `ResendIntervalSeconds` on `EnergyRemaining`) is **dormant for the whole existing fleet** until this sweep runs, and dormant silently: the cars keep streaming, they simply stream the old field set.
+
+**Run it from the Fly machine, not a laptop.** The push has to reach the `tesla-http-proxy` that signs it, and that sidecar listens on loopback *inside* the container (`deployments/start.sh`). `ops` ships in the image next to `telemetry-server` for exactly this.
+
+```bash
+# 1. DRY RUN — pushes nothing. Read this first.
+fly ssh console -a my-robo-taxi-telemetry -C "sh -lc 'OPS_OPERATOR=thomas ops fleet-config push --all-streaming'"
+
+# 2. APPLY — actually pushes.
+fly ssh console -a my-robo-taxi-telemetry -C "sh -lc 'OPS_OPERATOR=thomas ops fleet-config push --all-streaming --apply'"
+```
+
+`sh -lc` is required because `fly ssh console -C` execs the command directly rather than through a shell, so `OPS_OPERATOR=` could not be prefixed otherwise. `OPS_OPERATOR` is the **only** thing you have to supply — put your own handle there, since it is what the MYR-447 audit row records.
+
+Everything else resolves on the machine without you:
+
+- `DATABASE_URL`, `ENCRYPTION_KEY`, `AUTH_TESLA_ID`, `AUTH_TESLA_SECRET`, `FLEET_TELEMETRY_CA` are Fly secrets, already in the environment.
+- `TESLA_PROXY_URL`, `FLEET_TELEMETRY_HOSTNAME` and `FLEET_TELEMETRY_PORT` are **not** environment variables in production — they live in `proxy.url`, `proxy.fleet_telemetry_hostname` and `proxy.fleet_telemetry_port` in `/etc/telemetry/config.json`, the file the server is started with. `ops` falls back to that file when the env does not carry them (`cmd/ops/fleet_config_file.go`), so the sweep reads the same values the server pushes with and the two cannot drift. Env still wins where it is set, so a laptop run that sources `../react-frontend/.env.local` is unchanged; `OPS_CONFIG_FILE` points the fallback at a different file.
+
+**Dry run is the default.** Without `--apply` nothing is pushed; every car is still listed, its config is still read from Tesla, and the report says what would happen and why.
+
+```json
+{
+  "mode": "dry-run",
+  "limit": 50,
+  "examined": 9,
+  "pushed": 0,
+  "wouldPush": 6,
+  "skipped": 3,
+  "failed": 0,
+  "skipReasons": { "owner_suspended": 2, "missing_key": 1 },
+  "vehicles": [
+    {
+      "vin": "5YJ3E7EB2NF000001",
+      "userId": "clxy...",
+      "vehicleName": "Model 3",
+      "action": "would_push",
+      "lastUpdated": "2026-09-08T14:02:11Z",
+      "configAgeDays": 47.3
+    }
+  ]
+}
+```
+
+Flags:
+
+- `--apply` — perform the pushes. Default is the dry run.
+- `--limit N` — cap the vehicles examined in one run. Default `50`. **Skips count against it**, so a run that spends its budget on suspended cars is a run whose report says so.
+- `--vin` / `--user-id` are refused alongside `--all-streaming`, so the combination cannot read as "push this one VIN to the whole fleet".
+
+**Config age.** There is no "pushed at" column anywhere. Every push in this codebase sets `exp` to exactly 350 days from the moment it was sent, so Tesla's echoed `exp` dates the push: `age = 350d - (exp - now)`. Tesla documents `synced` but not that it echoes `exp`, so a nil `exp` reads as *unknown age* (the field is simply absent) rather than as zero. That arithmetic is also the sweep's own verification — **re-run the dry run after an `--apply` and every pushed car reports a `configAgeDays` of roughly zero.**
+
+**Skip reasons** (deliberate refusals; they do not fail the run):
+
+| Reason | Meaning |
+|---|---|
+| `owner_suspended` | MYR-592 removed this car's config for owner inactivity. Re-pushing would silently reverse a cost decision; the owner's reconnect is the only thing that may. |
+| `config_absent` | The last push did not take (`go_fleet_config_attempts`). Nothing to refresh — the MYR-448 reconciler owns the retry. |
+| `awaiting_owner_ack` | Driver-linked car whose owner-approval acknowledgment is outstanding (MYR-599 consent-wins). |
+| `no_token` | No Tesla token on file for the owner. Permanently unpushable, not transient. |
+| `no_config` | Tesla reports nothing configured for the VIN. That is the reconciler's candidate, not this tool's. |
+| `missing_key` | Tesla answered `200` and did nothing: the virtual key is not enrolled. |
+
+**Failure reasons** (things that went wrong and may not next time): `token_failed`, `config_read_failed`, `push_failed`. A non-zero `failed` count exits non-zero, so a scripted run cannot read a fleet of failures as success. Skips do not.
+
+**Two writes still happen on a dry run**, both deliberate:
+
+- an **OAuth token refresh**, when a stored token has expired. Tesla's refresh tokens are single-use, so not persisting the new pair would break the owner's next server-side call. Serialized through the account row lock (MYR-595, `RotateTeslaTokenLockedWaiting`) — never the unguarded on-demand path, because this sweep walks many owners' tokens while the live server may be refreshing the same accounts.
+- the **MYR-447 operator-decrypt audit row**, one per owner whose token is read (not one per car). A failure to write it aborts the run.
+
+**Idempotent.** A push *replaces* a car's config, so running the sweep twice leaves the fleet as running it once did. The sweep writes nothing of its own to our database — no attempt rows, no schedule — so nothing accumulates and no run has to be completed or rolled back. A capped run is not resumable in the sense of picking up where it stopped; it is re-runnable, which is stronger.
+
+Cars are examined **most recently active first**, so when a cap truncates the run the cars reached first are the ones actually streaming.
 
 ### `ops fields snapshot --vin <vin>`
 

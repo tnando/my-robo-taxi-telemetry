@@ -81,8 +81,18 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	// prohibition, and why the refusal is printed even when it is overridden.
 	force := fs.Bool("force-unacknowledged", false,
 		"push even for a driver-linked vehicle whose owner-approval acknowledgment is outstanding")
+	// MYR-630. The fleet-wide re-push is a MODE of this subcommand rather than
+	// a subcommand of its own, because it does the same thing to every car that
+	// this does to one: same config body, same proxy, same 350-day exp.
+	allStreaming, repush := registerRepushFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *allStreaming {
+		if err := rejectSingleVINFlags(*vin, *userID); err != nil {
+			return err
+		}
+		return runFleetConfigRepush(ctx, *repush)
 	}
 	operator, err := parseFleetConfigPushInput(*vin, *userID)
 	if err != nil {
@@ -93,9 +103,9 @@ func runFleetConfigPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	proxyURL := os.Getenv("TESLA_PROXY_URL")
-	if proxyURL == "" {
-		return fmt.Errorf("TESLA_PROXY_URL is required for fleet-config push")
+	proxyURL, err := resolveProxyURL()
+	if err != nil {
+		return err
 	}
 
 	logger := newLogger()
@@ -298,9 +308,16 @@ func pushFleetConfig(
 // loadEndpointConfig reads the Fleet Telemetry endpoint coordinates from
 // the environment, applying the same default port (443) as the server.
 func loadEndpointConfig() (telemetry.EndpointConfig, error) {
+	// Env first, then the server's own config file — see fleet_config_file.go
+	// for why the Fly machine needs the fallback at all.
 	hostname := os.Getenv("FLEET_TELEMETRY_HOSTNAME")
 	if hostname == "" {
-		return telemetry.EndpointConfig{}, fmt.Errorf("FLEET_TELEMETRY_HOSTNAME is required for fleet-config push")
+		hostname = fleetConfigFromFile().Proxy.FleetTelemetryHostname
+	}
+	if hostname == "" {
+		return telemetry.EndpointConfig{}, fmt.Errorf(
+			"FLEET_TELEMETRY_HOSTNAME is required for fleet-config push (and %s has no proxy.fleet_telemetry_hostname)",
+			defaultOpsConfigFile)
 	}
 	port := defaultFleetTelemetryPort
 	if v := os.Getenv("FLEET_TELEMETRY_PORT"); v != "" {
@@ -308,6 +325,8 @@ func loadEndpointConfig() (telemetry.EndpointConfig, error) {
 		if err != nil || p <= 0 {
 			return telemetry.EndpointConfig{}, fmt.Errorf("invalid FLEET_TELEMETRY_PORT %q", v)
 		}
+		port = p
+	} else if p := fleetConfigFromFile().Proxy.FleetTelemetryPort; p > 0 {
 		port = p
 	}
 	return telemetry.EndpointConfig{

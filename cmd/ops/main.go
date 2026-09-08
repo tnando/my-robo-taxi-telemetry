@@ -10,6 +10,7 @@
 //	ops vehicles re-add   --user-id <id> --tesla-vehicle-id <id>
 //	ops fleet-config show
 //	ops fleet-config push --vin <vin> --user-id <id>
+//	ops fleet-config push --all-streaming [--apply] [--limit N]
 //	ops fields watch      --vin <vin>
 //	ops fields snapshot   --vin <vin>
 //	ops invite-link public-key
@@ -84,6 +85,8 @@ Commands:
                                                      Clear a removed-vehicle tombstone so the car can be re-added (MYR-262)
   fleet-config show                                  Print DefaultFieldConfig as JSON
   fleet-config push   --vin <vin> --user-id <id>     Push DefaultFieldConfig to Tesla for this VIN
+  fleet-config push   --all-streaming [--apply]      Re-push DefaultFieldConfig to EVERY already-streaming
+                      [--limit N]                     car (MYR-630). DRY RUN unless --apply is given.
   fields watch        --vin <vin> [--server <url>]   Stream raw decoded fields from /api/debug/fields
   fields snapshot     --vin <vin>                    Dump the current vehicle row as JSON
   geocode backfill    [--dry-run] [--limit N]        Reverse-geocode Drive rows missing startAddress/endAddress (MYR-240)
@@ -94,7 +97,7 @@ Environment:
   DATABASE_URL                  Postgres connection string (required)
   OPS_OPERATOR                  Your operator handle, e.g. jdoe (REQUIRED by every command that
                                  decrypts user data: auth token, fields snapshot, fleet-config push,
-                                 geocode backfill).
+                                 fleet-config push --all-streaming, geocode backfill).
                                  Recorded in an AuditLog operator_decrypt row before the decrypt
                                  happens (MYR-447). No default — an email address is rejected.
   TESLA_PROXY_URL               tesla-http-proxy base URL (for fleet-config push)

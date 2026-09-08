@@ -47,7 +47,13 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
 # ENCRYPTION_KEY) exist only as Fly app secrets — running them anywhere else
 # would mean exporting the key, which is the custody the purge exists to
 # protect. Run via `fly ssh console`.
-RUN CGO_ENABLED=0 GOOS=linux go build -o /backfill-account-tokens ./cmd/backfill-account-tokens \
+#
+# `ops` joined them for MYR-630, and for one more reason on top of custody: the
+# fleet-wide config re-push has to reach the tesla-http-proxy, and that sidecar
+# listens on loopback INSIDE this container (deployments/start.sh). A laptop
+# cannot call it at all, so the sweep is only runnable from here.
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /ops ./cmd/ops \
+ && CGO_ENABLED=0 GOOS=linux go build -o /backfill-account-tokens ./cmd/backfill-account-tokens \
  && CGO_ENABLED=0 GOOS=linux go build -o /backfill-vehicle-gps ./cmd/backfill-vehicle-gps \
  && CGO_ENABLED=0 GOOS=linux go build -o /backfill-route-blobs ./cmd/backfill-route-blobs \
  && CGO_ENABLED=0 GOOS=linux go build -o /backfill-location-labels ./cmd/backfill-location-labels \
@@ -66,6 +72,7 @@ RUN apk add --no-cache ca-certificates
 RUN adduser -D -u 1000 appuser
 
 COPY --from=builder /telemetry-server /usr/local/bin/telemetry-server
+COPY --from=builder /ops /usr/local/bin/ops
 COPY --from=builder /backfill-account-tokens /usr/local/bin/backfill-account-tokens
 COPY --from=builder /backfill-vehicle-gps /usr/local/bin/backfill-vehicle-gps
 COPY --from=builder /backfill-route-blobs /usr/local/bin/backfill-route-blobs
