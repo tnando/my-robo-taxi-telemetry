@@ -42,6 +42,14 @@ package store
 //     vehicle_share_access_queries.go. Statements that serve only DISPLAY (the
 //     roster) join the share by id instead, because a name should not vanish
 //     from a historical roster the moment a grant is revoked.
+//
+//     ⚠ THE ROLE EXPRESSION COMES IN TWO SPELLINGS FOR EXACTLY THAT REASON
+//     (MYR-618). `tripRoleExpr` answers "is this person on the roster" and
+//     feeds the DISPLAY reads; `tripMemberRoleExpr` answers "may this person
+//     ACT as a member" and carries the conjunction, and it feeds the two
+//     capability routes alone (§7.30.4's add and §7.30.11's picker) through
+//     queryTripRoleForUser. Each expression's own comment argues why
+//     substituting the other would be wrong, and in which direction.
 
 // tripColumns is the full go_trips projection. Ordered as the struct is, so
 // scanTrip reads straight down.
@@ -144,11 +152,20 @@ WHERE trip_id = $1 AND left_at IS NULL`
 //
 // It exists for the two MYR-618 routes that need the 404-not-403 rule applied
 // BEFORE they do their real work — the addable-people read and the participant
-// add — and it applies it through the SAME `tripRoleExpr` every other read uses,
-// so there is exactly one definition of "on this trip" and no route can drift
-// to a second one. A NULL role is ErrTripNotFound, identically to an unknown id.
+// add — and a NULL role is ErrTripNotFound, identically to an unknown id.
+//
+// ⚠ IT IS THE ONE STATEMENT THAT USES tripMemberRoleExpr RATHER THAN
+// tripRoleExpr, and the difference is invariant 3, not a style choice. Every
+// other user of tripRoleExpr is a READ that decides what a card SAYS; these two
+// routes are the only ones where the probe's answer is a CAPABILITY — to widen
+// a roster, and to enumerate the car's grant-holders by name. `tripRoleExpr`'s
+// participant arm tests `left_at IS NULL` alone, so it resolves `participant`
+// for somebody whose grant on the car has been SUSPENDED or REVOKED: their map
+// has gone dark (the access legs re-join the live grant) while their membership
+// row survives, and without the conjunction below they could still add people
+// to the trip and read the picker. See tripMemberRoleExpr.
 const queryTripRoleForUser = `
-SELECT t.vehicle_id, t.owner_user_id, t.starts_at, t.ends_at, t.ended_at,` + tripRoleExpr + `
+SELECT t.vehicle_id, t.owner_user_id, t.starts_at, t.ends_at, t.ended_at,` + tripMemberRoleExpr + `
 FROM go_trips t
 WHERE t.id = $2`
 
@@ -233,11 +250,59 @@ WHERE t.id = p.trip_id
 //
 // A participant who LEFT resolves NULL. Leaving is meant to end the
 // relationship, not to leave a read-only souvenir.
+//
+// ⚠ IT DOES NOT RE-JOIN THE LIVE GRANT, and that is correct HERE and wrong for
+// the two MYR-618 capability routes — see tripMemberRoleExpr, which is this
+// expression plus invariant 3's conjunction, and which is what
+// queryTripRoleForUser uses.
 const tripRoleExpr = `
 	CASE
 		WHEN t.owner_user_id = $1 THEN 'owner'
 		WHEN EXISTS (
 			SELECT 1 FROM go_trip_participants p
+			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
+		) THEN 'participant'
+	END AS trip_role`
+
+// tripMemberRoleExpr is tripRoleExpr WITH THE LIVE-GRANT RE-JOIN (invariant 3),
+// and it exists for the two MYR-618 capability routes alone.
+//
+// ── WHY IT IS A SECOND EXPRESSION AND NOT A REPLACEMENT ─────────────────────
+//
+// The two differ in ONE conjunct and they answer two different questions.
+//
+//	tripRoleExpr        "is this person ON the roster?"        → DISPLAY
+//	tripMemberRoleExpr  "may this person ACT as a member?"     → CAPABILITY
+//
+// Substituting this one everywhere would be wrong in the direction that hurts:
+// a participant whose grant was suspended would stop being able to READ the
+// trip they are on — the roster would vanish from their app mid-window — which
+// is exactly the "silently dropped mid-drive" failure §7.30's kill-switch note
+// forbids. Their live LOCATION is already gone, structurally, through the four
+// access legs; the card they were shown is not a capability and does not have
+// to disappear with it.
+//
+// Substituting tripRoleExpr HERE is wrong in the other direction and is a real
+// escalation: a revoked or suspended grant-holder could still widen an owner's
+// roster (§7.30.4) and enumerate the car's grant-holders by name (§7.30.11)
+// long after the owner cut them off. A membership row is not revoked when a
+// grant is — the cascade that stamps `left_at` is a display repair by its own
+// documentation (trips.md §6) and cannot be relied on for this.
+//
+// The OWNER arm is untouched: an owner holds no grant on their own car.
+//
+// The conjunction is the SAME `status = 'accepted' AND suspended_at IS NULL`
+// pair every other copy of invariant 3 carries, joined on (vehicle, user) the
+// way internal/auth/queries.go's fourth UNION leg joins it, so a grant revoked
+// and re-issued under a new id still resolves.
+const tripMemberRoleExpr = `
+	CASE
+		WHEN t.owner_user_id = $1 THEN 'owner'
+		WHEN EXISTS (
+			SELECT 1 FROM go_trip_participants p
+			JOIN go_vehicle_shares s
+			  ON s.vehicle_id = t.vehicle_id AND s.accepted_by_user_id = p.user_id
+			 AND s.status = 'accepted' AND s.suspended_at IS NULL
 			WHERE p.trip_id = t.id AND p.user_id = $1 AND p.left_at IS NULL
 		) THEN 'participant'
 	END AS trip_role`

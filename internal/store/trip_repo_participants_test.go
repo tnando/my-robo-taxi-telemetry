@@ -476,3 +476,103 @@ func rosterEntryFor(t *testing.T, repo *store.TripRepo, tripID, userID string) s
 	t.Fatalf("no roster row for %q in %+v", userID, view.Participants)
 	return store.TripParticipantView{}
 }
+
+// TestTripRepo_SuspendedParticipantCannotActOnTheTrip is the MYR-618 REVIEW
+// FIX, and it is the sharpest test in this file.
+//
+// A participant's membership row is NOT rewritten when their grant on the car
+// is suspended or revoked — the cascade that stamps `left_at` is a display
+// repair (trips.md §6) and nothing runs it on a suspend at all. So the roster
+// row survives, and a role probe that tested `left_at IS NULL` ALONE would keep
+// resolving `participant` for somebody the owner has already cut off: their map
+// has gone dark, and they could still widen the owner's roster and enumerate
+// the car's grant-holders by name.
+//
+// `tripMemberRoleExpr` is what closes that, by re-joining the live grant in the
+// probe itself (invariant 3). The owner's own access is unaffected — an owner
+// holds no grant on their own car — which is the other half of the assertion.
+func TestTripRepo_SuspendedParticipantCannotActOnTheTrip(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	shareTwo := seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareOne})
+
+	t.Run("while the grant is live the participant may act", func(t *testing.T) {
+		if _, err := repo.AddablePeople(ctx, trip.ID, shareViewer1); err != nil {
+			t.Fatalf("AddablePeople: %v", err)
+		}
+	})
+
+	t.Run("a SUSPENDED grant-holder gets the stranger's answer", func(t *testing.T) {
+		suspendShare(t, shareOne)
+
+		// The membership row is UNTOUCHED — that is the precondition this test
+		// exists for, so assert it rather than assume it.
+		var leftAt *time.Time
+		if err := testPool.QueryRow(ctx, `
+SELECT left_at FROM go_trip_participants WHERE trip_id = $1 AND user_id = $2`,
+			trip.ID, shareViewer1).Scan(&leftAt); err != nil {
+			t.Fatalf("read membership: %v", err)
+		}
+		if leftAt != nil {
+			t.Fatalf("left_at = %v — a suspend must not touch the roster row", leftAt)
+		}
+
+		if _, err := repo.AddParticipants(ctx, trip.ID, shareViewer1, []string{shareTwo}); !errors.Is(err, store.ErrTripNotFound) {
+			t.Errorf("AddParticipants err = %v, want ErrTripNotFound for a suspended grant-holder", err)
+		}
+		if _, err := repo.AddablePeople(ctx, trip.ID, shareViewer1); !errors.Is(err, store.ErrTripNotFound) {
+			t.Errorf("AddablePeople err = %v, want ErrTripNotFound for a suspended grant-holder", err)
+		}
+	})
+
+	t.Run("the OWNER still succeeds", func(t *testing.T) {
+		if _, err := repo.AddablePeople(ctx, trip.ID, shareOwnerA); err != nil {
+			t.Fatalf("AddablePeople(owner): %v — an owner holds no grant on their own car", err)
+		}
+		if _, err := repo.AddParticipants(ctx, trip.ID, shareOwnerA, []string{shareTwo}); err != nil {
+			t.Fatalf("AddParticipants(owner): %v", err)
+		}
+	})
+}
+
+// TestTripRepo_RevokedParticipantCannotActOnTheTrip is the same escalation
+// through the OTHER half of invariant 3's predicate.
+//
+// Revocation is a tombstone flip on the grant, and the cascade that would stamp
+// `left_at` is a separate call the owner's revoke now makes — but this test
+// deliberately does NOT run it, because the security property must not depend
+// on a repair having happened.
+func TestTripRepo_RevokedParticipantCannotActOnTheTrip(t *testing.T) {
+	if !dockerAvailable {
+		t.Skip("docker unavailable")
+	}
+	ctx := context.Background()
+	vehicleID, shareOne := seedTripFixture(t)
+	shareTwo := seedSecondViewer(t, vehicleID)
+	repo := newTripRepo(t)
+
+	now := time.Now().UTC()
+	trip := mustCreateTrip(t, repo, vehicleID, now.Add(-time.Hour), now.Add(24*time.Hour), []string{shareOne})
+
+	// The raw tombstone flip, NOT VehicleShareRepo.RevokeInvite — that call now
+	// runs the roster cascade in the same transaction, which would stamp
+	// `left_at` and let this test pass for the wrong reason.
+	if _, err := testPool.Exec(ctx,
+		`UPDATE go_vehicle_shares SET status = 'revoked', revoked_at = NOW() WHERE id = $1`, shareOne); err != nil {
+		t.Fatalf("revoke share: %v", err)
+	}
+
+	if _, err := repo.AddParticipants(ctx, trip.ID, shareViewer1, []string{shareTwo}); !errors.Is(err, store.ErrTripNotFound) {
+		t.Errorf("AddParticipants err = %v, want ErrTripNotFound for a revoked grant-holder", err)
+	}
+	if _, err := repo.AddablePeople(ctx, trip.ID, shareViewer1); !errors.Is(err, store.ErrTripNotFound) {
+		t.Errorf("AddablePeople err = %v, want ErrTripNotFound for a revoked grant-holder", err)
+	}
+}
