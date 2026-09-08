@@ -316,6 +316,17 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 		state.socKnown = true
 	}
 
+	// Cache energyRemaining the same way (MYR-629) so startDrive can seed the
+	// consumption baseline from the last-known pack level. EnergyRemaining is
+	// the last member of the slow-cadence family (SOC, odometer, FSD miles)
+	// that never got this treatment, and its absence is why `energyUsedKwh`
+	// read 0 on 453 of the last 460 production drives. Only positive values:
+	// a literal 0 is the zero-value default, never a plausible pack level.
+	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok && energy > 0 {
+		state.lastEnergy = energy
+		state.energyKnown = true
+	}
+
 	switch state.status {
 	case StatusIdle:
 		d.handleIdle(state, vin, te)

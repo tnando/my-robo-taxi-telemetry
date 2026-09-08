@@ -107,10 +107,16 @@ func calculateStats(drive *activeDrive) events.DriveStats {
 		avgSpeed = drive.speedSum / float64(drive.speedCount)
 	}
 
-	energyDelta := drive.startEnergy - drive.lastEnergy
-	if drive.startEnergy == 0 {
-		energyDelta = 0
-	}
+	// MYR-629 — energy comes from the accumulator, which summed per-sample
+	// consumption across the drive and dropped any step where the pack was
+	// taking power from a cable. `ok` is false when the drive never saw two
+	// differenceable readings; the stat is 0 in that case because the column is
+	// NOT NULL, and `Trip.totalEnergyKwh` is what refuses to sum a window that
+	// contains such a drive (see queryTripDriveTotals). This REPLACES the old
+	// `startEnergy - lastEnergy`, whose `if startEnergy == 0 { delta = 0 }`
+	// guard discarded essentially every real drive: EnergyRemaining streams at
+	// 30s and the gear-change frame that set startEnergy streams at 1s.
+	energyDelta, _ := drive.energy.total()
 
 	// FSD miles is the delta of the cumulative "miles since reset" counter
 	// over the drive. Only meaningful if a baseline was actually observed;
