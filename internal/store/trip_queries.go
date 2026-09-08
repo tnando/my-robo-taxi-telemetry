@@ -297,7 +297,8 @@ LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
 WHERE t.id = $1`
 
 // queryTripDriveTotals is the ONE STATEMENT behind `driveCount`,
-// `totalDistanceMiles` and `totalDurationSeconds` (MYR-608). It reads the
+// `totalDistanceMiles`, `totalDurationSeconds` and `totalEnergyKwh` (MYR-608,
+// widened by MYR-629). It reads the
 // window's bounds through `driveStartInstantExpr`, whose own comment carries
 // the whole argument for why the TEXT column is cast and why the cast is
 // guarded — this statement is one of the four the review round moved off the
@@ -307,7 +308,7 @@ WHERE t.id = $1`
 // THE `d` ALIAS IS REQUIRED, not stylistic: `driveStartInstantExpr` names
 // `d."startTime"`, so the statement it lands in has to supply that alias.
 //
-// THE THREE NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
+// THE FOUR NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
 // §7.30.2 decorates every row it returns, so a separate SUM query would have
 // added one round trip PER TRIP to a list that already issues five. Widening
 // the count that was already there adds none: the totals ride the scan the
@@ -325,8 +326,87 @@ WHERE t.id = $1`
 // what it has driven SO FAR and the number climbs between reads. Withholding
 // them until the window closed would leave the surface that most wants a
 // total — a road trip in progress — the one surface that cannot have one.
+//
+// ── THE FOURTH NUMBER: totalEnergyKwh (MYR-629) ─────────────────────────────
+//
+// It rides this statement for the reason the other two do, and its NULL rule is
+// STRICTER than theirs — deliberately, and this is the part to read before
+// changing it.
+//
+// `Drive."energyUsedKwh"` is `NOT NULL`, so `SUM` over it cannot produce the
+// honest null the distance and duration sums get for free. A drive the tracker
+// could not measure writes 0, and a plain `SUM` would silently mix those zeros
+// in with real figures. The client derives efficiency as
+// `totalEnergyKwh × 1000 / totalDistanceMiles`, so a window holding five drives
+// where two reported energy would print a Wh/mi computed from two drives' energy
+// over FIVE drives' miles — roughly 40% of the truth, rendered as a confident
+// number. That is worse than printing nothing.
+//
+// SO THE TOTAL IS ALL-OR-NOTHING OVER THE DRIVES THAT MOVED. If any drive in the
+// window covered distance and reported no energy, the whole total is NULL and
+// the client shows its "not reported" dash.
+//
+// `distanceMiles > 0` IS THE QUALIFIER, AND ITS LIVE CASE IS THE DRIVE IN
+// PROGRESS. A Drive row is created at `drive.started` and its stats are written
+// at `drive.ended`, so an OPEN drive sits in the window with `distanceMiles` and
+// `energyUsedKwh` both at 0 for the whole of a leg — and without this qualifier
+// the car being driven right now would blank the efficiency tile on the very
+// trip that is watching it. It also spares the rows the micro-drive filter did
+// not reach and any stationary remnant, on the same reasoning that lets `0` be a
+// real total for a window whose drives went nowhere: a drive with no distance
+// had no energy to report, so it has no opinion about the window.
+//
+// ⚠ THE UNMEASURED TEST IS `= 0`, NOT `<= 0`, AND THE DIFFERENCE IS A REVIEW
+// ROUND (finding 3). A net-regen leg — a long descent that ends with more charge
+// than it began with — is a REAL measurement whose physical value is negative,
+// and internal/drives no longer clamps it away, precisely because clamping
+// manufactured the 0 this predicate reads as "never measured". `<= 0` would
+// therefore void a window because one of its legs went downhill. A negative row
+// is measured, participates in the sum, and only the WINDOW is floored.
+//
+// ⚠ AND THE SUM IS FILTERED TO THE ROWS THAT MOVED (finding 5), which is the
+// same set the veto judges. `Drive` is a Prisma-owned table the Next.js app also
+// writes, and nothing constrains a 0-mile row to carry 0 energy; such a row is
+// exempt from the veto, so summing it would let a value nobody vetted into a
+// total the client turns into Wh/mi over OTHER rows' miles. One set of rows
+// decides the total and vetoes it.
+//
+// ⚠ `GREATEST(..., 0)` IS THE CLAMP, AND IT SITS HERE RATHER THAN ON THE DRIVE
+// because a floor applied per leg is not the same arithmetic as a floor applied
+// once. What must not happen is a negative leg cancelling another leg's
+// consumption; flooring the SUM prevents exactly that while letting a downhill
+// leg legitimately reduce the window's figure. NOTE Postgres' GREATEST IGNORES
+// NULLs — `GREATEST(NULL, 0)` is 0, not NULL — which is why the NULL arms are
+// spelled as their own WHEN branches above it rather than left to fall out of an
+// empty SUM.
+//
+// THIS IS ALSO THE MIGRATION RULE, not only a correctness one. Every drive
+// recorded before this issue carries 0, so a trip window straddling the fix
+// reports NULL rather than a total computed over its newer half — the surface
+// tells the truth about a mixed window instead of quietly understating it, and
+// it starts reporting on its own once the window holds only measured drives.
+//
+// A WINDOW WITH NO DRIVES AT ALL yields NULL from the first WHEN: nothing to
+// report, the same answer its three siblings give. A window whose drives all
+// went NOWHERE yields 0 — `SUM` over the FILTERed empty set is NULL and GREATEST
+// floors it — which is the honest total for drives that consumed nothing worth
+// reporting, and the same distinction `totalDistanceMiles` draws between "no
+// drives" and "drives that covered no ground".
 const queryTripDriveTotals = `
-SELECT COUNT(*), SUM(d."distanceMiles"), SUM(d."durationMinutes") FROM "Drive" d
+SELECT COUNT(*),
+       SUM(d."distanceMiles"),
+       SUM(d."durationMinutes"),
+       CASE
+            WHEN COUNT(*) = 0 THEN NULL
+            WHEN COUNT(*) FILTER (
+                     WHERE d."distanceMiles" > 0 AND d."energyUsedKwh" = 0
+                 ) > 0 THEN NULL
+            ELSE GREATEST(
+                     SUM(d."energyUsedKwh") FILTER (WHERE d."distanceMiles" > 0),
+                     0
+                 )
+       END
+FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND ` + driveStartInstantExpr + ` >= $2
   AND ` + driveStartInstantExpr + ` <= $3`

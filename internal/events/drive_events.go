@@ -74,7 +74,7 @@ type DriveStats struct {
 	Duration         time.Duration // wall-clock drive time
 	AvgSpeed         float64       // mph
 	MaxSpeed         float64       // mph
-	EnergyDelta      float64       // kWh consumed (positive = used)
+	EnergyDelta      float64       // kWh consumed (positive = used, negative = a net-regen leg, MYR-629)
 	StartLocation    Location
 	EndLocation      Location
 	StartChargeLevel int          // SOC percent at drive start

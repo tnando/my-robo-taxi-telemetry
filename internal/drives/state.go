@@ -89,6 +89,46 @@ type vehicleState struct {
 	lastSOC  float64
 	socKnown bool
 
+	// lastEnergy caches the most recent energyRemaining value seen for this
+	// vehicle, including while idle, and energyKnown reports whether one has
+	// been observed. It is the SOC cache's twin and exists for the identical
+	// reason (MYR-207, generalised in MYR-629): EnergyRemaining streams at
+	// IntervalSeconds: 30 while Gear streams at 1, so the gear-change frame
+	// that opens a drive almost never carries energy — and until MYR-629 that
+	// left `energyUsedKwh` at a hard 0 on 453 of the last 460 production
+	// drives. Energy does not move in a parked car that is not plugged in, so
+	// the last idle sample is the correct drive-start baseline. Only positive
+	// values are cached: a literal 0 is the zero-value default, never a
+	// plausible pack level for a car about to drive.
+	lastEnergy  float64
+	energyKnown bool
+
+	// lastChargeState caches the most recent NON-EMPTY `chargeState` seen for
+	// this vehicle, and chargeStateKnown reports whether one has ever arrived.
+	// It is LATCHED rather than read per frame, and that is load-bearing for
+	// the energy accumulator (MYR-629 review round).
+	//
+	// ⚠ THE TWO FIELDS ARE ON DIFFERENT CADENCES AND THE FRAMES DO NOT LINE UP.
+	// `EnergyRemaining` is configured at IntervalSeconds: 30 and
+	// `DetailedChargeState` on-change with a 120s resend, so at best ONE energy
+	// frame in FOUR carries a charge state. Reading `chargeState` off the frame
+	// that carried the energy sample therefore asked the authoritative half of
+	// the charging/regen discriminator (energy.go) a question it could not
+	// answer three times out of four, and the rate bound then had to decide
+	// alone — which is fine for a 150 kW DC session and WRONG for an 11 kW AC
+	// one, where a 30s step adds ~0.09 kWh, far inside what regen could have
+	// returned. Latching the last state the car reported makes the car's own
+	// answer available on every energy sample.
+	//
+	// LATCHING IS SAFE BECAUSE THE FIELD RE-ASSERTS ITSELF. MYR-333 gave
+	// proto 179 a 120s resend precisely so a listener that missed the
+	// plugged-in transition still learns the state; unplugging therefore
+	// clears the latch within 120s. Until it does, gains are treated as
+	// charging and dropped — the fail-closed direction, costing at most a
+	// couple of minutes of regen credit and never inventing consumption.
+	lastChargeState  string
+	chargeStateKnown bool
+
 	// lastTelemetryAt records the wall-clock time of the most recently
 	// received telemetry event for this vehicle (any field, gear-bearing
 	// or not). The end-condition watchdog uses this to detect drives
@@ -109,7 +149,6 @@ type activeDrive struct {
 	startCharge    float64 // SOC at drive start (percent)
 	startChargeSet bool    // true once startCharge holds a real observed value (MYR-207)
 	startOdometer  float64 // odometer at drive start (miles)
-	startEnergy    float64 // energyRemaining at drive start (kWh)
 	startFSDMiles  float64 // fsdMilesSinceReset baseline for this drive
 	lastFSDMiles   float64 // most recent fsdMilesSinceReset seen
 	fsdBaselineSet bool    // true once startFSDMiles holds a real observed value
@@ -120,7 +159,12 @@ type activeDrive struct {
 	lastLocation        events.Location
 	lastTimestamp       time.Time
 	lastSOC             float64 // most recent SOC for EndChargeLevel
-	lastEnergy          float64 // most recent energyRemaining for EnergyDelta
+
+	// energy accumulates the drive's consumption from the energyRemaining
+	// stream, excluding any charging that happened while the drive was open.
+	// See energy.go for why it is a running sum rather than a start/end
+	// subtraction, and for the charging-vs-regen rule.
+	energy driveEnergy
 
 	// startedWall and lastMovementAt are wall-clock (Detector.now)
 	// timestamps backing the watchdog's stall and duration-cap end

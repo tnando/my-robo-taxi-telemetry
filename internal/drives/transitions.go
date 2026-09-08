@@ -38,7 +38,7 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 	// point, or odometer advance). Feeds the watchdog's stall condition
 	// (MYR-160): a drive whose telemetry keeps flowing without movement
 	// for StallTimeout is a parked car whose gear=P frame was missed.
-	moved := accumulateDriveCounters(drive, te)
+	moved := accumulateDriveCounters(state, drive, te)
 
 	// Accumulate route point if location is present AND the car has actually
 	// moved since the last fix.
@@ -88,7 +88,7 @@ func (d *Detector) handleDriving(state *vehicleState, vin string, te events.Vehi
 // FSD and odometer baselines are lazily seeded from the first in-drive
 // sample when they were cold at drive start (MYR-157). The caller must
 // hold state.mu.
-func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent) bool {
+func accumulateDriveCounters(state *vehicleState, drive *activeDrive, te events.VehicleTelemetryEvent) bool {
 	moved := false
 
 	if speed, ok := extractFloatField(te.Fields, telemetry.FieldSpeed); ok {
@@ -132,8 +132,23 @@ func accumulateDriveCounters(drive *activeDrive, te events.VehicleTelemetryEvent
 		drive.lastSOC = soc
 	}
 
+	// MYR-629 — one energy sample folded into the running accumulator, with the
+	// vehicle's LATCHED chargeState so a gain taken on a cable is excluded
+	// rather than credited as regen. energy.go carries the whole argument; the
+	// reason this is a fold and not `drive.lastEnergy = energy` is that a
+	// two-point subtraction cannot exclude a charging stop that happened inside
+	// an open drive, and cannot report anything at all for a drive whose
+	// opening frame carried no energy — which was 453 of the last 460
+	// production drives.
+	//
+	// ⚠ THE LATCHED STATE, NOT THIS FRAME'S. The frame that carries an energy
+	// sample usually carries no charge state at all (30s against an on-change
+	// field with a 120s resend), so reading it off the frame silenced the
+	// authoritative half of the discriminator on ~3 samples in 4 and left AC
+	// charging inside an open drive to be credited as regen. See the
+	// lastChargeState comment in state.go.
 	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
-		drive.lastEnergy = energy
+		drive.energy.observe(energy, te.CreatedAt, state.latchedChargeState())
 	}
 
 	return moved
@@ -170,11 +185,6 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startChargeSet = true
 	}
 
-	var startEnergy float64
-	if energy, ok := extractFloatField(te.Fields, telemetry.FieldEnergyRemaining); ok {
-		startEnergy = energy
-	}
-
 	// Seed the FSD + odometer baselines from the most recent values seen for
 	// this vehicle (cached in handleTelemetry, including while idle). Both
 	// are cumulative counters that don't advance while parked, so the last
@@ -195,14 +205,31 @@ func (d *Detector) startDrive(state *vehicleState, vin string, te events.Vehicle
 		startOdometer:       state.lastOdometer,
 		lastOdometer:        state.lastOdometer,
 		odometerBaselineSet: state.odometerKnown,
-		startEnergy:         startEnergy,
 		startFSDMiles:       state.lastFSDMiles,
 		lastFSDMiles:        state.lastFSDMiles,
 		fsdBaselineSet:      state.fsdMilesKnown,
 		lastLocation:        startLoc,
 		lastTimestamp:       te.CreatedAt,
 		lastSOC:             startCharge,
-		lastEnergy:          startEnergy,
+	}
+
+	// Seed the energy baseline the same way, and for the same reason (MYR-629):
+	// EnergyRemaining streams at 30s against gear's 1s, so the opening frame
+	// almost never carries it and the cached idle reading is the correct
+	// drive-start pack level. If nothing has ever been cached the accumulator
+	// stays cold and seeds itself from the first in-drive sample, exactly as the
+	// FSD/odometer/SOC baselines do — the drive then reports what it burned
+	// after that sample rather than nothing at all.
+	//
+	// ONE SEED, NOT TWO. There is no "a fresh reading on the triggering frame
+	// wins" branch here, unlike the SOC seed above, because there is nothing for
+	// it to win over: handleTelemetry caches this frame's energy into
+	// state.lastEnergy BEFORE dispatching to handleIdle, under the SAME
+	// state.mu, and both sites reject a non-positive value. The cache is already
+	// this frame's reading whenever the frame carried one, so a second seed from
+	// te.Fields could only ever write the value just written (review finding 8).
+	if state.energyKnown {
+		drive.energy.seed(state.lastEnergy, te.CreatedAt)
 	}
 
 	state.status = StatusDriving

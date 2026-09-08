@@ -14,7 +14,6 @@ import (
 
 	"github.com/myrobotaxi/telemetry/internal/config"
 	"github.com/myrobotaxi/telemetry/internal/events"
-	"github.com/myrobotaxi/telemetry/internal/telemetry"
 )
 
 // minWatchdogInterval is the floor for the periodic watchdog tick. Even
@@ -277,44 +276,10 @@ func (d *Detector) handleTelemetry(te events.VehicleTelemetryEvent) {
 	// frame to start the debounce).
 	state.lastTelemetryAt = d.now()
 
-	// Extract gear from the telemetry fields (may be absent).
-	gear := extractStringField(te.Fields, telemetry.FieldGear)
-	if gear != "" {
-		state.lastGear = gear
-	}
-
-	// Cache location if present for use when drives start without GPS.
-	if loc := extractLocation(te.Fields); loc != nil {
-		state.lastLocation = loc
-	}
-
-	// Cache FSD miles whenever present (including while idle) so startDrive
-	// can seed the drive baseline from the most recent value — the
-	// gear-change event that starts a drive almost never carries FSD miles
-	// because it streams on a much slower cadence than gear.
-	if fsd, ok := extractFloatField(te.Fields, telemetry.FieldFSDMiles); ok {
-		state.lastFSDMiles = fsd
-		state.fsdMilesKnown = true
-	}
-
-	// Cache odometer the same way (MYR-157) so startDrive can seed an
-	// accurate distance baseline — odometer streams on the same slow
-	// cadence as FSD and is usually absent from the gear-change frame.
-	if odo, ok := extractFloatField(te.Fields, telemetry.FieldOdometer); ok {
-		state.lastOdometer = odo
-		state.odometerKnown = true
-	}
-
-	// Cache SOC the same way (MYR-207) so startDrive can seed
-	// startChargeLevel from the last-known charge — the gear-change frame
-	// that starts a drive frequently lacks the charge atomic group, which
-	// otherwise persisted startChargeLevel=0. Only cache non-zero values:
-	// a literal 0 is exactly the zero-value default we are guarding
-	// against, never a plausible parked charge.
-	if soc, ok := extractFloatField(te.Fields, telemetry.FieldSOC); ok && soc > 0 {
-		state.lastSOC = soc
-		state.socKnown = true
-	}
+	// Fold every field this frame carries into the per-vehicle caches, so
+	// startDrive can seed a baseline from the last value seen — see
+	// cacheFrameFields in state.go for why each cache exists.
+	state.cacheFrameFields(te)
 
 	switch state.status {
 	case StatusIdle:

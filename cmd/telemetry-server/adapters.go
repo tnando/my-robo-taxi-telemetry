@@ -488,6 +488,15 @@ func (a *openDriveListerAdapter) ListOpen(ctx context.Context) ([]drives.OpenDri
 // "endTime IS NULL OR endTime = ”" ListOpen predicate; the zero
 // stats are the honest representation of "we don't know what
 // happened between start and now".
+//
+// ⚠ SUCH A ROW SLIPS `Trip.totalEnergyKwh`'s VETO (MYR-629 review round).
+// That total is all-or-nothing over the drives that MOVED, and this row has
+// distanceMiles = 0 — the same shape as a drive in progress — so it neither
+// vetoes the window nor contributes to it, and the trip reports an energy
+// figure covering fewer miles than it actually drove. The distance and
+// duration totals have carried the identical hole since MYR-608. The fix
+// belongs here rather than in queryTripDriveTotals (an abandoned leg and a
+// live one are indistinguishable in SQL) and is filed as MYR-631.
 func (a *openDriveListerAdapter) MarkOrphanEnded(ctx context.Context, driveID string) error {
 	endedAt := time.Now().UTC().Format(time.RFC3339)
 	if err := a.repo.Complete(ctx, driveID, store.DriveCompletion{EndTime: endedAt}); err != nil {

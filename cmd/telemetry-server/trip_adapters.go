@@ -98,6 +98,7 @@ func tripData(v store.TripView) telemetry.TripData {
 		DriveCount:           v.DriveCount,
 		TotalDistanceMiles:   v.TotalDistanceMiles,
 		TotalDurationMinutes: v.TotalDurationMinutes,
+		TotalEnergyKwh:       v.TotalEnergyKwh,
 	}
 	// THE SWEEPER'S STAMPS ARE DELIBERATELY NOT CARRIED. `started_notified_at`
 	// and `ended_notified_at` record what was NOTIFIED, never what is TRUE, and
