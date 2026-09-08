@@ -20,10 +20,13 @@ import (
 // an explicit check rather than straight into the interface field, because a
 // nil *FleetConfigReconciler in an interface is a NON-nil interface holding a
 // nil pointer and would sail past `h.pairing == nil` into a nil-receiver send.
+// access carries the MYR-601 access-set seam (bust + widen + the transfer's
+// narrow). Every field of it may be nil — see ownerStreamAccess.
 func buildOwnerStreamHook(
 	cfg *config.Config,
 	upsert vehicleUpserter,
 	reconciler *telemetry.FleetConfigReconciler,
+	access ownerStreamAccess,
 	logger *slog.Logger,
 ) *ownerStreamHook {
 	lister := telemetry.NewFleetAPIClient(telemetry.FleetAPIConfig{
@@ -48,7 +51,7 @@ func buildOwnerStreamHook(
 		logger.Warn("owner-onboarding fleet-config auto-push disabled: proxy/telemetry endpoint not configured")
 	}
 
-	hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, logger: logger}
+	hook := &ownerStreamHook{lister: lister, upsert: upsert, pusher: pusher, access: access, logger: logger}
 	if reconciler != nil {
 		hook.pairing = reconciler
 	}
@@ -106,7 +109,12 @@ type ownerStreamHook struct {
 	// pairing receives proof of virtual-key pairing when the link-time push
 	// APPLIES (MYR-529). Nil => nobody to tell (no reconciler wired).
 	pairing pairingEvidenceNotifier
-	logger  *slog.Logger
+	// access is the MYR-601 access-set seam: provisioning a car is an
+	// access-set WIDENING, and until this existed the link path was the one
+	// widening producer that announced nothing. See
+	// owner_stream_hook_access.go. Zero value = announce nothing.
+	access ownerStreamAccess
+	logger *slog.Logger
 }
 
 // pairingEvidenceNotifier is the reconciler's inbox for "this VIN's virtual key
@@ -281,6 +289,14 @@ func (h *ownerStreamHook) provisionVehicle(ctx context.Context, userID, accessTo
 			slog.String("vin", redactVIN(vin)),
 			slog.String("access_type", v.AccessType))
 	}
+
+	// MYR-601: THE CAR IS ON THE ROW, SO THE ACCESS SET HAS ALREADY CHANGED.
+	// Announced here rather than at either exit below, because both of them
+	// provisioned a car: an unacknowledged driver-access vehicle is in its
+	// linker's access set exactly like an owner's — the consent gate holds the
+	// Tesla-side PUSH, not the row, and §7.0 lists the car either way. Placed
+	// before the fork so no future branch can return past it.
+	h.announceProvisioned(userID, res)
 
 	// MYR-599: the fork. Taken BEFORE the `owner_vehicle_owned` line below,
 	// because that line's whole meaning is "this account owns this car" and

@@ -161,7 +161,14 @@ func (p *OwnerProvisioner) resolveCrossUserConflict(
 	if err := p.transferDriverProvisionedVehicle(ctx, tx, in, name, vehicleID, previousUserID); err != nil {
 		return VehicleUpsertResult{}, err
 	}
-	return VehicleUpsertResult{Outcome: VehicleOwnedByTransfer, VehicleID: vehicleID}, nil
+	// PreviousUserID travels back with the outcome (MYR-601): the caller has to
+	// bust that account's cached access set and end their live sockets, and
+	// this is the only place the id is known.
+	return VehicleUpsertResult{
+		Outcome:        VehicleOwnedByTransfer,
+		VehicleID:      vehicleID,
+		PreviousUserID: previousUserID,
+	}, nil
 }
 
 // transferDriverProvisionedVehicle hands one driver-provisioned car to its

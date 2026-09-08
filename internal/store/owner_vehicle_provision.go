@@ -103,6 +103,21 @@ type VehicleUpsertResult struct {
 	// alternative reading (a real access downgrade, which MYR-599 explicitly
 	// does not handle) would matter if it ever became common.
 	AccessDowngradeObserved bool
+	// PreviousUserID is the account the car was taken FROM on the
+	// VehicleOwnedByTransfer path, and empty on every other outcome (MYR-601).
+	//
+	// IT IS HERE BECAUSE A TRANSFER IS TWO ACCESS-SET CHANGES, NOT ONE. The
+	// arriving owner GAINS the car and the former driver LOSES it, in the same
+	// statement — and until MYR-601 the caller could only see the first half.
+	// The former driver's cached access set stayed warm for the TTL and their
+	// already-open WebSocket kept the car's live GPS flowing to somebody the
+	// row no longer says anything about, which is the narrowing direction and
+	// therefore a security property rather than a convenience.
+	//
+	// The audit row inside the transaction names the same account, so this is
+	// not a new fact — it is the one fact the transaction already recorded,
+	// handed to the caller that has to act on it.
+	PreviousUserID string
 }
 
 // queryUpsertOwnedVehicle inserts the minimal identity columns for a newly
