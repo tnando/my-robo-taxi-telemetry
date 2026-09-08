@@ -45,7 +45,7 @@ func (r *TripRepo) TripDriveWindows(ctx context.Context, userID, vehicleID strin
 	out := make([]TripDrivesWindow, 0, 2)
 	for rows.Next() {
 		w := TripDrivesWindow{VehicleID: vehicleID}
-		if err := rows.Scan(&w.From, &w.To); err != nil {
+		if err := rows.Scan(&w.From, &w.To, &w.TripID); err != nil {
 			r.metrics.IncQueryError(op)
 			return nil, fmt.Errorf("TripRepo.TripDriveWindows(vehicle=%s): scan: %w", vehicleID, err)
 		}
@@ -109,10 +109,10 @@ func (r *TripRepo) TripDrivesForUser(
 	probe := limit + 1
 	rows, err := func() (pgx.Rows, error) {
 		if cursor.StartTime == "" || cursor.ID == "" {
-			return r.pool.Query(ctx, queryTripDrivesWindow, w.VehicleID, w.From, w.To, probe)
+			return r.pool.Query(ctx, queryTripDrivesWindow, w.VehicleID, w.From, w.To, w.TripID, probe)
 		}
 		return r.pool.Query(ctx, queryTripDrivesWindowCursor,
-			w.VehicleID, w.From, w.To, cursor.StartTime, cursor.ID, probe)
+			w.VehicleID, w.From, w.To, w.TripID, cursor.StartTime, cursor.ID, probe)
 	}()
 	if err != nil {
 		r.metrics.IncQueryError(op)
@@ -168,20 +168,26 @@ func (r *TripRepo) VehicleDrivesInTripWindows(
 	if err != nil {
 		return DriveListPage{}, err
 	}
+	// THREE PARALLEL ARRAYS, built in ONE loop, so an index cannot address a
+	// bound from one window and an id from another. The statement unnests them
+	// into a single derived table and reads both the gate and the decoration
+	// out of it.
 	froms := make([]time.Time, 0, len(windows))
 	tos := make([]time.Time, 0, len(windows))
+	tripIDs := make([]string, 0, len(windows))
 	for _, w := range windows {
 		froms = append(froms, w.From)
 		tos = append(tos, w.To)
+		tripIDs = append(tripIDs, w.TripID)
 	}
 
 	probe := limit + 1
 	var rows pgx.Rows
 	if cursor.StartTime == "" || cursor.ID == "" {
-		rows, err = r.pool.Query(ctx, queryVehicleDrivesInTripWindows, vehicleID, froms, tos, probe)
+		rows, err = r.pool.Query(ctx, queryVehicleDrivesInTripWindows, vehicleID, froms, tos, tripIDs, probe)
 	} else {
 		rows, err = r.pool.Query(ctx, queryVehicleDrivesInTripWindowsCursor,
-			vehicleID, froms, tos, cursor.StartTime, cursor.ID, probe)
+			vehicleID, froms, tos, tripIDs, cursor.StartTime, cursor.ID, probe)
 	}
 	if err != nil {
 		r.metrics.IncQueryError(op)

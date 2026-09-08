@@ -23,11 +23,16 @@ type stubDriveLister struct {
 	err     error
 	lastCur DriveListCursor
 	lastLim int
+	// lastViewer records the caller the handler passed down (MYR-608). The
+	// owner list resolves `tripId` against THIS user's windows, so a handler
+	// that stopped forwarding it would silently blank the field for everybody.
+	lastViewer string
 }
 
-func (s *stubDriveLister) ListByVehicleID(_ context.Context, _ string, cursor DriveListCursor, limit int) (DriveListPage, error) {
+func (s *stubDriveLister) ListByVehicleID(_ context.Context, _, viewerUserID string, cursor DriveListCursor, limit int) (DriveListPage, error) {
 	s.lastCur = cursor
 	s.lastLim = limit
+	s.lastViewer = viewerUserID
 	return s.page, s.err
 }
 

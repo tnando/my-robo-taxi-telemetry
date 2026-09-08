@@ -48,6 +48,16 @@ type DriveListItem struct {
 	FsdMiles         float64 // P0 — FSD distance this drive (miles)
 	FsdPercentage    float64 // P0 — FSD share of distance (percent)
 	CreatedAt        time.Time
+
+	// TripID is the trip whose window covers this drive's start instant, for
+	// THIS caller, or nil (MYR-608). Resolved in the store, per statement, so
+	// the value is already role-scoped by the time it reaches this layer — an
+	// owner is told about their own windows, a participant only about the
+	// windows that admitted them, and §7.30.7 stamps the trip in its own path.
+	//
+	// The handler must not re-derive it. The client used to, from `startedAt`
+	// and the trip window, which is the duplication this field deletes.
+	TripID *string
 }
 
 // DriveListPage is the result of a single paginated drive read. The
@@ -62,8 +72,13 @@ type DriveListPage struct {
 // (startTime DESC, id DESC) per rest-api.md §4.2.2. The cursor encodes
 // the (startTime, id) of the last item from the prior page; pass the
 // zero-value DriveListCursor on the first call.
+//
+// `viewerUserID` DECIDES `DriveListItem.TripID` AND NOTHING ELSE (MYR-608). It
+// is not an access parameter — the handler's gate runs before this call and
+// admits only the vehicle's owner — but the trip ids it stamps ARE role-scoped,
+// so an implementation must never widen them past the caller's own windows.
 type DriveLister interface {
-	ListByVehicleID(ctx context.Context, vehicleID string, cursor DriveListCursor, limit int) (DriveListPage, error)
+	ListByVehicleID(ctx context.Context, vehicleID, viewerUserID string, cursor DriveListCursor, limit int) (DriveListPage, error)
 }
 
 // DriveListCursor is the decoded cursor pair the store uses to anchor
@@ -142,6 +157,20 @@ type driveSummary struct {
 	FsdMiles         float64 `json:"fsdMiles"`
 	FsdPercentage    float64 `json:"fsdPercentage"`
 	CreatedAt        string  `json:"createdAt"`
+
+	// TripID is emitted as `tripId` and is ALWAYS PRESENT, null when the drive
+	// falls in no window this caller may see (MYR-608).
+	//
+	// ⚠ DELIBERATELY NOT THE OMIT-WHEN-EMPTY CONVENTION the four location
+	// labels on this same shape follow. Those are absent because the server has
+	// nothing to say yet — the geocode may still arrive. This one is a
+	// DECIDED answer: the server evaluated the caller's windows and the answer
+	// was "none". A missing key would make a client that never received it
+	// indistinguishable from one whose server has not been deployed yet, and
+	// grouping drives under trips is exactly the feature that must not
+	// silently fall back to ungrouped. Same always-present-nullable shape, and
+	// the same reasoning, as Trip.endedAt and TripParticipant.addedByName.
+	TripID *string `json:"tripId"`
 }
 
 // toMaskMap returns the summary as a wire-name-keyed map suitable for
@@ -169,6 +198,11 @@ func (d driveSummary) toMaskMap() map[string]any {
 		"fsdMiles":         d.FsdMiles,
 		"fsdPercentage":    d.FsdPercentage,
 		"createdAt":        d.CreatedAt,
+		// derefOrNil, not the pointer: an unset trip id must marshal from an
+		// UNTYPED nil rather than a typed (*string)(nil), which encodes to
+		// `null` but is not `== nil` to a test. Same helper, same reason, as
+		// every other nullable on this platform.
+		"tripId": derefOrNil(d.TripID),
 	}
 	if d.StartLocation != "" {
 		m["startLocation"] = d.StartLocation
@@ -218,5 +252,6 @@ func buildDriveSummary(row *DriveListItem) driveSummary {
 		FsdMiles:         row.FsdMiles,
 		FsdPercentage:    row.FsdPercentage,
 		CreatedAt:        row.CreatedAt.UTC().Format(time.RFC3339),
+		TripID:           row.TripID,
 	}
 }

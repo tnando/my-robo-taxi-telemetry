@@ -296,13 +296,140 @@ JOIN go_trips t ON t.vehicle_id = v."id"
 LEFT JOIN go_vehicle_control_state gcs ON gcs.vehicle_id = v."id"
 WHERE t.id = $1`
 
-// queryTripDriveCount counts the window's drives. See queryTripDrivesWindow for
-// why the TEXT column is cast.
-const queryTripDriveCount = `
-SELECT COUNT(*) FROM "Drive"
+// queryTripDriveTotals is the ONE STATEMENT behind `driveCount`,
+// `totalDistanceMiles` and `totalDurationSeconds` (MYR-608). See
+// queryTripDrivesWindow for why the TEXT column is cast.
+//
+// THE THREE NUMBERS COME BACK TOGETHER, and that is the whole N+1 argument.
+// §7.30.2 decorates every row it returns, so a separate SUM query would have
+// added one round trip PER TRIP to a list that already issues five. Widening
+// the count that was already there adds none: the totals ride the scan the
+// count was paying for.
+//
+// SUM OVER ZERO ROWS IS NULL, and the nulls are carried to the wire rather
+// than coalesced to zero. `null` means "this window holds no drives"; `0`
+// means "it holds drives that summed to nothing" — a legitimate reading for a
+// window of stationary or discarded micro-drives — and collapsing the two
+// would tell a client a trip covered zero miles when the truth is that it has
+// nothing to report yet.
+//
+// RUNNING TOTALS, NOT FINAL ONES. They are computed at read time like
+// everything else about a window-scoped feature, so an ACTIVE trip reports
+// what it has driven SO FAR and the number climbs between reads. Withholding
+// them until the window closed would leave the surface that most wants a
+// total — a road trip in progress — the one surface that cannot have one.
+const queryTripDriveTotals = `
+SELECT COUNT(*), SUM("distanceMiles"), SUM("durationMinutes") FROM "Drive"
 WHERE "vehicleId" = $1
   AND "startTime"::timestamptz >= $2
   AND "startTime"::timestamptz <= $3`
+
+// ── THE THREE tripId EXPRESSIONS (MYR-608) ──────────────────────────────────
+//
+// `DriveSummary.tripId` answers, for one drive row, "which trip's window does
+// this drive belong to, as far as THIS caller is concerned". It is a JOIN
+// evaluated at read time, never a column: nothing tags a drive at write time,
+// which is what lets a back-dated window sweep up legs already driven.
+//
+// THEY ARE THREE BECAUSE THE ROLE IS THREE DIFFERENT QUESTIONS, and collapsing
+// them into one would be the access bug this file's invariant 3 exists to
+// prevent. An OWNER's answer ranges over the windows they own. A PARTICIPANT's
+// ranges over the windows that admitted them — the live-share join included —
+// and never over the owner's other trips. §7.30.7's answer is the trip in the
+// PATH, which the caller has already been authorized on.
+//
+// WHAT THEY SHARE IS THE WINDOW PREDICATE, and it is factored so the sharing
+// is literal rather than by inspection: `tripEffectiveEndExpr` is the ONE
+// spelling of `min(endsAt, endedAt)` in this file, and every bound below is
+// INCLUSIVE at both ends — the same bound §7.30.7, the drive count and the
+// §7.2/§7.3/§7.4 admission use, so all five agree about which drives are in a
+// window.
+
+// tripEffectiveEndExpr is `min(endsAt, endedAt)` over an aliased `go_trips t`.
+//
+// ONE SPELLING, referenced by every statement that needs it, because this
+// expression is the trips model's second load-bearing rule (invariant 2 is the
+// first) and a second copy is how a surface starts disagreeing with the
+// predicate that decides access. COALESCE first so a trip that was never ended
+// early yields its scheduled end rather than NULL.
+const tripEffectiveEndExpr = `LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))`
+
+// tripCoversDriveExpr is the drive-membership test: does the drive row aliased
+// `d` begin inside trip `t`'s window?
+//
+// THE CAST IS NOT OPTIONAL — see queryTripDrivesWindow. `Drive."startTime"` is
+// a Prisma-owned TEXT column, and comparing it as text would make this
+// expression agree with the list it decorates only while every row carries the
+// same offset spelling.
+const tripCoversDriveExpr = `t.starts_at <= d."startTime"::timestamptz
+		  AND d."startTime"::timestamptz <= ` + tripEffectiveEndExpr
+
+// ownerTripIDForDriveExpr resolves the tripId on the OWNER's §7.2 list.
+//
+// ⚠ THE CALLER IS HARD-CODED AT $2, and both `queryDriveListByVehicle` and
+// `queryDriveListByVehicleCursor` bind them there. A function taking a
+// placeholder name would have made those two statements assembled strings, and
+// this file's whole posture is that a predicate near an access decision is a
+// `const` a reader can check — so the placeholder is fixed and the two call
+// sites are the thing that must agree, which the compiler-free part of that is
+// pinned by TestDriveListCarriesTheOwnersTripID.
+//
+// SCOPED TO `owner_user_id = $2` RATHER THAN TO THE VEHICLE. A car can change
+// hands, and a drive that fell in the PREVIOUS owner's window is not this
+// caller's trip; naming it would disclose that a stranger's trip existed and
+// hand its id to somebody who cannot read it. §7.2 is owner-only, so this is
+// the only role that reaches this statement.
+//
+// NEWEST WINS on an overlap. Two LIVE windows on one car are refused by the
+// create probe, but two ENDED ones may overlap freely (the probe only guards
+// windows that have not closed), so a drive can sit in two of them. One row
+// carries one id, so the tie is broken deterministically — latest `starts_at`,
+// then the id — rather than left to the planner.
+const ownerTripIDForDriveExpr = `
+	(SELECT t.id FROM go_trips t
+	 WHERE t.vehicle_id = d."vehicleId"
+	   AND t.owner_user_id = $2
+	   AND ` + tripCoversDriveExpr + `
+	 ORDER BY t.starts_at DESC, t.id DESC
+	 LIMIT 1) AS trip_id`
+
+// participantTripIDForDriveExpr resolves the tripId on the PARTICIPANT's §7.2
+// list — the narrowed form in queryVehicleDrivesInTripWindows below.
+//
+// ⚠ IT RE-USES THE VERY WINDOWS THAT ADMITTED THE ROW rather than re-deriving
+// them from the caller. The enclosing statement already unnests the window set
+// into `w(win_from, win_to, trip_id)` and gates every row on it; this reads the
+// trip id out of the SAME derived table. That is not an optimisation, it is the
+// property: the id a participant is told cannot name a trip whose window did
+// not admit the drive, because there is only one window set in the statement.
+//
+// The third array is the reason `TripDrivesWindow` carries a `TripID`.
+const participantTripIDForDriveExpr = `
+	(SELECT w.trip_id
+	 FROM unnest($2::timestamptz[], $3::timestamptz[], $4::text[]) AS w(win_from, win_to, trip_id)
+	 WHERE d."startTime"::timestamptz >= w.win_from
+	   AND d."startTime"::timestamptz <= w.win_to
+	 ORDER BY w.win_from DESC, w.trip_id DESC
+	 LIMIT 1) AS trip_id`
+
+// pathTripIDForDriveExpr is §7.30.7's answer: THE TRIP IN THE URL, bound as a
+// parameter rather than resolved.
+//
+// ⚠ A DELIBERATE DIVERGENCE FROM THE TWO EXPRESSIONS ABOVE, and the one place
+// on the platform where two surfaces may report a different `tripId` for the
+// same drive. It happens only where two ENDED windows overlap, and the reason
+// is that the two surfaces are answering different questions. §7.2 asks "which
+// trip does this drive belong to" over a whole history and has to pick one;
+// this endpoint asks "what are THIS trip's drives", every row it returns is
+// inside this trip's window BY THE STATEMENT'S OWN PREDICATE, and a row that
+// came back naming a different overlapping trip would make the page disagree
+// with the route that produced it — a client grouping by `tripId` would draw a
+// section for a trip it did not ask about.
+//
+// The stamp can never be a lie: the caller was authorized on this trip before
+// the statement ran, and the window bound is the same one the WHERE clause
+// applies.
+const pathTripIDForDriveExpr = `$4::text AS trip_id`
 
 // queryTripOpenLeg reads the leg underway, if any, together with the vehicle's
 // CURRENT eta so the card's "arrives in N min" is read at REST-read time rather
@@ -373,8 +500,15 @@ DELETE FROM go_trip_activity_tokens WHERE trip_id = $1 AND user_id = $2`
 // drives with everything else.
 //
 // #nosec G101 -- an SQL statement naming a token COLUMN, not a credential.
+//
+// IT RETURNS THE TRIP ID as well (MYR-608). The id is not an access fact — the
+// three predicates below are — but the window and the trip it came from must
+// travel together: `participantTripIDForDriveExpr` reads the id out of the very
+// window set that admitted a row, and a window carried without its id would
+// have forced a second resolution, which is a second chance to answer with a
+// trip that did not admit the drive.
 const queryTripWindowsForUserVehicle = `
-SELECT t.starts_at, LEAST(t.ends_at, COALESCE(t.ended_at, t.ends_at))
+SELECT t.starts_at, ` + tripEffectiveEndExpr + `, t.id
 FROM go_trip_participants p
 JOIN go_trips t ON t.id = p.trip_id
 JOIN go_vehicle_shares s
@@ -400,24 +534,27 @@ WHERE p.user_id = $1 AND t.vehicle_id = $2 AND p.left_at IS NULL
 // The upper bound is INCLUSIVE where the access predicate's is exclusive: a
 // drive that began exactly at the closing instant is a drive of this trip, and
 // excluding it would lose it from the only list it belongs to.
-const queryTripDrivesWindow = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+//
+// $4 IS THE TRIP ID, stamped onto every row — see pathTripIDForDriveExpr for
+// why this surface stamps rather than resolves.
+const queryTripDrivesWindow = `SELECT ` + driveSummarySelectColumns + `, ` + pathTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
   AND "startTime"::timestamptz >= $2
   AND "startTime"::timestamptz <= $3
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $4`
+LIMIT $5`
 
 // queryTripDrivesWindowCursor is the resume page. The cursor comparison stays
 // TEXT, byte-identical to §7.2's, so the two lists page the same way.
-const queryTripDrivesWindowCursor = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+const queryTripDrivesWindowCursor = `SELECT ` + driveSummarySelectColumns + `, ` + pathTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
   AND "startTime"::timestamptz >= $2
   AND "startTime"::timestamptz <= $3
-  AND ("startTime", "id") < ($4, $5)
+  AND ("startTime", "id") < ($5, $6)
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $6`
+LIMIT $7`
 
 // queryVehicleDrivesInTripWindows is the §7.2 list AS SEEN BY A TRIP
 // PARTICIPANT: the vehicle's drives, narrowed to the union of the windows that
@@ -437,7 +574,12 @@ LIMIT $6`
 // survives a refactor of the layer above.
 //
 // The cast on "startTime" is there for the reason queryTripDrivesWindow states.
-const queryVehicleDrivesInTripWindows = `SELECT ` + driveSummarySelectColumns + `
+//
+// A THIRD PARALLEL ARRAY carries the trip ids (MYR-608), so the projection can
+// name the window that admitted each row without a second resolution — see
+// participantTripIDForDriveExpr. The EXISTS still gates on the from/to pair
+// alone: the id decorates, it never admits.
+const queryVehicleDrivesInTripWindows = `SELECT ` + driveSummarySelectColumns + `, ` + participantTripIDForDriveExpr + `
 FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND EXISTS (
@@ -446,12 +588,12 @@ WHERE d."vehicleId" = $1
 	  AND d."startTime"::timestamptz <= w.win_to
   )
 ORDER BY d."startTime" DESC, d."id" DESC
-LIMIT $4`
+LIMIT $5`
 
 // queryVehicleDrivesInTripWindowsCursor is the resume page. Cursor comparison
 // stays TEXT, byte-identical to §7.2's own, so the owner's list and the
 // participant's narrowed list page the same way.
-const queryVehicleDrivesInTripWindowsCursor = `SELECT ` + driveSummarySelectColumns + `
+const queryVehicleDrivesInTripWindowsCursor = `SELECT ` + driveSummarySelectColumns + `, ` + participantTripIDForDriveExpr + `
 FROM "Drive" d
 WHERE d."vehicleId" = $1
   AND EXISTS (
@@ -459,9 +601,9 @@ WHERE d."vehicleId" = $1
 	WHERE d."startTime"::timestamptz >= w.win_from
 	  AND d."startTime"::timestamptz <= w.win_to
   )
-  AND (d."startTime", d."id") < ($4, $5)
+  AND (d."startTime", d."id") < ($5, $6)
 ORDER BY d."startTime" DESC, d."id" DESC
-LIMIT $6`
+LIMIT $7`
 
 // queryActiveTripIDsForUser answers "which of the cars in this caller's catalog
 // — however they got there — have a window open right now?".

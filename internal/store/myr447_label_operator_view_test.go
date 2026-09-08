@@ -499,7 +499,7 @@ func assertLabelsRecoverable(
 	// GET /api/vehicles/{id}/drives — the drives feed. Its lean
 	// projection is a separate SELECT and a separate scan, so it can
 	// regress independently of the detail read.
-	page, err := drives.ListByVehicleID(ctx, f.vehicleID, store.DriveListCursor{}, 10)
+	page, err := drives.ListByVehicleID(ctx, f.vehicleID, "", store.DriveListCursor{}, 10)
 	if err != nil {
 		t.Fatalf("%s: ListByVehicleID: %v", when, err)
 	}

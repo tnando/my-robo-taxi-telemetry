@@ -358,7 +358,7 @@ func TestPrunedDriveReadsDegradeGracefully(t *testing.T) {
 	})
 
 	t.Run("in-window drive still lists", func(t *testing.T) {
-		page, err := repo.ListByVehicleID(ctx, vehicleID, store.DriveListCursor{}, 10)
+		page, err := repo.ListByVehicleID(ctx, vehicleID, "", store.DriveListCursor{}, 10)
 		if err != nil {
 			t.Fatalf("ListByVehicleID: %v", err)
 		}

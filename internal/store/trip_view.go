@@ -40,6 +40,25 @@ type TripView struct {
 	// exists, with nothing to backfill.
 	DriveCount int
 
+	// TotalDistanceMiles and TotalDurationMinutes are the window's drives
+	// SUMMED (MYR-608) — the same window, the same read, the same statement as
+	// DriveCount, so the three numbers on a trip card cannot describe three
+	// different sets of drives.
+	//
+	// NIL MEANS THE WINDOW HOLDS NO DRIVES, which is what `SUM` over zero rows
+	// returns and is deliberately not coalesced to zero: `0` is a real total
+	// for a window whose drives went nowhere, and a client that could not tell
+	// the two apart would print "0 miles" for a trip that simply has not
+	// started yet.
+	//
+	// RUNNING, NOT FINAL. An active trip reports what it has driven so far and
+	// the numbers climb between reads — the client decides how to render that.
+	// MINUTES here, seconds on the wire, converted at the same boundary
+	// `DriveSummary.durationSeconds` is converted at, because the Prisma column
+	// is minutes and the contract is seconds.
+	TotalDistanceMiles   *float64
+	TotalDurationMinutes *int64
+
 	// CurrentLeg is the driving leg underway, or nil. INFORMATIONAL, NEVER A
 	// GATE — access is purely the window, so an active trip with no leg is the
 	// ordinary overnight state and not a degraded one.

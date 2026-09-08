@@ -463,6 +463,15 @@ WHERE d."endTime" IS NULL OR d."endTime" = ''`
 //
 // Cost is a wash: ciphertext is base64 and runs ~40 bytes longer than the
 // address it replaces, which keeps the page well inside the ~5 KB budget.
+//
+// MYR-608 ADDED NO COLUMN HERE, and that is the design rather than an
+// economy. `tripId` is a WINDOW JOIN, not a stored fact: a drive is never
+// tagged with a trip at write time — which is exactly what lets a
+// back-dated window pick up legs already driven, with nothing to backfill —
+// so each statement using this projection appends its OWN trip-id
+// expression after it. The three spellings live in trip_queries.go beside
+// the window predicate they restate; `ownerTripIDForDriveExpr` there argues
+// why they are three and not one.
 const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endTime",
 	"startLocationEnc", "startAddressEnc", "endLocationEnc", "endAddressEnc",
 	"distanceMiles", "durationMinutes", "avgSpeedMph", "maxSpeedMph",
@@ -472,25 +481,39 @@ const driveSummarySelectColumns = `"id", "vehicleId", "date", "startTime", "endT
 // newest `limit + 1` drives for the given vehicle, ordered per
 // rest-api.md §4.2.2. The +1 is the "is there more?" probe the
 // handler trims back to `limit` before encoding.
-const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+//
+// ⚠ $2 IS THE CALLER (MYR-608), in this statement and in the cursor form
+// below alike. `ownerTripIDForDriveExpr` hard-codes that placeholder so both
+// statements can stay `const` — see its own comment for why that matters
+// more than the parameter order does. §7.2's gate is owner-only, so the
+// caller bound at $2 is the vehicle's owner and the expression answers
+// "which of YOUR windows covers this drive".
+//
+// ⚠ THE `d` ALIAS IS LOAD-BEARING: the trip-id expression correlates on
+// `d."startTime"`, and it has to name something the sub-select's own FROM
+// clause does not shadow.
+const queryDriveListByVehicle = `SELECT ` + driveSummarySelectColumns + `,` + ownerTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $2`
+LIMIT $3`
 
 // queryDriveListByVehicleCursor is the resume path: returns the next
 // `limit + 1` drives whose (startTime, id) sorts strictly below the
 // cursor anchor. The (startTime, id) tuple comparison is the
 // PostgreSQL row-compare operator — it expands to the same
-// `startTime < $2 OR (startTime = $2 AND id < $3)` predicate but is
+// `startTime < $3 OR (startTime = $3 AND id < $4)` predicate but is
 // more index-friendly when a composite (startTime DESC, id DESC)
 // index exists.
-const queryDriveListByVehicleCursor = `SELECT ` + driveSummarySelectColumns + `
-FROM "Drive"
+//
+// The anchor pair moved from ($2, $3) to ($3, $4) when MYR-608 put the
+// CALLER at $2 — see the first-page statement above.
+const queryDriveListByVehicleCursor = `SELECT ` + driveSummarySelectColumns + `,` + ownerTripIDForDriveExpr + `
+FROM "Drive" d
 WHERE "vehicleId" = $1
-  AND ("startTime", "id") < ($2, $3)
+  AND ("startTime", "id") < ($3, $4)
 ORDER BY "startTime" DESC, "id" DESC
-LIMIT $4`
+LIMIT $5`
 
 // queryDriveMissingAddresses is the MYR-240 backfill read path: every
 // Drive row still missing a start address, or missing an end address on

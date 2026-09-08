@@ -206,6 +206,13 @@ type TripDrivesWindow struct {
 	VehicleID string
 	From      time.Time
 	To        time.Time
+
+	// TripID is the window's own trip (MYR-608). It is carried WITH the bounds
+	// rather than resolved beside them so `DriveSummary.tripId` can be read out
+	// of the very window set that admitted a row — a window without its id
+	// would force a second resolution, and a second resolution is a second
+	// chance to name a trip that admitted nothing.
+	TripID string
 }
 
 // Window returns the drive-selection window for a trip: drives whose startedAt
@@ -222,6 +229,7 @@ func (t Trip) Window() TripDrivesWindow {
 		VehicleID: t.VehicleID,
 		From:      t.StartsAt,
 		To:        t.EffectiveEnd(),
+		TripID:    t.ID,
 	}
 }
 
